@@ -16,10 +16,12 @@ namespace coop::items {
 namespace {
 
 constexpr uint32_t kGoodsGetter = 0x00D1E3A0;   // edi = goods id, push out {id, row}; ret 4
+constexpr uint32_t kCanUse = 0x00EADCA0;        // cdecl(goods, chr, ?, chr type, weapon, ?) -> al
 constexpr uint32_t kPlayerVtable = 0x0118A5D4;  // PlayerIns
 constexpr int kUseGoodsSlot = 128;              // UseGoods(goods id, ?) thiscall, ret 8
 constexpr uint32_t kUseGoodsOrig = 0x00E50C70;
 constexpr uint32_t kAddItem = 0x00D664C0;       // Lua AddInventoryItem(id, category, count), stdcall
+constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, max; 0 = all)
 constexpr uint32_t kGoodsCategory = 0x40000000;
 constexpr int kCount = kLast - kFirst + 1;
 constexpr int kRowSize = 0x5C;  // EQUIP_PARAM_GOODS_ST
@@ -27,102 +29,91 @@ constexpr int kRowSize = 0x5C;  // EQUIP_PARAM_GOODS_ST
 uint8_t g_rows[kCount][kRowSize];
 bool g_rows_ready = false;
 void* g_goods_orig = nullptr;
+void* g_can_use_orig = nullptr;
 uint32_t g_use_orig = 0;
-void (*g_use_fn)(int32_t) = nullptr;
-bool (*g_block_fn)(int32_t) = nullptr;
+int (*g_can_use_fn)(int32_t) = nullptr;
+bool (*g_use_fn)(int32_t) = nullptr;
+const wchar_t* (*g_dialog_fn)() = nullptr;
 
+// Remastered Seamless Co-op's item rows, field for field (its param layout puts enable_pvp at 0x44 bit 5, so
+// the flag bytes are translated to PTDE's layout: isEquip 0x44 bit 6, isOnlyOne 0x45 bit 2,
+// disableMultiDropShare 0x46 bit 3). enable_* and the covenant bits stay 0: the game's item check is answered
+// for these ids by the co-op rules instead (see hk_can_use).
 struct Def {
+    int32_t ref_id;
+    int32_t sfx;
     uint16_t icon;
-    int16_t sort;
     const wchar_t* name;
     const wchar_t* info;
     const wchar_t* caption;
 };
 
-// Icons of existing items (2000 White Sign Soapstone, 2010 Blue Eye Orb, 2002 Red Eye Orb, 2132 Black Eye
-// Orb, 2009 Book of the Guilty, 2129 Dried Finger, 2037 Pendant, 2030 Transient Curse, 2041 Indictment).
 const Def kDefs[kCount] = {
-    {2000, 1, L"Seamless Host Orb", L"Open your world to co-op players",
-     L"A pale orb that shows one's own world from afar.\n\nUse it to open your world to the players who share your\n"
-     L"seamless co-op password. They may join at any time,\nwherever you are."},
-    {2010, 2, L"Seamless Join Orb", L"Travel to a co-op player's world",
-     L"A blue orb that looks into the world of a friend.\n\nUse it to join the world of a player who shares your\n"
-     L"seamless co-op password. You keep your own body, items\nand progress, and return home with them."},
-    {2002, 3, L"Seamless Invasion Orb", L"Invade a seamless co-op world",
-     L"A red orb clouded with spite.\n\nUse it to invade a random seamless co-op world that\n"
-     L"accepts invaders. Defeat its players or be sent home."},
-    {2132, 4, L"Seamless Return Orb", L"Leave the co-op session",
-     L"A black orb that remembers the way home.\n\nA guest returns to their own world; a host closes the\n"
-     L"session and sends everyone home."},
-    {2009, 5, L"Tome of World Rules", L"Host: allow or forbid invaders",
-     L"A bound list of oaths for one's own world.\n\nThe host decides whether evil spirits may invade the\n"
-     L"session. Each use switches between allowing and forbidding."},
-    {2129, 6, L"Withered Finger", L"Host: call invaders to your world",
-     L"A finger dried to the bone.\n\nWhile the session allows invaders, using it marks the\n"
-     L"world so that invaders find it first."},
-    {2037, 7, L"Pendant of Misfortune", L"Host: enemies grow stronger",
-     L"An old pendant that draws calamity.\n\nUntil someone rests at a bonfire, the enemies of the host's\n"
-     L"world fight as if one more player were present."},
-    {2030, 8, L"Crimson Blossom", L"Carried curse: less HP, more souls",
-     L"A red blossom rooted in the darksign.\n\nWhile it is used, maximum HP falls and every soul earned\n"
-     L"grows. It wilts at the next bonfire rest."},
-    {2041, 9, L"Writ of Clemency", L"Restores certain fallen NPCs",
-     L"A writ that pardons the departed.\n\nRestores some NPCs whose fate went wrong while visiting\n"
-     L"other worlds (the same repair seamless co-op applies on joining)."},
+    {-100, 40, 2008, L"Blessed Eye Orb", L"Create a seamless co-operative session",
+     L"A small, pale eye orb, warm in the hand.\n\nUse it to create a seamless co-operative session. Players\n"
+     L"who share your password may then join your world at any\ntime, wherever you are."},
+    {-99, 80, 2010, L"Crystal Eye Orb", L"Join a seamless co-operative session",
+     L"A small blue eye orb of clouded crystal that hums faintly.\n\nUse it to join the world of a player who "
+     L"shares your\npassword. You travel in your own body and keep all\nthat you gain."},
+    {-98, 81, 2002, L"Chaos Eye Orb", L"Invade a seamless co-operative session",
+     L"A small eye orb, red with heat and spite.\n\nUse it to invade, as an evil spirit, a seamless\n"
+     L"co-operative session that welcomes invaders."},
+    {-97, 0, 2132, L"Abyssal Eye Orb", L"Disband a seamless session",
+     L"A small black eye orb whose gaze never wavers.\n\nA guest uses it to return home. A host uses it to\n"
+     L"disband the session."},
+    {-96, 0, 2007, L"Ominous Tome", L"Change the world rules",
+     L"Loose pages of faded writing that describe a rite to\nlay bare one's true nature before one's allies.\n\n"
+     L"The host changes the rules of the world with each use."},
+    {-95, 0, 2129, L"Dried Fingers", L"Taunt invaders into joining",
+     L"Withered fingers.\n\nThe host uses them to taunt invaders into joining."},
+    {-94, 0, 2037, L"Cursed Pendant", L"Cause disasters in one's own world",
+     L"An old pendant, scratched and dull. Some say it was\ntaken from the tomb of the Gravelord.\n\n"
+     L"The host uses it to bring disaster upon their own world."},
+    {0, 0, 2033, L"Crimson Blossom", L"Accrues curse",
+     L"A blood-red flower rooted in the Darksign, feeding\non its bearer.\n\nOne blooms with each death and saps "
+     L"the bearer's\nmaximum HP. They wither at a bonfire."},
+    {-93, 0, 2067, L"Parchment of Deliverance", L"Revives world allies",
+     L"A parchment that calls back certain allies of the\nworld who have fallen.\n\nCosts souls, and returns you "
+     L"to your last bonfire."},
 };
 
+void put32(uint8_t* r, int off, int32_t v) { std::memcpy(r + off, &v, 4); }
+void put16(uint8_t* r, int off, int16_t v) { std::memcpy(r + off, &v, 2); }
+
 void build_rows() {
-    // Template: White Sign Soapstone (goods 100).
-    uint32_t out[2] = {0, 0};
-    void* orig = g_goods_orig;
-    uint32_t* pout = out;
-    __asm {
-        push edi
-        mov edi, 100
-        push pout
-        call orig
-        pop edi
-    }
-    const uint8_t* tpl = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(out[1]));
     for (int i = 0; i < kCount; ++i) {
         uint8_t* r = g_rows[i];
-        if (tpl) {
-            std::memcpy(r, tpl, kRowSize);
-        } else {
-            std::memset(r, 0, kRowSize);
+        const Def& d = kDefs[i];
+        std::memset(r, 0, kRowSize);
+        put32(r, 0x00, d.ref_id);   // refId
+        put32(r, 0x04, d.sfx);      // sfxVariationId
+        put32(r, 0x18, -1);         // replaceItemId
+        put32(r, 0x20, -1);         // qwcId
+        put32(r, 0x28, -1);         // magicId
+        put16(r, 0x2C, static_cast<int16_t>(d.icon));
+        put16(r, 0x2E, -1);         // modelId
+        put16(r, 0x30, -1);         // shopLv
+        put16(r, 0x32, -1);         // compTrophySedId
+        put16(r, 0x34, -1);         // trophySeqId
+        put16(r, 0x36, 1);          // maxNum
+        r[0x39] = 50;               // overDexterity
+        r[0x46] = 0x08;             // disableMultiDropShare
+        if (kFirst + i == kBlossom) {
+            put16(r, 0x36, 5);      // up to five, one per death
+            r[0x3A] = 1;            // goodsType: key item (the game never lets it be used)
+            continue;
         }
-        const int32_t ref = -1;
-        std::memcpy(r + 0x00, &ref, 4);              // refId: no behaviour (use is caught in UseGoods)
-        const int32_t none = -1;
-        std::memcpy(r + 0x04, &none, 4);             // sfxVariationId
-        const float weight = 0.0f;
-        std::memcpy(r + 0x08, &weight, 4);
-        const int32_t zero = 0;
-        std::memcpy(r + 0x0C, &zero, 4);             // basicPrice
-        std::memcpy(r + 0x10, &zero, 4);             // sellValue
-        std::memcpy(r + 0x18, &none, 4);             // replaceItemId
-        const int32_t sort = 900000 + kDefs[i].sort;
-        std::memcpy(r + 0x1C, &sort, 4);             // sortId
-        std::memcpy(r + 0x20, &none, 4);             // qwcId
-        std::memcpy(r + 0x24, &none, 4);             // yesNoDialogMessageId
-        std::memcpy(r + 0x28, &none, 4);             // magicId
-        std::memcpy(r + 0x2C, &kDefs[i].icon, 2);    // iconId
-        const int16_t max_num = 1;
-        std::memcpy(r + 0x36, &max_num, 2);          // maxNum
-        r[0x38] = 0;                                 // consumeHeroPoint
-        r[0x3A] = 0;                                 // goodsType: normal
-        r[0x3B] = 0;                                 // refCategory
-        r[0x3E] = 6;                                 // goodsUseAnim (like the soapstones)
-        r[0x3F] = 0;                                 // no menu
-        // enable_live, enable_gray, enable_white, enable_black, enable_multi, isEquip; not consumed
-        r[0x44] = 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x40;
-        // isAutoEquip, isOnlyOne; cannot be dropped or deposited
-        r[0x45] = 0x01 | 0x04;
-        r[0x46] = 0;
-        std::memset(r + 0x50, 0, 12);                // vagrant item lots
+        r[0x3B] = 2;                // refCategory
+        r[0x3E] = 6;                // goodsUseAnim: the eye orb animation
+        r[0x44] = 0x40;             // isEquip
+        r[0x45] = 0x04;             // isOnlyOne
+        if (kFirst + i == kParchment) {
+            r[0x3F] = 1;            // opmeMenuType: yes/no dialog first
+            put32(r, 0x24, static_cast<int32_t>(kParchmentDialog));
+        }
     }
     g_rows_ready = true;
-    LOG_INFO("[coop] Co-op item rows ready (template %s)", tpl ? "goods 100" : "blank");
+    LOG_INFO("[coop] Co-op item rows ready");
 }
 
 void* __stdcall our_row(int32_t id) {
@@ -161,15 +152,37 @@ const wchar_t* item_text(uint32_t id, text::Fmg kind) {
     }
 }
 
+const wchar_t* dialog_text(uint32_t id) {
+    return (id == kParchmentDialog && g_dialog_fn) ? g_dialog_fn() : nullptr;
+}
+
+// ---------------------------------------------------------------- can it be used?
+// The game asks this before an item can be selected and used (quick slot, menu). Remastered Seamless Co-op
+// answers it for its own items and a few vanilla ones by the session state; the rest is the game's rule.
+using CanUseFn = char(__cdecl*)(int32_t, uint32_t, uint32_t, int, int, char);
+
+char __cdecl hk_can_use(int32_t goods, uint32_t chr, uint32_t p3, int type, int weapon, char flag) {
+    const auto orig = reinterpret_cast<CanUseFn>(g_can_use_orig);
+    const uint32_t me = game::player();
+    if (g_can_use_fn && (chr == 0 || chr == me)) {
+        const int decision = g_can_use_fn(goods);
+        if (decision == 0 || decision == 1) return static_cast<char>(decision);
+        if (decision == 2) return orig(goods, chr, p3, type, weapon, flag);
+    }
+    if (goods >= kFirst && goods <= kLast) return 0;  // never through the game's rule (refId -100..)
+    return orig(goods, chr, p3, type, weapon, flag);
+}
+
+// ---------------------------------------------------------------- use
 char __fastcall hk_use_goods(void* chr, void*, int32_t goods, int32_t p2) {
     const uint32_t me = game::player();
+    const bool ours = goods >= kFirst && goods <= kLast;
     if (me && reinterpret_cast<uint32_t>(chr) == me) {
-        if (goods >= kFirst && goods <= kLast) {
-            LOG_INFO("[coop] Used co-op item %d", goods);
-            if (g_use_fn) g_use_fn(goods);
-            return 1;
-        }
-        if (g_block_fn && g_block_fn(goods)) return 0;
+        if (ours) LOG_INFO("[coop] Used co-op item %d", goods);
+        const bool handled = g_use_fn ? g_use_fn(goods) : false;
+        if (handled || ours) return 1;
+    } else if (ours) {
+        return 1;
     }
     using Fn = char(__fastcall*)(void*, void*, int32_t, int32_t);
     return reinterpret_cast<Fn>(g_use_orig)(chr, nullptr, goods, p2);
@@ -179,10 +192,17 @@ char __fastcall hk_use_goods(void* chr, void*, int32_t goods, int32_t p2) {
 
 bool install() {
     // xor eax,eax ; push ebx ; mov ebx,[esp+8]
-    static const uint8_t k[7] = {0x33, 0xC0, 0x53, 0x8B, 0x5C, 0x24, 0x08};
-    g_goods_orig = detour(kGoodsGetter, k, sizeof(k), reinterpret_cast<void*>(&hk_goods_row));
+    static const uint8_t kGetter[7] = {0x33, 0xC0, 0x53, 0x8B, 0x5C, 0x24, 0x08};
+    g_goods_orig = detour(kGoodsGetter, kGetter, sizeof(kGetter), reinterpret_cast<void*>(&hk_goods_row));
     if (!g_goods_orig) {
         LOG_ERROR("[coop] Goods param getter does not match this build; co-op items unavailable");
+        return false;
+    }
+    // push ebp ; mov ebp,esp ; and esp,-8
+    static const uint8_t kCheck[6] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8};
+    g_can_use_orig = detour(kCanUse, kCheck, sizeof(kCheck), reinterpret_cast<void*>(&hk_can_use));
+    if (!g_can_use_orig) {
+        LOG_ERROR("[coop] Item use check does not match this build; co-op items unavailable");
         return false;
     }
     if (!swap_pointer(kPlayerVtable + kUseGoodsSlot * 4, kUseGoodsOrig, reinterpret_cast<void*>(&hk_use_goods),
@@ -191,6 +211,7 @@ bool install() {
         return false;
     }
     text::set_item_text(&item_text);
+    text::set_dialog_text(&dialog_text);
     return true;
 }
 
@@ -213,23 +234,37 @@ int count(int32_t goods_id) {
     return 0;
 }
 
-void grant_missing() {
-    if (!game::in_game() || !game::own_world()) return;
-    for (int32_t id = kFirst; id <= kLast; ++id) {
-        if (count(id) > 0) continue;
-        uint32_t ok = 0;
-        __try {
-            using Fn = uint32_t(__stdcall*)(int32_t, uint32_t, int32_t);
-            ok = reinterpret_cast<Fn>(kAddItem)(id, kGoodsCategory, 1);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            LOG_ERROR("[coop] Giving item %d failed", id);
-            return;
-        }
-        LOG_INFO("[coop] Gave co-op item %d (%u)", id, ok);
+void give(int32_t goods_id, int n) {
+    if (!game::in_game() || n <= 0) return;
+    __try {
+        using Fn = uint32_t(__stdcall*)(int32_t, uint32_t, int32_t);
+        reinterpret_cast<Fn>(kAddItem)(goods_id, kGoodsCategory, n);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("[coop] Giving item %d failed", goods_id);
     }
 }
 
-void set_use_handler(void (*fn)(int32_t)) { g_use_fn = fn; }
-void set_block_filter(bool (*fn)(int32_t)) { g_block_fn = fn; }
+void remove_all(int32_t goods_id) {
+    if (!game::in_game()) return;
+    __try {
+        using Fn = uint8_t(__stdcall*)(uint32_t, int32_t, int32_t);
+        reinterpret_cast<Fn>(kRemoveItem)(kGoodsCategory, goods_id, 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("[coop] Removing item %d failed", goods_id);
+    }
+}
+
+void grant_missing() {
+    if (!game::in_game()) return;
+    for (int32_t id = kFirst; id <= kLast; ++id) {
+        if (id == kBlossom || count(id) > 0) continue;
+        give(id, 1);
+        LOG_INFO("[coop] Gave co-op item %d", id);
+    }
+}
+
+void set_can_use(int (*fn)(int32_t)) { g_can_use_fn = fn; }
+void set_use_handler(bool (*fn)(int32_t)) { g_use_fn = fn; }
+void set_dialog_text(const wchar_t* (*fn)()) { g_dialog_fn = fn; }
 
 }  // namespace coop::items

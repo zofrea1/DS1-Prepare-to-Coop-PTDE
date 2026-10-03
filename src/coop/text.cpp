@@ -23,6 +23,7 @@ constexpr uint32_t kGoodsInfo[2] = {0x54, 0x1BC};
 constexpr uint32_t kGoodsCaption[2] = {0x64, 0x194};
 
 const wchar_t* (*g_item_text)(uint32_t, Fmg) = nullptr;
+const wchar_t* (*g_dialog_text)(uint32_t) = nullptr;
 wchar_t g_ring[kMessageSlots][256];
 int g_next = 0;
 void* g_fmg_orig = nullptr;
@@ -45,11 +46,9 @@ Fmg classify(uint32_t fmg) {
 
 const wchar_t* __stdcall custom_text(uint32_t id, uint32_t fmg) {
     if (id >= kMessageBase && id < kMessageBase + kMessageSlots) return g_ring[id - kMessageBase];
-    if (g_item_text) {
-        const Fmg kind = classify(fmg);
-        if (kind != Fmg::Other) return g_item_text(id, kind);
-    }
-    return nullptr;
+    const Fmg kind = classify(fmg);
+    if (kind != Fmg::Other) return g_item_text ? g_item_text(id, kind) : nullptr;
+    return g_dialog_text ? g_dialog_text(id) : nullptr;
 }
 
 // Only ids from 300000 up are ours to answer (items 389000+, messages 99900000+).
@@ -84,6 +83,7 @@ bool install() {
 }
 
 void set_item_text(const wchar_t* (*fn)(uint32_t, Fmg)) { g_item_text = fn; }
+void set_dialog_text(const wchar_t* (*fn)(uint32_t)) { g_dialog_text = fn; }
 
 void show(const std::wstring& line) {
     if (!g_fmg_orig) return;

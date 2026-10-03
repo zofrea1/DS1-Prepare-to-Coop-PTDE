@@ -88,8 +88,10 @@ int bonfire_map(int bonfire);
 // Runs a global function of the game's event script by name (like the game's own OnIrregularLeaveSession).
 bool call_lua(const char* name);
 
-// The local player's soul level, death count and name (UTF-16).
+// The local player's soul level, souls held and death count.
 int soul_level();
+int souls();
+void set_souls(int value);
 int death_count();
 
 }  // namespace coop::game

@@ -3,6 +3,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -343,6 +344,117 @@ int __cdecl hk_multiwall_num() {
     return g_multiwall_orig();
 }
 
+// ---------------------------------------------------------------- bonfire travel and lighting
+// WarpNextStage_Bonfire (0xD62CA0, stdcall(bonfire), ret 4) is the bonfire menu's warp. In a seamless session
+// only the host travels by bonfire; the guests follow to the same bonfire, and a guest's own bonfire warp does
+// nothing (as in Remastered Seamless Co-op).
+constexpr uint32_t kBonfireWarp = 0x00D62CA0;
+// Util_RequestLevelUpFirst (0xD5D850, stdcall(bonfire), ret 4): a bonfire lit for the first time
+// (OnEvent_BonfireFirstLvUp). Lighting one lights it for every player in the session.
+constexpr uint32_t kBonfireLit = 0x00D5D850;
+using IntStdFn = void(__stdcall*)(int);
+IntStdFn g_bonfire_warp_orig = nullptr;
+IntStdFn g_bonfire_lit_orig = nullptr;
+void (*g_bonfire_warp_fn)(int) = nullptr;
+void (*g_bonfire_lit_fn)(int) = nullptr;
+bool g_remote_call = false;
+
+void __stdcall hk_bonfire_warp(int bonfire) {
+    if (!g_remote_call && seamless_rules()) {
+        if (!g_state.host) {
+            LOG_INFO("[coop] Bonfire warp to %d: only the host travels by bonfire", bonfire);
+            return;
+        }
+        LOG_INFO("[coop] Host warps to bonfire %d; guests follow", bonfire);
+        if (g_bonfire_warp_fn) g_bonfire_warp_fn(bonfire);
+    }
+    g_bonfire_warp_orig(bonfire);
+}
+
+void __stdcall hk_bonfire_lit(int bonfire) {
+    if (!g_remote_call && g_state.active && !g_state.invader && g_bonfire_lit_fn) {
+        LOG_INFO("[coop] Bonfire %d lit for everyone", bonfire);
+        g_bonfire_lit_fn(bonfire);
+    }
+    g_bonfire_lit_orig(bonfire);
+}
+
+// ---------------------------------------------------------------- teams (Ominous Tome)
+// ChrIns team type (0xE68C80, eax = character, returns the team: chr+0x74, or 0xF while a "turn hostile"
+// state 0x84 is on). Remastered Seamless Co-op answers it for players: an invader is on team 0x10 (hostile to
+// everyone), and the host's world rules put co-op allies on team 0xF (all hostile) or 0x12 (teams).
+constexpr uint32_t kTeamType = 0x00E68C80;
+void* g_team_orig = nullptr;
+
+bool is_remote_player(uint32_t chr) {
+    uint32_t wcm = 0, n = 0, arr = 0;
+    if (!read32(game::kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x24, &n) || !read32(wcm + 0x28, &arr) || !arr) {
+        return false;
+    }
+    for (uint32_t i = 0; i < n && i < 8; ++i) {
+        uint32_t p = 0;
+        if (read32(arr + i * 0x20, &p) && p == chr) return true;
+    }
+    return false;
+}
+
+int __stdcall team_override(uint32_t chr) {
+    if (!g_state.active || g_state.leaving || !chr) return -1;
+    if (chr == game::player()) return g_state.invader ? 0x10 : -1;
+    if (!is_remote_player(chr)) return -1;
+    uint32_t type = 0;
+    read32(chr + 0x70, &type);
+    const bool their_invader = type == 2 || type == 12;  // black phantom, intruder
+    if (g_state.invader) return their_invader ? 0x10 : -1;
+    if (their_invader) return 0x10;
+    if (g_state.world_rules == 1) return 0x0F;
+    if (g_state.world_rules == 2) return 0x12;
+    return -1;
+}
+
+__declspec(naked) void hk_team() {
+    __asm {
+        push ecx
+        push edx
+        push eax
+        push eax
+        call team_override
+        cmp eax, -1
+        je vanilla
+        add esp, 4
+        pop edx
+        pop ecx
+        ret
+    vanilla:
+        pop eax
+        pop edx
+        pop ecx
+        jmp g_team_orig
+    }
+}
+
+// ---------------------------------------------------------------- world tendency (Cursed Pendant)
+// EcTestTendency (event condition, vtable 0x11DE5F0 slot 1 = 0xBB1810, thiscall(cond, 2 args)): condition
+// +0x18 tendency (0 white, 1 black), +0x19 comparison, result in bit 0 of +8. Remastered Seamless Co-op
+// replaces world tendency: white tests are never true; black "above" (2) is true and black "at most" (5) is
+// false exactly while the host's world is cursed by the Cursed Pendant; other black tests keep their result.
+constexpr uint32_t kTendencyVtable = 0x011DE5F0;
+constexpr uint32_t kTendencyTest = 0x00BB1810;
+
+void __fastcall hk_tendency(uint8_t* cond, void*, int, int) {
+    const uint8_t type = cond[0x18];
+    const uint8_t cmp = cond[0x19];
+    if (type == 0) {
+        cond[8] &= 0xFE;
+        return;
+    }
+    if (cmp == 2) {
+        cond[8] = (cond[8] & 0xFE) | (g_state.infection ? 1 : 0);
+    } else if (cmp == 5) {
+        cond[8] = (cond[8] & 0xFE) | (g_state.infection ? 0 : 1);
+    }
+}
+
 int install_one(const char* what, bool ok) {
     if (!ok) LOG_ERROR("[coop] Hook not installed: %s (code does not match this build)", what);
     return ok ? 0 : 1;
@@ -353,6 +465,25 @@ int install_one(const char* what, bool ok) {
 State& state() { return g_state; }
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
+
+void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
+void set_bonfire_lit_listener(void (*fn)(int)) { g_bonfire_lit_fn = fn; }
+
+void remote_bonfire_warp(int bonfire) {
+    if (!g_bonfire_warp_orig || bonfire < 0) return;
+    g_remote_call = true;
+    world::bypass_limbo(true);
+    g_bonfire_warp_orig(bonfire);
+    world::bypass_limbo(false);
+    g_remote_call = false;
+}
+
+void remote_bonfire_lit(int bonfire) {
+    if (!g_bonfire_lit_orig || bonfire < 0) return;
+    g_remote_call = true;
+    g_bonfire_lit_orig(bonfire);
+    g_remote_call = false;
+}
 
 void apply_remote_flag(int id, bool on) {
     if (!shared_flag(id)) return;
@@ -408,6 +539,25 @@ int install() {
         g_multiwall_orig = reinterpret_cast<IntFn>(detour(kMultiWallNum, k, sizeof(k), reinterpret_cast<void*>(&hk_multiwall_num), 6));
         failed += install_one("multiplayer walls", g_multiwall_orig != nullptr);
     }
+    {
+        // push esi ; push edi ; mov edi,[esp+0Ch]
+        static const uint8_t k[6] = {0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C};
+        g_bonfire_warp_orig = reinterpret_cast<IntStdFn>(detour(kBonfireWarp, k, sizeof(k), reinterpret_cast<void*>(&hk_bonfire_warp)));
+        failed += install_one("bonfire warp", g_bonfire_warp_orig != nullptr);
+    }
+    {
+        // mov eax,[esp+4] ; mov [012DE2A0h],eax
+        static const uint8_t k[9] = {0x8B, 0x44, 0x24, 0x04, 0xA3, 0xA0, 0xE2, 0x2D, 0x01};
+        g_bonfire_lit_orig = reinterpret_cast<IntStdFn>(detour(kBonfireLit, k, sizeof(k), reinterpret_cast<void*>(&hk_bonfire_lit)));
+        failed += install_one("bonfire lighting", g_bonfire_lit_orig != nullptr);
+    }
+    {
+        // push ebx ; mov ebx,[eax+74h] ; push edi
+        static const uint8_t k[5] = {0x53, 0x8B, 0x58, 0x74, 0x57};
+        g_team_orig = detour(kTeamType, k, sizeof(k), reinterpret_cast<void*>(&hk_team));
+        failed += install_one("team types", g_team_orig != nullptr);
+    }
+    failed += install_one("world tendency", swap_pointer(kTendencyVtable + 4, kTendencyTest, reinterpret_cast<void*>(&hk_tendency)));
     return failed;
 }
 

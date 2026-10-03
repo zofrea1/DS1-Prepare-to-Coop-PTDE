@@ -30,27 +30,34 @@ constexpr uint32_t kEnemyVtable = 0x0118979C;      // EnemyIns
 constexpr int kApplySlot = 125;                     // ChrIns::ApplySpEffect(id, source, 0, 1,1,1, 0)
 
 // ---------------------------------------------------------------- our SpEffect rows
-constexpr int kScaleEnemy = 389100;  // +level 1..4
-constexpr int kScaleBoss = 389110;   // +level 1..4
-constexpr int kDebuff = 389120;      // +stacks 1..5
-constexpr int kBlossomFx = 389130;
-constexpr int kFirstFx = 389100, kLastFx = 389130;
-constexpr int kRow = 0x170;          // SP_EFFECT_PARAM_ST
+// Remastered Seamless Co-op's rows and ids: enemy and boss scaling for 1..5 extra players, and the death debuff
+// for 1..5 Crimson Blossoms. SpEffectParam has the same 0x170-byte layout in both games.
+constexpr int kScaleEnemy = 2147418000;  // + (players - 1), 0..4
+constexpr int kScaleBoss = 2147418005;   // + (players - 1), 0..4
+constexpr int kDebuff = 2147419000;      // + (blossoms - 1), 0..4
+constexpr int kRow = 0x170;              // SP_EFFECT_PARAM_ST
+constexpr int kRows = 15;
 
 Config g_cfg;
-uint8_t g_rows[kLastFx - kFirstFx + 1][kRow];
-bool g_row_valid[kLastFx - kFirstFx + 1] = {};
+uint8_t g_rows[kRows][kRow];
 bool g_rows_ready = false;
 void* g_fx_orig = nullptr;
+
+int row_index(int id) {
+    if (id >= kScaleEnemy && id < kScaleEnemy + 10) return id - kScaleEnemy;
+    if (id >= kDebuff && id < kDebuff + 5) return 10 + (id - kDebuff);
+    return -1;
+}
 
 // ---------------------------------------------------------------- state
 bool g_active = false, g_invader = false, g_invader_present = false;
 int g_players = 1;
 bool g_everyone_dead = false;
-bool g_misfortune = false, g_blossom = false;
-int g_debuff = 0;
 bool g_was_alive = true;
 void (*g_rest_fn)() = nullptr;
+void (*g_death_fn)() = nullptr;
+void (*g_before_rest_fn)() = nullptr;
+int (*g_blossom_count_fn)() = nullptr;
 void* g_regene_orig = nullptr;
 using CharFn = char(__cdecl*)();
 CharFn g_warp_orig = nullptr;
@@ -61,6 +68,7 @@ double g_limbo_since = 0;
 std::map<uint32_t, int> g_scaled;  // EnemyIns -> applied effect id
 std::set<uint32_t> g_fill_hp;      // enemies to top up after their max HP grew
 double g_last_scale = 0;
+int g_debuff_applied = 0;          // debuff effect id on the local player (0 none)
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -68,80 +76,80 @@ void put_f(uint8_t* r, int off, float v) { std::memcpy(r + off, &v, 4); }
 void put_i(uint8_t* r, int off, int32_t v) { std::memcpy(r + off, &v, 4); }
 void put_s(uint8_t* r, int off, int16_t v) { std::memcpy(r + off, &v, 2); }
 
-void neutral_rates(uint8_t* r) {
-    put_i(r, 0x00, -1);  // iconId
-    for (int off = 0x10; off <= 0x54; off += 4) put_f(r, off, 1.0f);  // max HP .. attack power rates
-    for (int off = 0x68; off <= 0x74; off += 4) put_f(r, off, 1.0f);  // defence rates
-    for (int off = 0x108; off <= 0x114; off += 4) put_f(r, off, 1.0f);  // resist change rates
-    put_s(r, 0x13A, 0);  // changeSuperArmorPoint
-    put_f(r, 0x08, -1.0f);  // effectEndurance: until removed
+// Builds a row the way Remastered Seamless Co-op does (its field writes, in its order).
+void base_row(uint8_t* r) {
+    std::memset(r, 0, kRow);
+    put_i(r, 0x00, -1);                                  // iconId
+    put_f(r, 0x04, -1.0f);                               // conditionHp
+    put_f(r, 0x08, -1.0f);                               // effectEndurance: until removed
+    for (int off = 0x14; off <= 0x34; off += 4) put_f(r, off, 1.0f);  // max MP/stamina, damage cut rates
+    for (int off = 0x68; off <= 0x74; off += 4) put_f(r, off, 1.0f);
+    put_f(r, 0x8C, -1.0f);
+    put_f(r, 0x90, -1.0f);
+    put_i(r, 0x98, -1);
+    put_f(r, 0xC8, 1.0f);
+    put_f(r, 0xDC, 1.0f);
+    put_f(r, 0xE0, 1.0f);
+    put_f(r, 0xE4, 1.0f);
+    put_f(r, 0xE8, 1.0f);
+    put_f(r, 0xF4, 1.0f);
+    put_f(r, 0x104, 1.0f);
+    put_f(r, 0x118, 1.0f);
+    put_f(r, 0x11C, 1.0f);
+    put_f(r, 0x120, 1.0f);
+    put_i(r, 0x124, -1);
+    put_i(r, 0x128, -1);
+    put_i(r, 0x12C, -1);
+    put_f(r, 0x130, 1.0f);
+    put_f(r, 0x134, 1.0f);
+    put_s(r, 0x138, -1);
+    r[0x141] = 0xFF;                                     // saveCategory
+    r[0x147] = 100;                                      // bloodDamageRate
+    r[0x15B] = 0xFF;
+    r[0x15D] = 0x7F;
+    put_s(r, 0x163, -1);
+}
+
+void scale_row(uint8_t* r, int n, int health, int damage, int posture) {
+    base_row(r);
+    const float hp = n * (health / 100.0f) + 1.0f;
+    const float dmg = n * (damage / 100.0f) + 1.0f;
+    put_f(r, 0x10, hp);                                  // maxHpRate
+    for (int off = 0x38; off <= 0x44; off += 4) put_f(r, off, dmg);   // physics/magic/fire/thunder attack rate
+    for (int off = 0x48; off <= 0x54; off += 4) put_f(r, off, 1.0f);  // attack power rates
+    for (int off = 0x108; off <= 0x114; off += 4) put_f(r, off, hp);  // poison/toxic/bleed/curse resist rate
+    put_s(r, 0x13A, static_cast<int16_t>(static_cast<int>(n * (posture / 100.0f) + 1.0f)));
+}
+
+void debuff_row(uint8_t* r, int n) {
+    base_row(r);
+    const float rate = n * -0.1f + 1.0f;
+    for (int off = 0x34; off <= 0x54; off += 4) put_f(r, off, 1.0f);
+    put_f(r, 0x10, rate);                                // maxHpRate
+    for (int off = 0x108; off <= 0x114; off += 4) put_f(r, off, rate);
 }
 
 void build_rows() {
-    uint32_t out[2] = {0, 0};
-    void* orig = g_fx_orig;
-    uint32_t* pout = out;
-    __asm {
-        push edi
-        mov edi, 7500
-        push pout
-        call orig
-        pop edi
-    }
-    const uint8_t* tpl = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(out[1]));
-    if (!tpl) {
-        LOG_ERROR("[coop] SpEffect 7500 not found; scaling and debuffs are off");
-        g_rows_ready = true;
-        return;
-    }
-    auto row = [&](int id) {
-        uint8_t* r = g_rows[id - kFirstFx];
-        std::memcpy(r, tpl, kRow);
-        neutral_rates(r);
-        g_row_valid[id - kFirstFx] = true;
-        return r;
-    };
-    for (int k = 1; k <= 4; ++k) {
-        for (int boss = 0; boss < 2; ++boss) {
-            const int hp = boss ? g_cfg.boss_health : g_cfg.enemy_health;
-            const int dmg = boss ? g_cfg.boss_damage : g_cfg.enemy_damage;
-            const int pos = boss ? g_cfg.boss_posture : g_cfg.enemy_posture;
-            uint8_t* r = row((boss ? kScaleBoss : kScaleEnemy) + k);
-            put_f(r, 0x10, 1.0f + hp * k / 100.0f);                    // maxHpRate
-            const float atk = 1.0f + dmg * k / 100.0f;
-            for (int off = 0x48; off <= 0x54; off += 4) put_f(r, off, atk);  // attack power rates
-            put_s(r, 0x13A, static_cast<int16_t>(std::min(200, pos * k / 2)));  // poise points
-        }
-    }
-    for (int n = 1; n <= 5; ++n) {
-        uint8_t* r = row(kDebuff + n);
-        put_i(r, 0x00, 5012);
-        put_f(r, 0x10, std::max(0.5f, 1.0f - 0.1f * n));
-        put_s(r, 0x13E, 0);  // no category: does not replace other effects
-        r[0x140] = 0;
-    }
-    {
-        uint8_t* r = row(kBlossomFx);
-        put_i(r, 0x00, 5008);
-        put_f(r, 0x10, 0.85f);
-        put_f(r, 0xE0, 1.25f);  // soulRate
-        put_s(r, 0x13E, 0);
-        r[0x140] = 0;
+    for (int k = 0; k < 5; ++k) {
+        scale_row(g_rows[k], k + 1, g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture);
+        scale_row(g_rows[5 + k], k + 1, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture);
+        debuff_row(g_rows[10 + k], k + 1);
     }
     g_rows_ready = true;
 }
 
 void* __stdcall our_fx_row(int32_t id) {
-    if (id < kFirstFx || id > kLastFx) return nullptr;
+    const int i = row_index(id);
+    if (i < 0) return nullptr;
     if (!g_rows_ready) build_rows();
-    return g_row_valid[id - kFirstFx] ? g_rows[id - kFirstFx] : nullptr;
+    return g_rows[i];
 }
 
 __declspec(naked) void hk_fx_row() {
     __asm {
-        cmp edi, 389100
+        cmp edi, 2147418000
         jl orig
-        cmp edi, 389130
+        cmp edi, 2147419004
         jg orig
         push edi
         call our_fx_row
@@ -211,22 +219,23 @@ int max_hp(uint32_t chr) {
 }
 
 // ---------------------------------------------------------------- rests
-void __stdcall after_rest() {
+// Util_RequestRegene (the rest that respawns the world). As in Remastered Seamless Co-op the co-op items the
+// player lacks are given and every Crimson Blossom withers before the game's own rest; afterwards the other
+// players are told (their worlds reset too).
+void __stdcall before_rest() {
     LOG_INFO("[coop] Rested at a bonfire");
-    if (g_debuff) {
-        for (int n = 1; n <= 5; ++n) remove(game::player(), kDebuff + n);
-        g_debuff = 0;
-    }
-    if (g_blossom) {
-        remove(game::player(), kBlossomFx);
-        g_blossom = false;
-    }
-    g_misfortune = false;
+    if (g_before_rest_fn) g_before_rest_fn();
+}
+
+void __stdcall after_rest() {
     if (g_rest_fn && g_active && !g_invader) g_rest_fn();
 }
 
 __declspec(naked) void hk_regene() {
     __asm {
+        pushad
+        call before_rest
+        popad
         push dword ptr [esp + 4]
         call g_regene_orig
         pushad
@@ -262,13 +271,18 @@ void release_limbo(const char* why) {
     g_bypass = false;
 }
 
-// ---------------------------------------------------------------- scaling
+// Boss gauges on screen (limbo waits for a boss fight to end).
 uint32_t boss_handle(int slot) {
     uint32_t mm = 0, h = 0xFFFFFFFF;
     if (!read32(kMenuManVar, &mm) || !mm) return 0xFFFFFFFF;
     read32(mm + (slot ? 0xF78 : 0xF64), &h);
     return h;
 }
+
+// ---------------------------------------------------------------- scaling
+// Every enemy gets the scaling row for the number of other co-op players in the session (1..5); characters
+// on team 7 (bosses) get the boss row. As in Remastered Seamless Co-op.
+constexpr int kBossTeam = 7;
 
 template <typename F>
 void each_enemy(F&& fn) {
@@ -291,16 +305,15 @@ void each_enemy(F&& fn) {
 void scale_tick() {
     if (now() - g_last_scale < 0.5) return;
     g_last_scale = now();
-    int level = g_active ? (g_players - 1) + (g_misfortune ? 1 : 0) : 0;
-    level = std::max(0, std::min(4, level));
-    const uint32_t b0 = boss_handle(0), b1 = boss_handle(1);
+    int level = g_active ? g_players - 1 : 0;
+    level = std::max(0, std::min(5, level));
     std::set<uint32_t> seen;
     each_enemy([&](uint32_t chr) {
         seen.insert(chr);
-        uint32_t handle = 0;
-        read32(chr + 4, &handle);
-        const bool boss = handle != 0xFFFFFFFF && (handle == b0 || handle == b1);
-        const int want = level ? (boss ? kScaleBoss : kScaleEnemy) + level : 0;
+        uint32_t team = 0;
+        read32(chr + 0x74, &team);
+        const bool boss = static_cast<int>(team) == kBossTeam;
+        const int want = level ? (boss ? kScaleBoss : kScaleEnemy) + level - 1 : 0;
         auto it = g_scaled.find(chr);
         const int have = it == g_scaled.end() ? 0 : it->second;
         if (g_fill_hp.count(chr)) {
@@ -308,7 +321,7 @@ void scale_tick() {
             const int m = max_hp(chr);
             if (hp(chr) > 0 && m > 0) *ptr<int>(chr + 0x2D4) = m;
         }
-        if (want == have) return;
+        if (want == have || hp(chr) <= 0) return;
         if (have) remove(chr, have);
         const bool full = hp(chr) >= max_hp(chr) && hp(chr) > 0;
         if (want && apply(chr, want)) {
@@ -321,6 +334,19 @@ void scale_tick() {
     for (auto it = g_scaled.begin(); it != g_scaled.end();) {
         it = seen.count(it->first) ? std::next(it) : g_scaled.erase(it);
     }
+}
+
+// The death debuff: the row for the number of Crimson Blossoms the player carries.
+void debuff_tick(uint32_t me) {
+    static double last = 0;
+    if (now() - last < 0.5) return;
+    last = now();
+    const int blossoms = g_blossom_count_fn ? std::min(5, g_blossom_count_fn()) : 0;
+    const int want = blossoms > 0 ? kDebuff + blossoms - 1 : 0;
+    if (want == g_debuff_applied && (!want || find_effect(me, want, nullptr))) return;
+    if (g_debuff_applied) remove(me, g_debuff_applied);
+    g_debuff_applied = 0;
+    if (want && apply(me, want)) g_debuff_applied = want;
 }
 
 // ---------------------------------------------------------------- shared light
@@ -423,20 +449,13 @@ void configure(const Config& cfg) {
 void tick() {
     const uint32_t me = game::player();
     const bool alive = me && hp(me) > 0;
-    if (me && g_was_alive && !alive && g_active && g_cfg.death_debuffs) {
-        g_debuff = std::min(5, g_debuff + 1);
-        LOG_INFO("[coop] Death debuff now %d", g_debuff);
-    }
+    if (me && g_was_alive && !alive && g_active && g_death_fn) g_death_fn();
     if (me) g_was_alive = alive;
-    // Re-apply the player's lasting effects after loads (effects do not survive a map load).
+    // The debuff follows the Crimson Blossoms in the inventory (effects do not survive a map load).
     if (me && alive && !game::loading()) {
-        if (g_debuff && !find_effect(me, kDebuff + g_debuff, nullptr)) {
-            for (int n = 1; n <= 5; ++n) {
-                if (n != g_debuff) remove(me, kDebuff + n);
-            }
-            apply(me, kDebuff + g_debuff);
-        }
-        if (g_blossom && !find_effect(me, kBlossomFx, nullptr)) apply(me, kBlossomFx);
+        debuff_tick(me);
+    } else if (!me) {
+        g_debuff_applied = 0;
     }
     if (g_limbo) {
         if (!local_dead()) {
@@ -469,6 +488,9 @@ void set_session(bool active, bool invader, bool invader_present) {
 void set_players(int coop_players) { g_players = std::max(1, coop_players); }
 void set_everyone_dead(bool all_dead) { g_everyone_dead = all_dead; }
 void set_rest_handler(void (*fn)()) { g_rest_fn = fn; }
+void set_before_rest_handler(void (*fn)()) { g_before_rest_fn = fn; }
+void set_death_handler(void (*fn)()) { g_death_fn = fn; }
+void set_blossom_counter(int (*fn)()) { g_blossom_count_fn = fn; }
 
 void remote_rest() {
     uint32_t wcm = 0, state = 0;
@@ -476,13 +498,8 @@ void remote_rest() {
         *ptr<uint32_t>(wcm + kWorldReset) = 1;
         LOG_INFO("[coop] Another player rested: the world resets");
     }
-    g_misfortune = false;
     g_rest_heard = true;
 }
-
-void set_misfortune(bool on) { g_misfortune = on; }
-bool misfortune() { return g_misfortune; }
-void set_blossom(bool on) { g_blossom = on; }
 
 bool boss_fight() { return boss_handle(0) != 0xFFFFFFFF || boss_handle(1) != 0xFFFFFFFF; }
 
@@ -498,5 +515,7 @@ void warp_now(int map, int point) {
     game::warp(map, point);
     g_bypass = false;
 }
+
+void bypass_limbo(bool on) { g_bypass = on; }
 
 }  // namespace coop::world

@@ -4,34 +4,39 @@ Play all of Dark Souls together with up to three friends, from the Undead Asylum
 limits of the game's own co-op. Built into the PTDE FPS Unlock mod behind `[SeamlessCoop] SeamlessCoop` in
 `PTDE-FPS-Unlock.ini` (off by default) and independent of the FPS unlock.
 
-This follows the design of LukeYui's **Dark Souls Remastered Seamless Co-op** (`ds1sc.dll`), which only
-exists for Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and the
-same ideas were written again for PTDE's engine.
+This is a port of LukeYui's **Dark Souls Remastered Seamless Co-op** (`ds1sc.dll`), which only exists for
+Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and written again
+for PTDE's engine. The goal of this first stage is a faithful port: the same items, the same rules, the same
+session behaviour. Where PTDE's engine sets a hard limit (four players instead of six), the port keeps the
+engine's limit.
 
-**Status:** complete and building; **not yet tried in the game** (it needs two PCs and two Steam accounts).
+**Status:** building; second revision. The first test (two players) found the items unusable; this revision
+uses Remastered Seamless Co-op's item definitions and rules one to one. Not yet tried again in the game.
 
 ## How to play
 
 1. Everyone sets the same `Password` and `SeamlessCoop = true`. Keep the other settings the same too (the
    host's world rules apply, but enemy scaling is worked out on each PC).
-2. Start the game. Your character now has nine new items (shown under Items), given in your own world:
+2. Rest at any bonfire. Each rest gives every co-op item you do not carry (as Remastered Seamless Co-op
+   does), so an existing character copied to the co-op save gets them at its first rest.
 
-   | Item | Use |
-   | --- | --- |
-   | Seamless Host Orb | Open your world. Players with your password can join at any time, wherever you are. |
-   | Seamless Join Orb | Join the world of a player with your password. You arrive next to the host. |
-   | Seamless Invasion Orb | Invade a random seamless world that allows invaders, as an evil spirit. |
-   | Seamless Return Orb | A guest goes home; the host closes the session and everyone goes home. |
-   | Tome of World Rules | Host: allow or forbid invaders for this session. |
-   | Withered Finger | Host: invaders searching for a world find yours first. |
-   | Pendant of Misfortune | Host: enemies fight as if one more player were present, until a bonfire rest. |
-   | Crimson Blossom | Lower maximum HP (85%), 25% more souls, until your next rest. |
-   | Writ of Clemency | Repairs certain NPC flags that can go wrong while visiting other worlds. |
+   | Item | Use | Usable |
+   | --- | --- | --- |
+   | Blessed Eye Orb | Create a seamless co-operative session. Players with your password can join at any time, wherever you are. | outside a session |
+   | Crystal Eye Orb | Join the session of a player with your password. You arrive at the host's last bonfire. | outside a session |
+   | Chaos Eye Orb | Invade a seamless session that allows invaders, as an evil spirit. | outside a session |
+   | Abyssal Eye Orb | A guest returns home; the host disbands the session. | in a session, no invader present |
+   | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
+   | Dried Fingers | Host: taunt invaders; invaders searching for a world find yours first. | host |
+   | Cursed Pendant | Host: curse your own world: it counts as pure black World Tendency. | host |
+   | Crimson Blossom | Not used: with `DeathDebuffs`, one blooms with each death in a session (up to five), each lowering maximum HP by 10%. They wither at a bonfire. | never |
+   | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
 
-   Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1** host, **Ctrl+F2** join, **Ctrl+F3** leave,
-   **Ctrl+F4** invade.
+   The items are used like any other item (quick slot, the item animation); when one cannot be used it is
+   refused the way the game refuses any item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1**
+   host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Each press is written to the log.
 3. A panel at the top right lists the players in the session, with ping, soul level or deaths
-   (`OverheadPlayerDisplay`).
+   (`OverheadPlayerDisplay`), and the host's world rules.
 
 **Your save.** With seamless co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to
 `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to
@@ -39,43 +44,81 @@ same ideas were written again for PTDE's engine.
 
 **Steam.** The game runs as Steam's Spacewar (app 480) while seamless co-op is on. PTDE's own app (211420)
 has had its Steam lobbies switched off since 2022, and Spacewar is the long-standing community route for PTDE
-multiplayer. The game's own online features (messages, bloodstains, signs, vanilla invasions) still work,
-but only between players with the same password.
+multiplayer. The game's own online features (messages, bloodstains, signs, vanilla invasions, the ghosts of
+other players) still work, but only between players with the same password. Remastered Seamless Co-op has no
+such features (Remastered's online play needs FromSoftware's servers, which that mod replaces).
 
 ## What changes in a session
 
-| Rule | Seamless co-op |
+| Rule | Seamless co-op (as in Remastered Seamless Co-op) |
 | --- | --- |
 | Guests | Keep their own body (human or hollow), level, items and progress. They pick up items, get their own enemy drops and boss rewards, rest at bonfires, level up and talk to NPCs. |
-| Deaths | You respawn at the last bonfire (the host's, until you rest at your own in the host's world). The session goes on, the host's death included. |
-| Bosses and areas | Defeating a boss or crossing into another area no longer ends the session. Joining is never locked. |
+| Joining | A guest arrives at the host's last bonfire (where the host last rested). |
+| Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. Every death is announced. |
+| Bosses and areas | Defeating a boss or crossing into another area no longer ends the session. Joining is never locked. Players roam the host's world freely. |
 | Fog walls | The white walls that keep phantoms in the host's area are gone. |
-| Host travel | When the host warps (bonfire travel, Homeward Bone, death), guests follow to the host's bonfire. |
-| Bonfire rest | When anyone rests, every player's world resets (enemies respawn). |
+| Host travel | When the host warps by bonfire, the guests follow to the same bonfire. A guest's own bonfire warp does nothing. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later ("The power of the homeward bone consumes you..."). Guests cannot use Homeward Bones. |
+| Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. |
+| World rules | The Ominous Tome puts co-op allies on hostile terms (team 0xF) or in teams (0x12); invaders are always hostile (0x10). The Cursed Pendant makes the host's world pure black World Tendency; otherwise white tendency events never happen and black ones only in a cursed world (with seamless co-op on, world tendency is replaced in every world, as in Remastered Seamless Co-op). |
 | Limbo | Dying during a boss fight or while an invader is present holds your respawn until the fight ends, everyone has fallen, or someone rests. |
-| Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use and Homeward Bone and Darksign do nothing. Invaders cannot enter the Undead Asylum or Firelink Shrine. |
-| Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player). |
+| Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. When the host dies the invader wins; when the invader dies the invasion fails. |
+| Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |
 | Shared light | Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game. |
-| Death debuff | With `DeathDebuffs`, each death lowers maximum HP by 10% (down to half) until you rest. |
 
 ## How it works
+
+### The base: the game's own session (the same base as Remastered Seamless Co-op)
+
+Reverse engineering `ds1sc.dll` shows that Remastered Seamless Co-op does not replace the game's multiplayer
+with its own: it builds the guest's presence out of Remastered's own session code. It creates the game's own
+connection objects for each peer and feeds the game's session manager with synthetic session events; the
+game's own netcode (player positions, enemies, objects, damage, event synchronisation) then runs as usual. It
+replaces only the transport underneath (packet send, receive and pop by type), with Steam's
+`ISteamNetworkingMessages`, because Remastered's sessions are brokered by FromSoftware's servers. A guest loads
+the host's world as "someone else's world", exactly like a summoned phantom: its replacement of the game's
+"own world" setter (`GameMan+0xB7F`, the twin of PTDE's `GameMan+0xB4F`) answers "someone else's" for guests,
+and the event flags of that world are the host's.
+
+PTDE's sessions are pure Steam lobbies and Steam peer-to-peer, which still work under Spacewar, so the port
+needs no transport of its own for the game's traffic: the guest joins through the game's own session and
+summon code and the game's own netcode runs over the game's own Steam channels. The mod's own messages (the
+equivalent of Remastered Seamless Co-op's packets `0x0B`-`0x1F`) travel on a private channel.
+
+So the base is the same in both: the game's session, the guest in the host's world, the host's game in charge
+of the world, and the mod's rules and synchronisation layered on top. Every system Remastered Seamless Co-op
+synchronises sits on this layer and can be ported:
+
+| Remastered Seamless Co-op feature | How it works there | PTDE port |
+| --- | --- | --- |
+| Enemy sync | the game's own session netcode | the game's own session netcode |
+| World state (objects, doors, levers) | the game's own netcode plus event flags | the same |
+| Event flags / progress | packets `0x0C` (guest to host) and `0x0B` (host to all) | flags relay (guest to host to all) |
+| Activated bonfires | `Util_RequestLevelUpFirst` mirrored (`0x16`) | the same function mirrored |
+| Bonfire rests | world reset mirrored (`0x14`/`0x15`) | the same |
+| Host bonfire warp / Homeward Bone | `WarpNextStage_Bonfire` mirrored (`0x17`), host bonfire (`0x18`) | the same |
+| Fog walls | multiplayer walls removed | the same |
+| NPC quest lines | event flags shared; NPC flag repair (Parchment) | the same |
+| Items from bosses and NPCs | each player gets their own (guest checks lifted), flags shared | the same |
+| World rules, tendency, teams | own hooks on the team and tendency functions | the same functions in PTDE |
+| Six players | Remastered's six-player sessions plus patches for its character and object lists | **not possible without rebuilding PTDE's session and world limits (three remote players)** |
+
+The one hard limit found is the player count. Everything else is a matter of porting more of the mod's rules,
+not of changing the base.
 
 ### Finding and joining
 
 The mod keeps an invisible Steam lobby (`ISteamMatchmaking`, `SteamMatchMaking009`) tagged with a hash of the
 password, and talks to the other players on a private peer-to-peer channel (`ISteamNetworking`, channel 9;
-the game itself uses channels 0 and 1). Everything else is the game's own multiplayer: a guest joins through
-the game's normal session and summon code, so the world, enemies and players synchronise exactly as in
-vanilla co-op.
+the game itself uses channels 0 and 1).
 
 1. The host's game opens a session the way touching a white sign does (`CreateSession`, `0xD2D4F0`). The
    room's empty-room timer and lock are kept off.
 2. A guest finds the lobby, asks the host (`Hello`), and the host's game builds the same invitation it sends a
    summoned phantom (join type, flag and the session's `NRSessionSearchResult`, code at `0xDB44EE`).
 3. The guest deserialises it and joins with the game's own guest code path (`JoinSession`, `0xD2D320`, as at
-   `0xDB47A4`), with the host's position as the spawn point. The game then loads the guest into the host's
-   world ("other world": separate event-flag store, own world saved for the return).
+   `0xDB47A4`). The arrival point is where the host last rested at a bonfire. The game then loads the guest
+   into the host's world ("other world": separate event-flag store, own world saved for the return).
 4. On arrival the game would turn the guest into a white phantom (`0xEA15B0`); the guest keeps their own
    chr type instead.
 
@@ -90,6 +133,16 @@ The host's death would broadcast `LuaCallStart(4000, 1)`, which sends every gues
 invader gets the victory from the mod instead). A guest's later loads (death, following the host) are marked
 as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides which world to load.
 
+### Items
+
+| What | Where |
+| --- | --- |
+| Rows | extra `EquipParamGoods` rows 389000-389008 from the goods param getter (`0xD1E3A0`): Remastered Seamless Co-op's rows field for field (refId -100..-93, icons, the eye orb animation, the Parchment's yes/no dialog), with the flag bytes translated (Remastered inserted `enable_pvp` into the bit fields) |
+| Can it be used? | the game's item check (`0xEADCA0`, cdecl) answered by the session rules for these ids, Homeward Bone, Black Eye Orb, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls |
+| Effect | `PlayerIns::UseGoods` (vtable slot 128) |
+| Names | the game's FMG lookup (`0xD175E0`); the Parchment dialog (event text 93129700) shows the soul cost |
+| Given / removed | Lua `AddInventoryItem` (`0xD664C0`) at each rest; `RemoveInventoryEquip`'s core (`0xD6D670`) for the Crimson Blossoms |
+
 ### Rules for guests
 
 | What | Where |
@@ -101,33 +154,32 @@ as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides whic
 
 ### World rules
 
-- **Rest:** Lua `Util_RequestRegene` (`0xD5D820`, the bonfire rest event) tells the others, who reset their
-  world the way a rest does (`WorldChrMan+0x2CC`).
+- **Rest:** Lua `Util_RequestRegene` (`0xD5D820`, the bonfire rest event) first gives the items and withers the
+  blossoms, then tells the others, who reset their world the way a rest does (`WorldChrMan+0x2CC`).
+- **Bonfires:** `WarpNextStage_Bonfire` (`0xD62CA0`) and `Util_RequestLevelUpFirst` (`0xD5D850`) are mirrored.
+- **Teams:** the team type getter (`0xE68C80`). **World tendency:** `EcTestTendency` (vtable `0x11DE5F0`).
 - **Limbo:** `WarpNextStageKick` (`0xD62930`), which performs the respawn warp, waits while you are dead,
   others are alive and a boss gauge (`MenuMan+0xF64/+0xF78`) or an invader is present.
-- **Scaling, debuff, blossom:** extra `SpEffectParam` rows (ids 389100-389130, built from the vanilla
-  multiplayer "doping" effect 7500) served by the SpEffect param getter (`0xD1B650`) and applied with
-  `ChrIns::ApplySpEffect` (vtable slot 125). Scaling is applied to every `EnemyIns`; bosses are the
-  characters with a boss gauge.
-- **Items:** extra `EquipParamGoods` rows 389000-389008 from the goods param getter (`0xD1E3A0`), names and
-  descriptions through the game's FMG lookup (`0xD175E0`), use caught in `PlayerIns::UseGoods` (vtable slot
-  128). Messages use the game's information list (`0xD4C090`/`0xD4C190`).
+- **Scaling and debuff:** Remastered Seamless Co-op's `SpEffectParam` rows and ids (enemy 2147418000+, boss
+  2147418005+, debuff 2147419000+; the param layout is identical in both games) served by the SpEffect param
+  getter (`0xD1B650`) and applied with `ChrIns::ApplySpEffect` (vtable slot 125).
 - **Save file:** the save manager's extension (`0x733FC0`).
 
 ## Differences from the Remastered mod
 
 - **Four players, not six:** PTDE's engine keeps three remote players in a world.
-- **Spectating in limbo** is not implemented: the camera stays where you fell.
-- **Tome of World Rules** switches invasions on and off; the Remastered tome changes player-versus-player
-  rules among allies.
-- **Pendant of Misfortune** and **Crimson Blossom** have simple effects of our own design; their Remastered
-  behaviour could not be fully established.
-- **NPC dialogue** is not mirrored as speech: the progress it makes (event flags) is shared.
+- **Spectating in limbo** is not implemented yet: the camera stays where you fell.
+- **Party HP across areas** (Remastered Seamless Co-op shows the HP of players in other areas) and the
+  **covenant reward** for a winning invader are not implemented yet.
+- **Item descriptions** are written for the port; names, one-line infos and icons are the original's.
 - The player panel is a list at the top right rather than text above each player.
+- Ghosts, messages and bloodstains of players with the same password still appear (Remastered Seamless
+  Co-op has none).
 - The Remastered mod's GitHub ban list is not used.
 
 ## Troubleshooting
 
-`PTDE-FPS-Unlock.log` has `[coop]` lines for every step (Steam ready, session state, joins, kept sessions).
-If any hook does not match the executable (it expects the 2015 Steam build), seamless co-op turns itself off
-and says which.
+`PTDE-FPS-Unlock.log` has `[coop]` lines for every step (Steam ready, session state, joins, kept sessions,
+each item used, each hotkey press). A `Tick running` line every minute shows the co-op module is alive. If
+any hook does not match the executable (it expects the 2015 Steam build), seamless co-op turns itself off and
+says which.

@@ -26,7 +26,6 @@ bool g_installed = false;
 bool g_items = false;
 bool g_steam_hooked = false;
 std::string g_save_report;
-bool g_had_player = false;
 
 // ---------------------------------------------------------------- the co-op save file
 // The save manager's constructor (0x733E00) names the file DRAKS0005 + ".sl2": `push 4 ; push L".sl2"` at
@@ -52,43 +51,143 @@ void patch_save_extension(const char* ext) {
 }
 
 // ---------------------------------------------------------------- items
-// The NPC repairs of the Writ of Clemency (the fix seamless co-op applies when someone joins).
-void clemency() {
+// Areas where the session items are refused, by map id (area << 24 | block << 16). Kept for later; off for now,
+// so the items work anywhere the player carries them (the game's own animation and state rules still apply).
+constexpr bool kAreaRulesOn = false;
+struct AreaRule {
+    int map;
+    int32_t item;  // 0 = every session item
+};
+const AreaRule kAreaRules[] = {
+    {0x12010000, coop::items::kInvade},  // e.g. no invading from the Undead Asylum
+};
+
+bool area_allows(int32_t id) {
+    if (!kAreaRulesOn) return true;
+    const int map = coop::game::map_id() & 0xFFFF0000;
+    for (const AreaRule& r : kAreaRules) {
+        if (r.map == map && (r.item == 0 || r.item == id)) return false;
+    }
+    return true;
+}
+
+// Souls needed to reach the next soul level (the Parchment of Deliverance costs one level's worth).
+int level_up_cost(int level) {
+    static const int kLow[] = {673, 690, 707, 724, 741, 758, 775, 793, 811, 829};  // to reach levels 2..11
+    const int next = level + 1;
+    if (next < 2) return kLow[0];
+    if (next <= 11) return kLow[next - 2];
+    const double x = next;
+    return static_cast<int>(0.02 * x * x * x + 3.06 * x * x + 105.6 * x - 895.0 + 0.5);
+}
+
+wchar_t g_dialog[256];
+const wchar_t* parchment_dialog() {
+    swprintf_s(g_dialog, L"Spend %d souls to revive certain fallen allies of the world?\nYou return to your last bonfire.",
+               level_up_cost(coop::game::soul_level()));
+    return g_dialog;
+}
+
+// The Parchment of Deliverance (Remastered Seamless Co-op's NPC repair): pay a level's worth of souls, then
+// flag 755 on and the flags of NPCs that can be lost while visiting other worlds off, in the player's own world
+// (and in the host's world for a guest), and return to the last bonfire.
+void parchment() {
+    using namespace coop;
+    const int cost = level_up_cost(game::soul_level());
+    const int held = game::souls();
+    if (held < cost) {
+        text::show(L"Nothing interesting happens");
+        LOG_INFO("[coop] Parchment: %d souls needed, %d held", cost, held);
+        return;
+    }
+    game::set_souls(held - cost);
     static const int kOn[] = {755};
     static const int kOff[] = {1322, 1402, 11010520, 11010521, 11010523, 11010524, 11010526, 11010527};
-    const bool home = coop::game::own_world();
-    for (int id : kOn) home ? coop::game::set_flag(id, true) : coop::game::set_own_world_flag(id, true);
-    for (int id : kOff) home ? coop::game::set_flag(id, false) : coop::game::set_own_world_flag(id, false);
-    coop::text::show(L"The fallen are pardoned. Some lost allies may return.");
+    const bool away = !game::own_world();
+    for (int id : kOn) {
+        game::set_own_world_flag(id, true);
+        if (away) game::set_flag(id, true);
+    }
+    for (int id : kOff) {
+        game::set_own_world_flag(id, false);
+        if (away) game::set_flag(id, false);
+    }
+    const int bonfire = game::last_bonfire();
+    LOG_INFO("[coop] Parchment: paid %d souls, NPC flags repaired, back to bonfire %d", cost, bonfire);
+    if (bonfire >= 0) world::warp_now(game::bonfire_map(bonfire), -1);
 }
 
-void use_item(int32_t id) {
+// Remastered Seamless Co-op's rules for when an item can be used (it replaces the game's check for these ids).
+int can_use(int32_t id) {
+    using namespace coop;
+    const bool in_session = session::in_session();
+    const bool host = session::hosting();
+    const bool invader = session::invader();
+    const bool invader_present = rules::state().invader_present;
+    switch (id) {
+        case items::kHost:
+        case items::kJoin:
+        case items::kInvade:
+        case items::kParchment:
+            return !in_session && area_allows(id) ? 1 : 0;
+        case items::kLeave:
+            return in_session && !invader_present ? 1 : 0;
+        case items::kRules:
+        case items::kTaunt:
+        case items::kInfection:
+            return host && area_allows(id) ? 1 : 0;
+        case items::kBlossom:
+            return 0;
+        case 230:  // Elizabeth's Mushroom
+        case 240:  // Divine Blessing
+        case 390: case 391: case 392: case 393: case 394: case 395: case 396:  // Fire Keeper Souls
+        case 500:  // Humanity
+        case 501:  // Twin Humanities
+            if (!in_session) return -1;
+            return !invader && !invader_present ? 1 : 0;
+        case 330:  // Homeward Bone: only the host, and not while an invader is in the world
+            if (!in_session) return -1;
+            return host && !invader_present ? 1 : 0;
+        case 115:  // Black Eye Orb
+        case 116:
+            if (!in_session) return -1;
+            return host && !invader_present ? 2 : 0;
+        default:
+            return -1;
+    }
+}
+
+bool use_item(int32_t id) {
     using namespace coop;
     switch (id) {
-        case items::kHost: session::host(); break;
-        case items::kJoin: session::join(); break;
-        case items::kInvade: session::invade(); break;
-        case items::kLeave: session::leave(); break;
-        case items::kRules: session::toggle_invaders(); break;
-        case items::kTaunt: session::taunt(); break;
-        case items::kMisfortune: session::misfortune(); break;
-        case items::kBlossom:
-            world::set_blossom(true);
-            text::show(L"The blossom takes root: less vigour, more souls until the next rest.");
-            break;
-        case items::kClemency: clemency(); break;
-        default: break;
+        case items::kHost: session::host(); return true;
+        case items::kJoin: session::join(); return true;
+        case items::kInvade: session::invade(); return true;
+        case items::kLeave: session::leave(); return true;
+        case items::kRules: session::cycle_rules(); return true;
+        case items::kTaunt: session::taunt(); return true;
+        case items::kInfection: session::curse_world(); return true;
+        case items::kParchment: parchment(); return true;
+        case 330:
+            // In a session the host's bone takes everyone to the host's last bonfire (session tick).
+            if (!session::in_session()) return false;
+            session::host_homeward();
+            return true;
+        default:
+            return false;
     }
 }
 
-// Homeward Bone (330) and Darksign (117) do not work while an invader is in the world.
-bool block_item(int32_t id) {
-    const auto& st = coop::rules::state();
-    if ((id == 330 || id == 117) && st.active && !st.invader && st.invader_present) {
-        coop::text::show(L"You cannot flee while an invader is in this world.");
-        return true;
+int blossom_count() { return coop::items::count(coop::items::kBlossom); }
+
+// A bonfire rest: the co-op items the player lacks, the Crimson Blossoms wither, and the host remembers where
+// guests arrive.
+void before_rest() {
+    if (g_items) {
+        coop::items::grant_missing();
+        if (blossom_count() > 0) coop::items::remove_all(coop::items::kBlossom);
     }
-    return false;
+    coop::session::remember_rest_point();
 }
 
 // ---------------------------------------------------------------- per frame
@@ -102,17 +201,22 @@ void hotkeys() {
     static bool down[4] = {};
     const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     const int keys[4] = {VK_F1, VK_F2, VK_F3, VK_F4};
+    static const char* const kNames[4] = {"host", "join", "leave", "invade"};
     for (int i = 0; i < 4; ++i) {
-        const bool now = ctrl && (GetAsyncKeyState(keys[i]) & 0x8000) != 0 && game_has_focus();
-        if (now && !down[i]) {
-            switch (i) {
-                case 0: coop::session::host(); break;
-                case 1: coop::session::join(); break;
-                case 2: coop::session::leave(); break;
-                case 3: coop::session::invade(); break;
+        const bool pressed = ctrl && (GetAsyncKeyState(keys[i]) & 0x8000) != 0;
+        if (pressed && !down[i]) {
+            const bool focus = game_has_focus();
+            LOG_INFO("[coop] Ctrl+F%d (%s)%s", i + 1, kNames[i], focus ? "" : " ignored: the game window is not in front");
+            if (focus) {
+                switch (i) {
+                    case 0: coop::session::host(); break;
+                    case 1: coop::session::join(); break;
+                    case 2: coop::session::leave(); break;
+                    case 3: coop::session::invade(); break;
+                }
             }
         }
-        down[i] = now;
+        down[i] = pressed;
     }
 }
 
@@ -126,9 +230,11 @@ void tick_body() {
         last_panel = GetTickCount64();
         coop::overlay::set_lines(coop::session::panel_lines(g_cfg.overhead_display));
     }
-    const bool has_player = coop::game::in_game() && !coop::game::loading();
-    if (g_items && has_player && !g_had_player && coop::game::own_world()) coop::items::grant_missing();
-    g_had_player = has_player;
+    static ULONGLONG last_beat = 0;
+    if (GetTickCount64() - last_beat > 60000) {
+        last_beat = GetTickCount64();
+        LOG_INFO("[coop] Tick running (session %s)", coop::session::active() ? "active" : "idle");
+    }
 }
 
 void tick() {
@@ -169,7 +275,10 @@ void coop_install(const Settings& settings) {
     const bool world = coop::world::install();
     g_items = coop::items::install();
     coop::items::set_use_handler(&use_item);
-    coop::items::set_block_filter(&block_item);
+    coop::items::set_can_use(&can_use);
+    coop::items::set_dialog_text(&parchment_dialog);
+    coop::world::set_before_rest_handler(&before_rest);
+    coop::world::set_blossom_counter(&blossom_count);
     coop::world::Config wc;
     wc.death_debuffs = g_cfg.death_debuffs;
     wc.enemy_health = g_cfg.enemy_health;
@@ -182,6 +291,7 @@ void coop_install(const Settings& settings) {
     coop::session::Config cfg;
     cfg.password = g_cfg.password;
     cfg.allow_invaders = g_cfg.allow_invaders;
+    cfg.death_debuffs = g_cfg.death_debuffs;
     coop::session::configure(cfg);
     if (failed || !world) {
         LOG_ERROR("[coop] %d co-op hook(s) could not be installed; seamless co-op is off to keep the game safe.",
@@ -189,9 +299,9 @@ void coop_install(const Settings& settings) {
         return;
     }
     g_installed = true;
-    LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade.",
-             g_items ? "in the inventory (given in your own world)" : "UNAVAILABLE",
-             texts ? "" : "(On-screen texts unavailable.) ");
+    LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade%s.",
+             g_items ? "given at every bonfire rest" : "UNAVAILABLE", texts ? "" : "(On-screen texts unavailable.) ",
+             g_cfg.hotkeys ? "" : " (off)");
 }
 
 bool coop_enabled() { return g_enabled; }

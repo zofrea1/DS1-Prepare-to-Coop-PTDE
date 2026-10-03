@@ -9,6 +9,8 @@
 #include <windows.h>
 
 #include <cstring>
+#include <map>
+#include <vector>
 
 namespace coop::rules {
 
@@ -333,14 +335,16 @@ bool __cdecl hk_has_party() {
 }
 
 // ---------------------------------------------------------------- no multiplayer walls
-// OnEvent_4034 (a guest enters a session) raises the white walls that keep phantoms in the host's area,
-// counted by GetMultiWallNum (0xD5DC40). A co-op guest gets none.
+// OnEvent_4034 (OnSessionJustIn: a session starts) raises the white walls that keep phantoms in the host's area
+// (Lua_MultiWall: collision, drawing and the wall's SFX on), once per wall GetMultiWallNum (0xD5DC40) counts for
+// the map (a fixed table: m10_01 has 11). It runs when IsClient() is false, so the host raises them and every
+// player in the host's world meets them. Remastered Seamless Co-op has none: the count is 0 in any seamless role.
 constexpr uint32_t kMultiWallNum = 0x00D5DC40;
 using IntFn = int(__cdecl*)();
 IntFn g_multiwall_orig = nullptr;
 
 int __cdecl hk_multiwall_num() {
-    if (seamless_rules() && g_state.guest) return 0;
+    if (g_state.active && !g_state.leaving) return 0;
     return g_multiwall_orig();
 }
 
@@ -379,37 +383,101 @@ void __stdcall hk_bonfire_lit(int bonfire) {
     g_bonfire_lit_orig(bonfire);
 }
 
-// ---------------------------------------------------------------- teams (Ominous Tome)
-// ChrIns team type (0xE68C80, eax = character, returns the team: chr+0x74, or 0xF while a "turn hostile"
-// state 0x84 is on). Remastered Seamless Co-op answers it for players: an invader is on team 0x10 (hostile to
-// everyone), and the host's world rules put co-op allies on team 0xF (all hostile) or 0x12 (teams).
+// ---------------------------------------------------------------- teams (Ominous Tome, invaders)
+// Who may hit whom comes from the team relation table (0x12DF268, 19 x 19 bytes, row attacker, column target,
+// 1 = hostile), read with each character's team (chr+0x74; 0xE68C80 returns it, or 0xF while state 0x84 is on).
+// Most callers inline that lookup, so the team itself is changed on the characters. Players are team 1
+// (4 hollow). Remastered Seamless Co-op puts allies on 0xF ("allies hostile") or 0x12 ("teams") and invaders on
+// 0x10: Remastered has a second, more hostile relation table in which 0xF is hostile to every team. PTDE has
+// only the first table, where 0xF is friendly to players; its team hostile to everyone (players, enemies,
+// bosses and itself) is 13, and 16 (invaders) is hostile to players only, as in Remastered.
 constexpr uint32_t kTeamType = 0x00E68C80;
+constexpr uint32_t kTeamOffset = 0x74;
+constexpr int kTeamEveryone = 13;
+constexpr int kTeamInvader = 16;
 void* g_team_orig = nullptr;
+std::vector<RemotePlayer> g_remote;
+std::map<uint32_t, int> g_team_saved;  // character -> its team before we changed it
 
 bool is_remote_player(uint32_t chr) {
     uint32_t wcm = 0, n = 0, arr = 0;
     if (!read32(game::kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x24, &n) || !read32(wcm + 0x28, &arr) || !arr) {
         return false;
     }
-    for (uint32_t i = 0; i < n && i < 8; ++i) {
+    for (uint32_t i = 1; i < n && i < 8; ++i) {
         uint32_t p = 0;
         if (read32(arr + i * 0x20, &p) && p == chr) return true;
     }
     return false;
 }
 
+// The team a player's character gets under the session's rules, -1 = the game's own.
+int wanted_team(uint32_t chr) {
+    if (!g_state.active || g_state.leaving || !chr) return -1;
+    if (chr == game::player()) return g_state.invader ? kTeamInvader : -1;
+    for (const auto& r : g_remote) {
+        if (r.chr != chr || !r.known) continue;
+        if (g_state.invader) return -1;  // we invade: everyone else keeps a player team, hostile to ours
+        if (r.invader) return kTeamInvader;
+        if (g_state.world_rules == 1) return kTeamEveryone;  // allies hostile: everyone fights everyone
+        if (g_state.world_rules == 2) {
+            // Teams: the host against the guests.
+            if (g_state.host) return kTeamEveryone;
+            return r.host ? kTeamEveryone : -1;
+        }
+        return -1;
+    }
+    return -1;
+}
+
 int __stdcall team_override(uint32_t chr) {
     if (!g_state.active || g_state.leaving || !chr) return -1;
-    if (chr == game::player()) return g_state.invader ? 0x10 : -1;
-    if (!is_remote_player(chr)) return -1;
-    uint32_t type = 0;
-    read32(chr + 0x70, &type);
-    const bool their_invader = type == 2 || type == 12;  // black phantom, intruder
-    if (g_state.invader) return their_invader ? 0x10 : -1;
-    if (their_invader) return 0x10;
-    if (g_state.world_rules == 1) return 0x0F;
-    if (g_state.world_rules == 2) return 0x12;
-    return -1;
+    if (chr != game::player() && !is_remote_player(chr)) return -1;
+    return wanted_team(chr);
+}
+
+void write_team(uint32_t chr, int team) {
+    __try {
+        *ptr<int>(chr + kTeamOffset) = team;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Every frame: the wanted teams on the characters, the old ones back when the rules no longer apply.
+void apply_teams() {
+    if (game::loading()) {
+        g_team_saved.clear();  // the characters are gone
+        return;
+    }
+    std::vector<uint32_t> chrs;
+    if (const uint32_t me = game::player()) chrs.push_back(me);
+    for (const auto& r : g_remote) {
+        if (r.chr && is_remote_player(r.chr)) chrs.push_back(r.chr);
+    }
+    for (uint32_t chr : chrs) {
+        const int want = wanted_team(chr);
+        auto it = g_team_saved.find(chr);
+        if (want >= 0) {
+            uint32_t cur = 0;
+            if (!read32(chr + kTeamOffset, &cur)) continue;
+            if (it == g_team_saved.end()) {
+                g_team_saved[chr] = static_cast<int>(cur);
+                LOG_INFO("[coop] Team of %s character %08X: %u -> %d", chr == game::player() ? "our" : "a remote", chr,
+                         cur, want);
+            }
+            if (static_cast<int>(cur) != want) write_team(chr, want);
+        } else if (it != g_team_saved.end()) {
+            write_team(chr, it->second);
+            LOG_INFO("[coop] Team of character %08X back to %d", chr, it->second);
+            g_team_saved.erase(it);
+        }
+    }
+    // Characters that left keep nothing of ours.
+    for (auto it = g_team_saved.begin(); it != g_team_saved.end();) {
+        bool present = false;
+        for (uint32_t c : chrs) present |= c == it->first;
+        it = present ? std::next(it) : g_team_saved.erase(it);
+    }
 }
 
 __declspec(naked) void hk_team() {
@@ -453,6 +521,64 @@ void __fastcall hk_tendency(uint8_t* cond, void*, int, int) {
     } else if (cmp == 5) {
         cond[8] = (cond[8] & 0xFE) | (g_state.infection ? 0 : 1);
     }
+}
+
+// ---------------------------------------------------------------- world events run in every player's game
+// Map events (EMEVD) test the session with EcTestMultiplayState::Test (0xBB3130, thiscall(cond, dt, event),
+// ret 8; cond+0x18 kind: 0 host, 1 client, 2 multiplayer, 3 single player; result in bit 0 of cond+8). The
+// SKIP/END IF variants call it directly (0xBB3200). The game's co-op stops most events on clients ("END IF
+// client"): only the host's game runs them and the network passes on what it can, so a guest walking alone
+// onto the Undead Burg bridge meets no Hellkite and a guest-only boss fight never starts. Remastered Seamless
+// Co-op answers the test for every event: "host" passes and "client" fails, so each player's game runs the
+// world's events; its two event lists below change the rest. The event id is FrpgEventIns+0x28 (+0x2C slot;
+// constructor 0xBC4150).
+constexpr uint32_t kMultiplayTest = 0x00BB3130;
+constexpr uint32_t kEventId = 0x28;
+// Every multiplayer test of these events fails (they act as neither host nor client, single nor multi):
+// e.g. the crow that carries the player out of the Undead Asylum (11810150). Ids PTDE does not have are kept.
+constexpr int kEventsNoMultiplay[] = {11005844, 11015846, 11105846, 11205846, 11215846, 11305846,
+                                      11315846, 11405846, 11415846, 11505846, 11510460, 11515846,
+                                      11605846, 11600250, 11705846, 11810150};
+// These act as in single player (lifts and warps the game keeps from multiplayer, e.g. 11020301, 11600200).
+constexpr int kEventsSinglePlayer[] = {11020301, 11200005, 11200006, 11305000, 11510230, 11600200};
+bool g_world_events = true;
+using MultiplayTestFn = void(__fastcall*)(uint8_t*, void*, float, uint8_t*);
+MultiplayTestFn g_multiplay_orig = nullptr;
+
+template <size_t N>
+bool in_list(const int (&list)[N], int id) {
+    for (int v : list) {
+        if (v == id) return true;
+    }
+    return false;
+}
+
+void __fastcall hk_multiplay_test(uint8_t* cond, void* edx, float dt, uint8_t* event) {
+    g_multiplay_orig(cond, edx, dt, event);
+    if (!g_world_events || !seamless_rules() || !cond) return;
+    uint32_t id = 0xFFFFFFFF;
+    if (event) read32(reinterpret_cast<uint32_t>(event) + kEventId, &id);
+    const int eid = static_cast<int>(id);
+    bool pass;
+    if (in_list(kEventsNoMultiplay, eid)) {
+        pass = false;
+    } else {
+        switch (cond[0x18]) {
+            case 0: pass = true; break;   // host
+            case 1: pass = false; break;  // client
+            case 2:                       // multiplayer
+                if (!in_list(kEventsSinglePlayer, eid)) return;
+                pass = false;
+                break;
+            case 3:  // single player
+                if (!in_list(kEventsSinglePlayer, eid)) return;
+                pass = true;
+                break;
+            default:
+                return;
+        }
+    }
+    cond[8] = static_cast<uint8_t>((cond[8] & 0xFE) | (pass ? 1 : 0));
 }
 
 int install_one(const char* what, bool ok) {
@@ -558,12 +684,24 @@ int install() {
         failed += install_one("team types", g_team_orig != nullptr);
     }
     failed += install_one("world tendency", swap_pointer(kTendencyVtable + 4, kTendencyTest, reinterpret_cast<void*>(&hk_tendency)));
+    {
+        // push esi ; mov esi,ecx ; movzx ecx,byte [esi+18h]
+        static const uint8_t k[7] = {0x56, 0x8B, 0xF1, 0x0F, 0xB6, 0x4E, 0x18};
+        g_multiplay_orig = reinterpret_cast<MultiplayTestFn>(
+            detour(kMultiplayTest, k, sizeof(k), reinterpret_cast<void*>(&hk_multiplay_test)));
+        failed += install_one("world events (multiplayer state test)", g_multiplay_orig != nullptr);
+    }
     return failed;
 }
+
+void set_guest_world_events(bool on) { g_world_events = on; }
+
+void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = players; }
 
 void tick() {
     g_main_thread = GetCurrentThreadId();
     g_strict = (seamless_rules() && g_state.guest) ? 0 : 1;
+    apply_teams();
     if (!seamless_rules()) return;
     if (g_state.host && game::session_state() == 3) game::keep_room_open();
 }

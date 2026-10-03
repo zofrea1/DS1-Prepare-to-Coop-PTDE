@@ -54,13 +54,15 @@ such features (Remastered's online play needs FromSoftware's servers, which that
 | --- | --- |
 | Guests | Keep their own body (human or hollow), level, items and progress. They pick up items, get their own enemy drops and boss rewards, rest at bonfires, level up and talk to NPCs. |
 | Joining | A guest arrives at the host's last bonfire (where the host last rested). |
-| Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. Every death is announced. |
+| Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. Every death is announced. After any load (a death, bonfire travel) each player's game builds the other players' characters again, and a player who died is rebuilt for the others as soon as they are back on their feet. |
+| Messages | Joins, departures, deaths and the like appear in the box at the bottom of the screen that the game uses for "Phantom X summoned", and fade by themselves. The game's own summon texts and its "phantom returned home" / "sent home" boxes, which wait for a button, are not shown during a session. |
 | Bosses and areas | Defeating a boss or crossing into another area no longer ends the session. Joining is never locked. Players roam the host's world freely. |
-| Fog walls | The white walls that keep phantoms in the host's area are gone. |
+| Fog walls | The white walls that keep phantoms in the host's area are gone (boss fog stays). |
+| World events | Every player's game runs the world's scripted events, not only the host's (`GuestWorldEvents`): a guest exploring alone meets the Hellkite on the Undead Burg bridge, starts boss fights, rides lifts and gets the event rewards. Progress (event flags) is shared. |
 | Host travel | When the host warps by bonfire, the guests follow to the same bonfire. A guest's own bonfire warp does nothing. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later ("The power of the homeward bone consumes you..."). Guests cannot use Homeward Bones. |
 | Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. |
-| World rules | The Ominous Tome puts co-op allies on hostile terms (team 0xF) or in teams (0x12); invaders are always hostile (0x10). The Cursed Pendant makes the host's world pure black World Tendency; otherwise white tendency events never happen and black ones only in a cursed world (with seamless co-op on, world tendency is replaced in every world, as in Remastered Seamless Co-op). |
+| World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency; otherwise white tendency events never happen and black ones only in a cursed world (with seamless co-op on, world tendency is replaced in every world, as in Remastered Seamless Co-op). |
 | Limbo | Dying during a boss fight or while an invader is present holds your respawn until the fight ends, everyone has fallen, or someone rests. |
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. When the host dies the invader wins; when the invader dies the invasion fails. |
 | Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |
@@ -100,7 +102,9 @@ synchronises sits on this layer and can be ported:
 | Fog walls | multiplayer walls removed | the same |
 | NPC quest lines | event flags shared; NPC flag repair (Parchment) | the same |
 | Items from bosses and NPCs | each player gets their own (guest checks lifted), flags shared | the same |
-| World rules, tendency, teams | own hooks on the team and tendency functions | the same functions in PTDE |
+| World rules, tendency, teams | own hooks on the team and tendency functions | the same functions in PTDE; teams written on the characters (PTDE inlines the team lookup) |
+| World events for every player | event condition `EcTestMultiplayState`: "host" passes, "client" fails, two event lists | the same function in PTDE |
+| Players after a load or a death | (part of its session emulation) | members put back on the game's character waiting list; dead copies rebuilt |
 | Six players | Remastered's six-player sessions plus patches for its character and object lists | **not possible without rebuilding PTDE's session and world limits (three remote players)** |
 
 The one hard limit found is the player count. Everything else is a matter of porting more of the mod's rules,
@@ -133,6 +137,37 @@ The host's death would broadcast `LuaCallStart(4000, 1)`, which sends every gues
 invader gets the victory from the mod instead). A guest's later loads (death, following the host) are marked
 as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides which world to load.
 
+### Messages
+
+The mod's lines go to the action box (`MenuMan+0xEC0`, two channels of three lines, queued by `0x515B80` and
+shown with `MenuMan+0xF4`, as Lua `RecallMenuEvent` does). `RecallMenuEvent`'s body (`0xD74950`, also used by
+the game's own summon notices in `0xEA2510`) drops Remastered Seamless Co-op's list of summon texts (140013,
+140014, 140023, 140024, 140030, 140031, 140033, 140034, 140153, 140154, 140192) during a session. The game's
+information box (`0xD4C090` opens it, `0xD4C190`/`0xD4C290` add a line) is a modal list; during a session (and
+for a minute after) it opens only when its first line arrives, and the notices about phantoms going home
+(20000415/416/420/421/425/435/450, 20001001/1003/1004/1020) are dropped with their box.
+
+### Other players' characters
+
+PTDE builds a session member's character once: the member goes on the session's waiting list
+(`SessMan+0x118`, pushed by `0xD2AFD0`) and the in-game step (`0xEE2B10` via `0xD2A360`) builds the character
+when the member's player data is complete (`GameDataMan+0x10[slot] == 0x1F`). A map load throws every
+character away and nobody goes on the list again, which is why players lost sight of each other after a
+death. Every second the mod looks up each member's character (`0xE3D930`; members and slots in the list at
+`SessMan+0x12C`, character name in the remote player data at `+0xA0`): a missing one is put back on the waiting
+list, and a dead one whose player reports being alive again is removed the way the member-left handler does
+(`0xEA2A10`, `0xE3E600`) and built again. The player messages carry the character name to match players to
+characters.
+
+### World events
+
+Map events test the session through `EcTestMultiplayState::Test` (`0xBB3130`; the SKIP/END IF instructions call
+it directly from `0xBB3200`). The game's co-op ends most events on clients, so only the host's game ran them.
+As in Remastered Seamless Co-op, during a session "host" passes and "client" fails for every event, so each
+game runs the world's events; events 11005844, 11015846, ... 11810150 (the Asylum crow) fail every
+multiplayer test, and 11020301, 11200005, 11200006, 11305000, 11510230, 11600200 act as in single player. The
+event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = false` restores the game's rule.
+
 ### Items
 
 | What | Where |
@@ -149,7 +184,7 @@ as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides whic
 | --- | --- |
 | Enemy and object drops, scripted reward items | inlined guest checks in `0xDC80A0`, `0xDC8370`, `0xDC9170` |
 | Bonfires and NPC talk | `HasPartyMembers` (`0xD2A4B0`) at the bonfire object (`0xD58AE4`) and talk script function 0x34 (`0xD4ABFB`) |
-| Multiplayer walls | Lua `GetMultiWallNum` (`0xD5DC40`) answers 0 |
+| Multiplayer walls | Lua `GetMultiWallNum` (`0xD5DC40`) answers 0 in every seamless role: `OnEvent_4034` (`OnSessionJustIn`) raises the walls on the host's side (`IsClient()` false), which every player then meets |
 | Progress | the event-flag setter (`0xD38CB0`): changes are shared, and a guest's are also written to their own world's store |
 
 ### World rules
@@ -157,7 +192,13 @@ as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides whic
 - **Rest:** Lua `Util_RequestRegene` (`0xD5D820`, the bonfire rest event) first gives the items and withers the
   blossoms, then tells the others, who reset their world the way a rest does (`WorldChrMan+0x2CC`).
 - **Bonfires:** `WarpNextStage_Bonfire` (`0xD62CA0`) and `Util_RequestLevelUpFirst` (`0xD5D850`) are mirrored.
-- **Teams:** the team type getter (`0xE68C80`). **World tendency:** `EcTestTendency` (vtable `0x11DE5F0`).
+- **Teams:** who may hit whom comes from the team relation table (`0x12DF268`, 19 x 19, row attacker,
+  column target) and each character's team (`chr+0x74`), mostly read inline, so the mod writes the team on the
+  players' characters every frame (and answers the getter `0xE68C80` the same way). Remastered Seamless Co-op
+  uses 0xF (allies hostile), 0x12 (teams) and 0x10 (invaders); Remastered has a second, more hostile relation
+  table in which 0xF is hostile to every team. PTDE has only the first, where 0xF is friendly to players, so the
+  port uses PTDE's team 13 (hostile to every team, itself included) for hostile allies and 16 for invaders
+  (hostile to players only, as 0x10 is in Remastered). **World tendency:** `EcTestTendency` (vtable `0x11DE5F0`).
 - **Limbo:** `WarpNextStageKick` (`0xD62930`), which performs the respawn warp, waits while you are dead,
   others are alive and a boss gauge (`MenuMan+0xF64/+0xF78`) or an invader is present.
 - **Scaling and debuff:** Remastered Seamless Co-op's `SpEffectParam` rows and ids (enemy 2147418000+, boss
@@ -176,6 +217,9 @@ as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides whic
 - Ghosts, messages and bloodstains of players with the same password still appear (Remastered Seamless
   Co-op has none).
 - The Remastered mod's GitHub ban list is not used.
+- **Teams** ("allies in teams") put the host against the guests; the Remastered mod's exact team split could
+  not be reproduced with PTDE's team table.
+- The Remastered mod's character-type condition list (`EcTestChrType`) is not decoded yet.
 
 ## Troubleshooting
 

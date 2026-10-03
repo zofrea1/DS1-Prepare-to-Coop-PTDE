@@ -1,0 +1,270 @@
+#include "party.h"
+
+#include "game.h"
+#include "hook.h"
+#include "log.h"
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include <set>
+
+namespace coop::party {
+
+namespace {
+
+// Session members (FrpgSessionManagerImp): +0x12C list of {next, prev, member id (0x24 bytes) at +8, slot at
+// +0x2C}; +0x118 list of members waiting for their character (member id at +8).
+constexpr uint32_t kSlotList = 0x12C;
+constexpr uint32_t kWaitList = 0x118;
+// Remote player data (GameDataMan+0xC, 0x4C0 per slot; +8 = -1 unused, +0xA0 character name) and its
+// completeness (GameDataMan+0x10, one byte per slot, 0x1F once every part arrived).
+constexpr uint32_t kRemoteData = 0xC;
+constexpr uint32_t kRemoteState = 0x10;
+constexpr uint32_t kRemoteSize = 0x4C0;
+constexpr uint32_t kNameOffset = 0xA0;
+constexpr int kNameChars = 16;
+
+// Game functions that take a member id by value (0x24 bytes, copied with 0x6F80F0, destroyed by the callee).
+constexpr uint32_t kMemberCopy = 0x006F80F0;   // thiscall(dst, const src*), ret 4
+constexpr uint32_t kMemberEqual = 0x006F8250;  // thiscall(a, const b*) -> bool, ret 4
+constexpr uint32_t kFindPlayer = 0x00E3D930;   // (WorldChrMan, member) -> PlayerIns or 0, ret 0x28
+constexpr uint32_t kWaitPush = 0x00D2AFD0;     // ecx = SessMan, (member), ret 0x24: put on the waiting list
+// Removing a member's character, as the member-left handler (0xD2E5C0) does.
+constexpr uint32_t kPartyRemove = 0x00EA2A10;  // eax = character handle, push PartyMemberInfo; ret 4
+constexpr uint32_t kChrRemove = 0x00E3E600;    // eax = PlayerIns, push WorldChrMan; ret 4
+
+double now() { return GetTickCount64() / 1000.0; }
+
+uint32_t sess_man() { return game::sess_man(); }
+
+uint32_t world_chr_man() {
+    uint32_t v = 0;
+    return read32(game::kWorldChrManVar, &v) ? v : 0;
+}
+
+uint32_t find_player(uint32_t member) {
+    const uint32_t wcm = world_chr_man();
+    if (!wcm) return 0;
+    uint32_t result = 0;
+    __try {
+        __asm {
+            sub esp, 0x24
+            mov ecx, esp
+            push member
+            mov eax, kMemberCopy
+            call eax
+            push wcm
+            mov eax, kFindPlayer
+            call eax
+            mov result, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return result;
+}
+
+bool members_equal(uint32_t a, uint32_t b) {
+    bool same = false;
+    __try {
+        __asm {
+            push b
+            mov ecx, a
+            mov eax, kMemberEqual
+            call eax
+            mov same, al
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return same;
+}
+
+bool waiting(uint32_t member) {
+    const uint32_t sm = sess_man();
+    uint32_t head = 0, node = 0;
+    if (!sm || !read32(sm + kWaitList, &head) || !head || !read32(head, &node)) return false;
+    for (int guard = 0; node && node != head && guard < 16; ++guard) {
+        if (members_equal(node + 8, member)) return true;
+        if (!read32(node, &node)) return false;
+    }
+    return false;
+}
+
+bool push_waiting(uint32_t member) {
+    const uint32_t sm = sess_man();
+    if (!sm) return false;
+    __try {
+        __asm {
+            sub esp, 0x24
+            mov ecx, esp
+            push member
+            mov eax, kMemberCopy
+            call eax
+            mov ecx, sm
+            mov eax, kWaitPush
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool remove_character(uint32_t chr) {
+    const uint32_t gm = game::game_man();
+    const uint32_t wcm = world_chr_man();
+    uint32_t pmi = 0, handle = 0;
+    if (!gm || !wcm || !read32(gm + game::kGmParty, &pmi) || !pmi || !read32(chr + 4, &handle)) return false;
+    __try {
+        __asm {
+            push pmi
+            mov eax, handle
+            mov edx, kPartyRemove
+            call edx
+            push wcm
+            mov eax, chr
+            mov edx, kChrRemove
+            call edx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+std::wstring read_name(uint32_t at) {
+    std::wstring s;
+    for (int i = 0; i < kNameChars; ++i) {
+        uint32_t w = 0;
+        if (!read32(at + i * 2, &w)) break;
+        const wchar_t c = static_cast<wchar_t>(w & 0xFFFF);
+        if (!c) break;
+        s.push_back(c);
+    }
+    return s;
+}
+
+int hp(uint32_t chr) {
+    uint32_t v = 0;
+    return read32(chr + 0x2D4, &v) ? static_cast<int>(v) : 0;
+}
+
+bool being_removed(uint32_t chr) {
+    uint8_t f = 0;
+    return read8(chr + 0x1FF, &f) && (f & 0x10);
+}
+
+struct Node {
+    uint32_t member;  // address of the member id inside the session's list
+    int slot;
+};
+
+std::vector<Node> slot_nodes() {
+    std::vector<Node> out;
+    const uint32_t sm = sess_man();
+    uint32_t head = 0, node = 0;
+    if (!sm || !read32(sm + kSlotList, &head) || !head || !read32(head, &node)) return out;
+    for (int guard = 0; node && node != head && guard < 16; ++guard) {
+        uint32_t slot = 0;
+        if (read32(node + 0x2C, &slot) && slot < 3) out.push_back({node + 8, static_cast<int>(slot)});
+        if (!read32(node, &node)) break;
+    }
+    return out;
+}
+
+double g_queued_at[3] = {-100, -100, -100};
+bool g_was_loading = true;
+double g_loaded_at = 0;
+double g_last_check = 0;
+std::set<uint32_t> g_removed;  // characters we asked the game to remove (they linger for a frame or two)
+
+}  // namespace
+
+std::wstring local_name() {
+    const uint32_t pgd = game::player_game_data();
+    return pgd ? read_name(pgd + kNameOffset) : std::wstring();
+}
+
+std::vector<Remote> remotes() {
+    std::vector<Remote> out;
+    const uint32_t gdm = game::game_data_man();
+    uint32_t data = 0, state = 0;
+    if (!gdm || !read32(gdm + kRemoteData, &data) || !data || !read32(gdm + kRemoteState, &state) || !state) return out;
+    for (const Node& n : slot_nodes()) {
+        Remote r;
+        r.slot = n.slot;
+        const uint32_t rec = data + n.slot * kRemoteSize;
+        uint32_t used = 0;
+        if (!read32(rec + 8, &used) || used == 0xFFFFFFFF) continue;
+        r.name = read_name(rec + kNameOffset);
+        uint8_t st = 0;
+        r.data_ready = read8(state + n.slot, &st) && st == 0x1F;
+        r.chr = find_player(n.member);
+        out.push_back(r);
+    }
+    return out;
+}
+
+void tick(bool active, PeerState (*peer)(const std::wstring&)) {
+    const bool loading = game::loading() || !game::in_game();
+    if (loading) {
+        g_was_loading = true;
+        g_removed.clear();
+        return;
+    }
+    if (g_was_loading) {
+        g_was_loading = false;
+        g_loaded_at = now();
+    }
+    if (!active || now() - g_loaded_at < 3.0 || now() - g_last_check < 1.0) return;
+    g_last_check = now();
+    const int state = game::session_state();
+    if (!(state == 3 || (state == 6 && game::join_step() == 4))) return;
+
+    const std::vector<Node> nodes = slot_nodes();
+    const std::vector<Remote> list = remotes();
+    for (const Remote& r : list) {
+        if (!r.data_ready || r.slot < 0 || r.slot > 2) continue;
+        if (now() - g_queued_at[r.slot] < 5.0) continue;
+        uint32_t member = 0;
+        for (const Node& n : nodes) {
+            if (n.slot == r.slot) member = n.member;
+        }
+        if (!member) continue;
+        const PeerState ps = peer ? peer(r.name) : PeerState{};
+        if (ps.invader) continue;  // invaders keep the game's own rules
+        char name[64];
+        WideCharToMultiByte(CP_UTF8, 0, r.name.c_str(), -1, name, sizeof(name), nullptr, nullptr);
+        if (!r.chr || g_removed.count(r.chr) || being_removed(r.chr)) {
+            if (r.chr) continue;  // the old character is on its way out
+            if (waiting(member)) continue;
+            if (push_waiting(member)) {
+                g_queued_at[r.slot] = now();
+                LOG_INFO("[coop] %s's character is missing after a load: asked the game to create it again", name);
+            }
+            continue;
+        }
+        if (hp(r.chr) > 0) continue;
+        // Their character here is dead. Rebuild it once they report being alive again (they respawned).
+        bool back = ps.known ? ps.alive : false;
+        if (!ps.known && peer) {
+            // No player by that name: rebuild only if every known player reports being alive.
+            back = true;
+            for (const Remote& o : list) {
+                const PeerState q = peer(o.name);
+                if (q.known && !q.alive) back = false;
+            }
+        }
+        if (!back) continue;
+        if (remove_character(r.chr)) {
+            g_removed.insert(r.chr);
+            if (!waiting(member)) push_waiting(member);
+            g_queued_at[r.slot] = now();
+            LOG_INFO("[coop] %s is back after dying: their character is created again", name);
+        }
+    }
+}
+
+}  // namespace coop::party

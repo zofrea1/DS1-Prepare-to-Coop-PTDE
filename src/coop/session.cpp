@@ -4,6 +4,7 @@
 #include "hook.h"
 #include "items.h"
 #include "log.h"
+#include "party.h"
 #include "rules.h"
 #include "steam.h"
 #include "text.h"
@@ -24,7 +25,7 @@ namespace {
 
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
-constexpr uint32_t kProtocol = 2;
+constexpr uint32_t kProtocol = 3;
 
 enum MsgType : uint8_t {
     kHello = 1,        // guest/invader -> host: please let me in
@@ -95,6 +96,7 @@ struct Info {
     uint8_t dead;
     int32_t light;  // light SpEffects the player carries (bit mask)
     char name[64];
+    wchar_t char_name[17];  // character name: matches the player to their character in our world
 };
 struct BonfireMsg {
     Header h;
@@ -701,9 +703,18 @@ void send_info() {
     i.pos[2] = pos.z;
     i.ping_ms = g_ping_ms;
     i.invader = g_invade ? 1 : 0;
-    i.dead = world::local_dead() ? 1 : 0;
+    // Dead until the respawned character exists (the load after a death has no character at all), so the
+    // others rebuild our character only once we are back.
+    static bool dead = false;
+    if (world::local_dead()) {
+        dead = true;
+    } else if (game::player() && !game::loading()) {
+        dead = false;
+    }
+    i.dead = dead ? 1 : 0;
     i.light = world::local_lights();
     strncpy_s(i.name, steam::persona(steam::self()).c_str(), _TRUNCATE);
+    wcsncpy_s(i.char_name, party::local_name().c_str(), _TRUNCATE);
     broadcast(i, false);
 }
 
@@ -775,8 +786,12 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             std::memcpy(p->pos, m.pos, sizeof(p->pos));
             p->ping_ms = m.ping_ms;
             p->invader = m.invader != 0;
-            p->dead = m.dead != 0;
+            const bool dead = m.dead != 0;
+            if (!dead && (p->dead || p->alive_since == 0)) p->alive_since = now();
+            p->dead = dead;
             p->light = m.light;
+            m.char_name[16] = 0;
+            p->char_name = m.char_name;
             p->last_seen = now();
             break;
         }
@@ -979,6 +994,47 @@ void flush_flags() {
     }
 }
 
+// ---------------------------------------------------------------- characters of the other players
+const PeerInfo* peer_by_char_name(const std::wstring& name) {
+    if (name.empty()) return nullptr;
+    for (const auto& p : g_peers) {
+        if (p.char_name == name && now() - p.last_seen <= 10.0) return &p;
+    }
+    return nullptr;
+}
+
+party::PeerState peer_state(const std::wstring& name) {
+    party::PeerState s;
+    const PeerInfo* p = peer_by_char_name(name);
+    if (!p) return s;
+    s.known = true;
+    s.invader = p->invader;
+    s.alive = !p->dead && p->alive_since > 0 && now() - p->alive_since >= 2.0 && now() - p->last_seen <= 5.0;
+    return s;
+}
+
+// Which character in our world belongs to which player, for the host's world rules (teams).
+void update_remote_players() {
+    static double last = 0;
+    if (now() - last < 0.5) return;
+    last = now();
+    std::vector<rules::RemotePlayer> out;
+    if (g_role != Role::None && !game::loading()) {
+        for (const auto& r : party::remotes()) {
+            if (!r.chr) continue;
+            rules::RemotePlayer rp;
+            rp.chr = r.chr;
+            if (const PeerInfo* p = peer_by_char_name(r.name)) {
+                rp.known = true;
+                rp.invader = p->invader;
+                rp.host = p->id == g_host && g_role == Role::Guest;
+            }
+            out.push_back(rp);
+        }
+    }
+    rules::set_remote_players(out);
+}
+
 void set_callbacks() {
     if (g_callbacks_set) return;
     g_callbacks_set = true;
@@ -1026,6 +1082,12 @@ void tick() {
     steam::poll(on_message);
     if (g_role == Role::Host) host_tick();
     if (g_role == Role::Guest) guest_tick();
+    text::set_seamless_active(g_role != Role::None);
+    text::tick();
+    // Characters of the other players: rebuilt after loads and after a death (co-op only; invaders keep the
+    // game's own rules).
+    party::tick(!g_invade && (g_step == Step::Hosting || g_step == Step::InWorld), &peer_state);
+    update_remote_players();
     rules::tick();
     {
         const auto& st = rules::state();

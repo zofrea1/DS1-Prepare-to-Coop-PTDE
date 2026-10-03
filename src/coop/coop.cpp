@@ -271,6 +271,8 @@ void coop_install(const Settings& settings) {
         return;
     }
     const int failed = coop::rules::install();
+    coop::rules::set_guest_world_events(g_cfg.guest_world_events);
+    LOG_INFO("[coop] Guests run the world's events in their own game: %s", g_cfg.guest_world_events ? "yes" : "no (host only)");
     const bool texts = coop::text::install();
     const bool world = coop::world::install();
     g_items = coop::items::install();

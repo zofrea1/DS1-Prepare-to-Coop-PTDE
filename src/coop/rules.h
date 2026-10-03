@@ -5,6 +5,7 @@
 // Remastered Seamless Co-op's world rules (teams, world tendency, bonfire warps and lighting).
 
 #include <cstdint>
+#include <vector>
 
 namespace coop::rules {
 
@@ -25,6 +26,8 @@ struct State {
 State& state();
 // Installs every hook; returns the number that failed (0 = all in place).
 int install();
+// Guests run the world's events in their own game (Remastered Seamless Co-op's rule; default on).
+void set_guest_world_events(bool on);
 // Per-frame upkeep (the room timer, the lock), game thread.
 void tick();
 // Flags that change in a session's world while seamless rules apply (game thread, value really changed).
@@ -39,5 +42,14 @@ void set_bonfire_lit_listener(void (*fn)(int bonfire));
 // The same, on behalf of another player (does not report back).
 void remote_bonfire_warp(int bonfire);
 void remote_bonfire_lit(int bonfire);
+
+// The other players' characters in our world, for the teams (world rules, invaders).
+struct RemotePlayer {
+    uint32_t chr = 0;
+    bool known = false;    // matched to a session player
+    bool invader = false;  // that player invades
+    bool host = false;     // that player hosts (we are a guest)
+};
+void set_remote_players(const std::vector<RemotePlayer>& players);
 
 }  // namespace coop::rules

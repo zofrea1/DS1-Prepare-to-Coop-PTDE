@@ -289,6 +289,26 @@ __declspec(naked) void h_state6_edx() {
     }
 }
 
+__declspec(naked) void h_state6_eax() {
+    __asm {
+        cmp dword ptr [eax + 0x90], 6
+        jne done
+        cmp byte ptr [g_strict], 1
+    done:
+        ret
+    }
+}
+
+__declspec(naked) void h_state6_edi() {
+    __asm {
+        cmp dword ptr [edi + 0x90], 6
+        jne done
+        cmp byte ptr [g_strict], 1
+    done:
+        ret
+    }
+}
+
 // al = (PartyMemberInfo+0x7C != -1) && strict; eax = PartyMemberInfo on entry
 __declspec(naked) void h_party_summoned() {
     __asm {
@@ -306,6 +326,109 @@ bool patch_call(uint32_t at, const uint8_t* expect, size_t n, void* helper) {
     const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(helper) - (at + 5));
     std::memcpy(code + 1, &rel, 4);
     return n >= 5 && n <= sizeof(code) && patch(at, expect, code, n);
+}
+
+// ---------------------------------------------------------------- the guest's own items
+// The item manager (dropped items, treasure: handles with the type in the low 4 bits and an id above, looked up by
+// 0xDC4AE0) works one way for the session host or a solo player and another for a summoned client (SessMan state
+// 6): a client gives new entries no id (every handle id 0), asks the host to pick an item up (packet 0x2A) instead
+// of taking it, skips the event-script cleanup when an item goes away and takes the host's item lists. Remastered
+// Seamless Co-op answers its "is client" checks with "is invader" for these, so a co-op guest's items are its own,
+// as in single player. The drops above already followed the host's rules; with the rest still on the client's,
+// the guest's own drops all shared handle id 0 and the area unload walked a broken list (crash at 0xE94A90). Every
+// client check of the item manager follows g_strict now, and the host's item packets are dropped for a guest.
+struct State6Site {
+    uint32_t at;
+    uint8_t modrm;  // 0xB8 eax, 0xB9 ecx, 0xBA edx, 0xBF edi
+};
+const State6Site kItemClientChecks[] = {
+    {0x00DC4BCD, 0xB9},  // 0xDC4BB0 item owner
+    {0x00DC5E88, 0xB8},  // 0xDC5E80 pickup: event flag of a treasure, item lot
+    {0x00DC64B2, 0xB9},  // 0xDC6490 item enable flag
+    {0x00DC68C9, 0xB9},  // 0xDC67E0 new entry: id
+    {0x00DC6BA9, 0xB9},  // 0xDC6AC0 new entry: id
+    {0x00DC7720, 0xBA},  // 0xDC76F0 removal: event-script cleanup
+    {0x00DC778E, 0xB8},  // 0xDC76F0 removal: event flag of the item
+    {0x00DC78A9, 0xB9},  // 0xDC78A0 removal (host tells its clients)
+    {0x00DC7928, 0xBF},  // 0xDC7920 client asks the host for its list
+    {0x00DC7AE7, 0xB9},  // 0xDC79E0 new entry: id
+    {0x00DC7C37, 0xB9},  // 0xDC7B30 new entry: id
+    {0x00DC7D46, 0xB9},  // 0xDC7D20 pickup
+    {0x00DC7E0B, 0xB8},  // 0xDC7E00 pickup
+    {0x00DC7E76, 0xB8},  // pickup
+    {0x00DC7E9E, 0xB8},  // 0xDC7E90 pickup: client asks the host
+    {0x00DC7F7E, 0xB8},  // 0xDC7F70 pickup check
+    {0x00DC8E35, 0xB8},  // item lot
+    {0x00DC8E86, 0xB8},  // 0xDC8E50 item lot
+    {0x00DC8EBB, 0xBF},  // 0xDC8EB0 item lot: client asks the host
+    {0x00DC9041, 0xB9},  // 0xDC8F30 item packets: pickups
+    {0x00E94AB8, 0xB9},  // 0xE94950 area unload: event-script cleanup
+    {0x00E94E00, 0xB8},  // 0xE94DC0 area load: treasure owner
+};
+
+// The item packet reader (0xDC8F30) pops each member's packets of type 0x2A with 0xD2A9B0 (eax = buffer size,
+// ecx = buffer, stdcall(session, member, type) -> bytes). A co-op guest reads and drops them.
+constexpr uint32_t kPopPacket = 0x00D2A9B0;
+constexpr uint32_t kItemPopSites[] = {0x00DC8F87, 0x00DC90CB};
+
+int call_pop(uint32_t buf_size, void* buf, uint32_t sess, uint32_t member, uint32_t packet_type) {
+    int n = 0;
+    __asm {
+        push packet_type
+        push member
+        push sess
+        mov eax, buf_size
+        mov ecx, buf
+        mov edx, kPopPacket
+        call edx
+        mov n, eax
+    }
+    return n;
+}
+
+int __stdcall item_pop(uint32_t size, void* buf, uint32_t sess, uint32_t member, uint32_t type) {
+    int n = call_pop(size, buf, sess, member, type);
+    if (g_strict) return n;
+    static int dropped = 0;
+    for (int guard = 0; n > 0 && guard < 256; ++guard) {
+        if (++dropped <= 20) LOG_INFO("[coop] Host item packet dropped (the guest's items are its own)");
+        n = call_pop(size, buf, sess, member, type);
+    }
+    return 0;
+}
+
+__declspec(naked) void hk_item_pop() {
+    __asm {
+        push dword ptr [esp + 12]
+        push dword ptr [esp + 12]
+        push dword ptr [esp + 12]
+        push ecx
+        push eax
+        call item_pop
+        ret 12
+    }
+}
+
+int install_items() {
+    int bad = 0;
+    for (const State6Site& site : kItemClientChecks) {
+        const uint8_t expect[7] = {0x83, site.modrm, 0x90, 0x00, 0x00, 0x00, 0x06};
+        void* helper = site.modrm == 0xB8 ? reinterpret_cast<void*>(&h_state6_eax)
+                     : site.modrm == 0xB9 ? reinterpret_cast<void*>(&h_state6_ecx)
+                     : site.modrm == 0xBA ? reinterpret_cast<void*>(&h_state6_edx)
+                                          : reinterpret_cast<void*>(&h_state6_edi);
+        if (!patch_call(site.at, expect, 7, helper)) {
+            LOG_ERROR("[coop] Item manager check at %08X does not match this build", site.at);
+            ++bad;
+        }
+    }
+    for (uint32_t at : kItemPopSites) {
+        if (!redirect_call(at, kPopPacket, reinterpret_cast<void*>(&hk_item_pop))) {
+            LOG_ERROR("[coop] Item packet read at %08X does not match this build", at);
+            ++bad;
+        }
+    }
+    return bad;
 }
 
 int install_loot() {
@@ -332,6 +455,24 @@ bool __cdecl hk_has_party() {
     if (seamless_rules()) return g_state.invader || g_state.invader_present;
     using Fn = bool(__cdecl*)();
     return reinterpret_cast<Fn>(kHasParty)();
+}
+
+// ---------------------------------------------------------------- a death is a death, not a phantom's
+// The event script's HavePartyMember (Lua native 0xD5E1D0: PartyMemberInfo+0x14 > 1) decides how a player dies:
+// without a party, or as the host, the death is counted and the game respawns them (SoloPlayDeath); a summoned
+// player with a party dies as a phantom (PartyGhostDeath: OnGameLeave on every player, ReqularLeavePlayer, home).
+// That took a co-op guest out of the session on its first death (and the host saw it vanish). Remastered Seamless
+// Co-op answers HavePartyMember with "we invade" in a session, so hosts and co-op guests die as in single player
+// (counted, respawned at the bonfire) and invaders keep the game's rules. The guest's join also asks it
+// (SummonReloadStart reloads into the host's world only with a party), so a guest is answered this way only once
+// it has arrived.
+constexpr uint32_t kHavePartyMember = 0x00D5E1D0;
+using BoolFn = bool(__cdecl*)();
+BoolFn g_have_party_orig = nullptr;
+
+bool __cdecl hk_have_party_member() {
+    if (seamless_rules() && (g_state.host || (g_state.guest && game::join_step() == 4))) return false;
+    return g_have_party_orig();
 }
 
 // ---------------------------------------------------------------- no multiplayer walls
@@ -581,6 +722,60 @@ void __fastcall hk_multiplay_test(uint8_t* cond, void* edx, float dt, uint8_t* e
     cond[8] = static_cast<uint8_t>((cond[8] & 0xFE) | (pass ? 1 : 0));
 }
 
+// ---------------------------------------------------------------- Black Separation Crystal
+// Using it (goods 103) puts SpEffect 7 on the player; the player's update (0xE512A0) sees the effect's separation
+// flag and, for the local player, either runs the Lua OnLeaveMagic (a summoned player goes home: 0xE5136A, eax =
+// Lua event system) or opens the host's "send phantoms home" menu (0xE51371, 0xC2B4D0: MenuMan+0xBC = 1 when
+// white phantoms are present, else 5). Neither fits a seamless session: guests keep their own body (the menu finds
+// no phantom) and the Lua leave is skipped by the session guard, which left a box on screen. In a seamless
+// session the crystal is the session's own leave instead: a guest goes home, the host closes their world.
+constexpr uint32_t kSepGuestSite = 0x00E5136A;
+constexpr uint32_t kSepGuestOrig = 0x00D78290;  // eax = Lua event system: calls OnLeaveMagic
+constexpr uint32_t kSepHostSite = 0x00E51371;
+constexpr uint32_t kSepHostOrig = 0x00C2B4D0;
+void (*g_separation_fn)(bool host) = nullptr;
+
+bool __cdecl separation_handled(bool host) {
+    if (!seamless_rules() || !g_separation_fn) return false;
+    if (host ? !g_state.host : !g_state.guest) return false;
+    if (host && g_state.invader_present) return false;  // the game's own rules while an invader is here
+    LOG_INFO("[coop] Black Separation Crystal: %s", host ? "the host closes the world" : "a guest goes home");
+    g_separation_fn(host);
+    return true;
+}
+
+__declspec(naked) void hk_separation_guest() {
+    __asm {
+        pushad
+        push 0
+        call separation_handled
+        add esp, 4
+        test al, al
+        popad
+        jnz handled
+        mov edx, kSepGuestOrig
+        jmp edx
+    handled:
+        ret
+    }
+}
+
+__declspec(naked) void hk_separation_host() {
+    __asm {
+        pushad
+        push 1
+        call separation_handled
+        add esp, 4
+        test al, al
+        popad
+        jnz handled
+        mov edx, kSepHostOrig
+        jmp edx
+    handled:
+        ret
+    }
+}
+
 int install_one(const char* what, bool ok) {
     if (!ok) LOG_ERROR("[coop] Hook not installed: %s (code does not match this build)", what);
     return ok ? 0 : 1;
@@ -593,6 +788,7 @@ State& state() { return g_state; }
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
 
 void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
+void set_separation_listener(void (*fn)(bool host)) { g_separation_fn = fn; }
 void set_bonfire_lit_listener(void (*fn)(int)) { g_bonfire_lit_fn = fn; }
 
 void remote_bonfire_warp(int bonfire) {
@@ -657,7 +853,14 @@ int install() {
         if (bad) LOG_ERROR("[coop] %d of 6 loot rule patches did not match this build", bad);
         failed += install_one("loot rules", bad == 0);
     }
+    failed += install_one("guest's own items", install_items() == 0);
     failed += install_one("bonfire party check", redirect_call(0x00D58AE4, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
+    {
+        static const uint8_t k[6] = {0x8B, 0x0D, 0xA0, 0x84, 0x37, 0x01};  // mov ecx,[013784A0h]
+        g_have_party_orig = reinterpret_cast<BoolFn>(
+            detour(kHavePartyMember, k, sizeof(k), reinterpret_cast<void*>(&hk_have_party_member)));
+        failed += install_one("HavePartyMember (deaths)", g_have_party_orig != nullptr);
+    }
     failed += install_one("talk party check", redirect_call(0x00D4ABFB, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
     {
         // mov ecx,[0137D790h] ; jmp 00D69B10h
@@ -691,6 +894,10 @@ int install() {
             detour(kMultiplayTest, k, sizeof(k), reinterpret_cast<void*>(&hk_multiplay_test)));
         failed += install_one("world events (multiplayer state test)", g_multiplay_orig != nullptr);
     }
+    failed += install_one("Black Separation Crystal (guest)",
+                          redirect_call(kSepGuestSite, kSepGuestOrig, reinterpret_cast<void*>(&hk_separation_guest)));
+    failed += install_one("Black Separation Crystal (host)",
+                          redirect_call(kSepHostSite, kSepHostOrig, reinterpret_cast<void*>(&hk_separation_host)));
     return failed;
 }
 
@@ -700,7 +907,9 @@ void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = p
 
 void tick() {
     g_main_thread = GetCurrentThreadId();
-    g_strict = (seamless_rules() && g_state.guest) ? 0 : 1;
+    // A co-op guest's loot and items follow the host's (single player) rules for as long as it is a guest, also
+    // while it leaves (the area unload on the way home must clean up the same way the items were made).
+    g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;
     apply_teams();
     if (!seamless_rules()) return;
     if (g_state.host && game::session_state() == 3) game::keep_room_open();

@@ -99,6 +99,51 @@ bool position(Vec3* pos, float* angle) {
     return true;
 }
 
+bool chr_position(uint32_t chr, Vec3* pos) {
+    const uint32_t ctrl = field<uint32_t>(chr, 0x28, 0);
+    const uint32_t phys = field<uint32_t>(ctrl, 0x1C, 0);
+    if (!phys) return false;
+    *pos = field<Vec3>(phys, 0x10, Vec3{0, 0, 0});
+    return true;
+}
+
+std::vector<uint32_t> remote_player_chrs() {
+    std::vector<uint32_t> out;
+    const uint32_t wcm = deref(kWorldChrManVar);
+    const uint32_t n = field<uint32_t>(wcm, 0x24, 0), arr = field<uint32_t>(wcm, 0x28, 0);
+    if (!arr) return out;
+    const uint32_t me = player();
+    for (uint32_t i = 1; i < n && i < 8; ++i) {
+        const uint32_t chr = field<uint32_t>(arr, i * 0x20, 0);
+        if (chr && chr != me) out.push_back(chr);
+    }
+    return out;
+}
+
+uint32_t anim_state(uint32_t chr, int layer) {
+    const uint32_t ctrl = field<uint32_t>(chr, 0x28, 0);
+    const uint32_t ac = field<uint32_t>(ctrl, 0x2C, 0);
+    if (!ac) return 0xFFFFFFFF;
+    uint32_t result = 0xFFFFFFFF;
+    __try {
+        __asm {
+            push edi
+            mov edi, layer
+            push ac
+            mov eax, 0x00E2C030
+            call eax
+            pop edi
+            mov result, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xFFFFFFFF;
+    }
+    return result;
+}
+
+uint32_t manipulator(uint32_t chr) { return field<uint32_t>(field<uint32_t>(chr, 0x28, 0), 0x54, 0); }
+uint32_t override_manipulator(uint32_t chr) { return field<uint32_t>(field<uint32_t>(chr, 0x28, 0), 0x244, 0); }
+
 int last_bonfire() { return field<int>(game_man(), kGmLastBonfire, -1); }
 bool loading() { return player() == 0; }
 bool in_game() { return player_game_data() != 0 && player() != 0; }

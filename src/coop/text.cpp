@@ -44,10 +44,13 @@ constexpr uint32_t kGoodsCaption[2] = {0x64, 0x194};
 constexpr uint32_t kBlockedEventTexts[] = {140013, 140014, 140023, 140024, 140030, 140031,
                                            140033, 140034, 140153, 140154, 140192};
 // The game's modal notices about leaving that seamless play replaces with its own lines: phantom returned to
-// world of origin, sent home by summoner, phantom X has returned home, you were sent home, connection
-// unstable (leaving session), failed to create/join session.
-constexpr uint32_t kBlockedNotices[] = {20000415, 20000416, 20000420, 20000421, 20000425, 20000435,
-                                        20000450, 20001001, 20001003, 20001004, 20001020};
+// world of origin, sent home by summoner, phantom X has returned home, returning to your world, you were sent
+// home, disconnected from master of world (returning to your world), connection unstable (leaving session),
+// failed to create/join session, P2P connection lost. A seamless session handles all of these itself; the box
+// waits for a button and some of them were left on screen.
+constexpr uint32_t kBlockedNotices[] = {20000415, 20000416, 20000420, 20000421, 20000425, 20000430,
+                                        20000435, 20000450, 20001000, 20001001, 20001003, 20001004,
+                                        20001015, 20001020, 20001025};
 
 const wchar_t* (*g_item_text)(uint32_t, Fmg) = nullptr;
 const wchar_t* (*g_dialog_text)(uint32_t) = nullptr;

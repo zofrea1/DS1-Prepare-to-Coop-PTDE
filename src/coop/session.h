@@ -42,6 +42,7 @@ void host();         // Blessed Eye Orb
 void join();         // Crystal Eye Orb
 void invade();       // Chaos Eye Orb
 void leave();        // Abyssal Eye Orb
+void close_world();  // the host's Black Separation Crystal: every other player goes home, the session ends
 void cycle_rules();  // Ominous Tome: none -> allies hostile -> teams -> none
 void taunt();        // Dried Fingers
 void curse_world();  // Cursed Pendant

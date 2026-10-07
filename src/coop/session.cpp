@@ -148,6 +148,9 @@ constexpr const wchar_t* kMsgJoinTimeout = L"Failed to find session";
 constexpr const wchar_t* kMsgBreakInTimeout = L"Failed to find session to invade";
 constexpr const wchar_t* kMsgConnectTimeout = L"Failed to connect";
 constexpr const wchar_t* kMsgNoOne = L"No sessions found";
+constexpr const wchar_t* kMsgReturnHome = L"Returning to your world...";
+constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returning to your world...";
+constexpr const wchar_t* kMsgWorldClosed = L"Your world is closed. Guests return to their worlds";
 
 // ---------------------------------------------------------------- state
 enum class Role { None, Host, Guest };
@@ -204,10 +207,14 @@ int g_follow_bonfire = -1;
 double g_follow_at = 0;
 // Guest bookkeeping.
 int g_home_bonfire = -1;
+bool g_home_warp_sent = true;  // GoingHome: the warp home was requested (or the game makes its own)
 int g_home_map = -1;
 int g_host_map = -1;
 int g_host_bonfire = -1;
 bool g_callbacks_set = false;
+// A Black Separation Crystal was used (1 guest, 2 host); handled on the next tick, outside the player's update.
+int g_separation = 0;
+bool g_anim_log = true;  // animation sync diagnostic lines in the log (session only)
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -577,7 +584,22 @@ void guest_on_welcome(const Welcome& w) {
              steam::persona(g_host).c_str(), w.map, w.bonfire, type, g_home_bonfire);
 }
 
-void guest_go_home(const std::wstring& why) {
+void warp_home() {
+    g_home_warp_sent = true;
+    const uint32_t gm = game::game_man();
+    LOG_INFO("[coop] Warping home (bonfire %d, map %08X)", g_home_bonfire, g_home_map);
+    if (g_home_bonfire >= 0) {
+        *ptr<int>(gm + game::kGmLastBonfire) = g_home_bonfire;
+        world::warp_now(game::bonfire_map(g_home_bonfire), -1);
+    } else {
+        world::warp_now(g_home_map, -1);
+    }
+    const int own = rules::state().own_chr_type;
+    if (own >= 0) *ptr<int>(game::game_data_man() + 0x60) = own;
+}
+
+void guest_go_home(const std::wstring& why, const char* reason) {
+    LOG_INFO("[coop] Going home (%s; session state %d, step %d)", reason, game::session_state(), game::join_step());
     if (!why.empty()) say(why);
     auto& st = rules::state();
     st.leaving = true;
@@ -585,16 +607,12 @@ void guest_go_home(const std::wstring& why) {
     game::set_join_step(0);
     if (g_lobby) steam::leave_lobby(g_lobby);
     g_lobby = 0;
-    if (!game::own_world() && game::in_game()) {
-        const uint32_t gm = game::game_man();
-        if (g_home_bonfire >= 0) {
-            *ptr<int>(gm + game::kGmLastBonfire) = g_home_bonfire;
-            world::warp_now(game::bonfire_map(g_home_bonfire), -1);
-        } else {
-            world::warp_now(g_home_map, -1);
-        }
-        if (st.own_chr_type >= 0) *ptr<int>(game::game_data_man() + 0x60) = st.own_chr_type;
+    if (game::loading() || !game::own_world()) {
+        // Still in the host's world (or in a load, which may be the game's own way out): the warp home is made
+        // once a character is in a map that is not ours (see GoingHome), never on top of a load.
+        g_home_warp_sent = false;
         set_step(Step::GoingHome);
+        if (game::in_game() && !game::loading() && !game::own_world()) warp_home();
     } else {
         finish(L"");
     }
@@ -641,11 +659,11 @@ void guest_tick() {
         }
         case Step::Loading:
             if (game::session_state() != 6 && in_step > 5.0) {
-                guest_go_home(kMsgConnectTimeout);
+                guest_go_home(kMsgConnectTimeout, "the game session ended while loading");
             } else if (game::join_step() == 4 && game::in_game() && !game::own_world()) {
                 guest_arrived();
             } else if (in_step > 180.0) {
-                guest_go_home(kMsgConnectTimeout);
+                guest_go_home(kMsgConnectTimeout, "loading took over 3 minutes");
             }
             break;
         case Step::InWorld:
@@ -655,9 +673,10 @@ void guest_tick() {
                     rules::state().leaving = true;
                     if (g_lobby) steam::leave_lobby(g_lobby);
                     g_lobby = 0;
+                    g_home_warp_sent = true;  // the game's own way home
                     set_step(Step::GoingHome);
                 } else {
-                    guest_go_home(L"");
+                    guest_go_home(kMsgReturnHome, "the game session ended");
                 }
             }
             // The host's Homeward Bone: follow after a moment.
@@ -671,9 +690,10 @@ void guest_tick() {
         case Step::GoingHome:
             if (g_invade && in_step > 10.0 && game::in_game() && !game::own_world() && !game::loading()) {
                 g_invade = false;  // the game did not send us home: do it ourselves
-                guest_go_home(L"");
+                guest_go_home(L"", "the invasion ended");
                 break;
             }
+            if (!g_home_warp_sent && game::in_game() && !game::loading() && !game::own_world()) warp_home();
             if (game::in_game() && game::own_world() && !game::loading()) {
                 if (rules::state().own_chr_type >= 0 && game::chr_type() != rules::state().own_chr_type) {
                     LOG_INFO("[coop] Home as chr type %d (was %d before joining)", game::chr_type(),
@@ -880,7 +900,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kBye: {
             if (from == g_host && g_role == Role::Guest) {
-                guest_go_home(L"");
+                guest_go_home(kMsgHostClosed, "the host closed the session");
             } else if (g_role == Role::Host) {
                 const PeerInfo* p = peer(from);
                 PlayerEvent e = player_event(kLeft, from, p->invader, p->name);
@@ -1019,20 +1039,135 @@ void update_remote_players() {
     if (now() - last < 0.5) return;
     last = now();
     std::vector<rules::RemotePlayer> out;
-    if (g_role != Role::None && !game::loading()) {
-        for (const auto& r : party::remotes()) {
-            if (!r.chr) continue;
-            rules::RemotePlayer rp;
-            rp.chr = r.chr;
+    if (g_role == Role::None || game::loading()) {
+        rules::set_remote_players(out);
+        return;
+    }
+    // Every other player's character in our world (WorldChrMan's player slots), then who it belongs to: by
+    // character name (session member data), else by position (each player reports theirs every second), else by
+    // elimination (one character and one player left).
+    struct Match {
+        uint32_t chr;
+        const PeerInfo* peer;
+        const char* how;
+    };
+    std::vector<Match> chrs;
+    for (uint32_t chr : game::remote_player_chrs()) chrs.push_back({chr, nullptr, "none"});
+    const std::vector<party::Remote> members = party::remotes();
+    for (auto& m : chrs) {
+        for (const auto& r : members) {
+            if (r.chr != m.chr) continue;
             if (const PeerInfo* p = peer_by_char_name(r.name)) {
-                rp.known = true;
-                rp.invader = p->invader;
-                rp.host = p->id == g_host && g_role == Role::Guest;
+                m.peer = p;
+                m.how = "name";
             }
-            out.push_back(rp);
         }
     }
+    auto taken = [&](const PeerInfo* p) {
+        for (const auto& m : chrs) {
+            if (m.peer == p) return true;
+        }
+        return false;
+    };
+    for (auto& m : chrs) {
+        if (m.peer) continue;
+        game::Vec3 pos{};
+        if (!game::chr_position(m.chr, &pos)) continue;
+        const PeerInfo* best = nullptr;
+        float best_d = 12.0f * 12.0f;  // a second's run, and some
+        for (const auto& p : g_peers) {
+            if (now() - p.last_seen > 5.0 || taken(&p)) continue;
+            const float dx = pos.x - p.pos[0], dy = pos.y - p.pos[1], dz = pos.z - p.pos[2];
+            const float d = dx * dx + dy * dy + dz * dz;
+            if (d < best_d) {
+                best_d = d;
+                best = &p;
+            }
+        }
+        if (best) {
+            m.peer = best;
+            m.how = "position";
+        }
+    }
+    {
+        int open_chrs = 0, open_peers = 0;
+        Match* last_open = nullptr;
+        const PeerInfo* last_peer = nullptr;
+        for (auto& m : chrs) {
+            if (!m.peer) {
+                ++open_chrs;
+                last_open = &m;
+            }
+        }
+        for (const auto& p : g_peers) {
+            if (now() - p.last_seen <= 10.0 && !taken(&p)) {
+                ++open_peers;
+                last_peer = &p;
+            }
+        }
+        if (open_chrs == 1 && open_peers == 1) {
+            last_open->peer = last_peer;
+            last_open->how = "elimination";
+        }
+    }
+    std::string report;
+    for (const auto& m : chrs) {
+        rules::RemotePlayer rp;
+        rp.chr = m.chr;
+        if (m.peer) {
+            rp.known = true;
+            rp.invader = m.peer->invader;
+            rp.host = m.peer->id == g_host && g_role == Role::Guest;
+        }
+        out.push_back(rp);
+        char line[160];
+        std::snprintf(line, sizeof(line), "%s%08X=%s(%s%s)", report.empty() ? "" : ", ", m.chr,
+                      m.peer ? m.peer->name.c_str() : "?", m.how, rp.host ? ", host" : rp.invader ? ", invader" : "");
+        report += line;
+    }
+    static std::string last_report;
+    static int reports = 0;
+    if (report != last_report && reports < 100) {
+        ++reports;
+        last_report = report;
+        LOG_INFO("[coop] Other players' characters here: %s (%zu session member record(s))",
+                 report.empty() ? "none" : report.c_str(), members.size());
+    }
     rules::set_remote_players(out);
+}
+
+// Diagnostic for animation sync (bonfire rests not seen by the others): our animations and whether an override
+// manipulator drives us (the network recorder belongs to our own PadManipulator), and for each other player's
+// character the animations its NetworkManipulator last received (+0x1EC/+0x1F0) and what it plays. Logged when
+// something changes, a limited number of lines per game.
+void anim_sync_log() {
+    static double last = 0;
+    static std::string last_line;
+    static int lines = 0;
+    if (lines >= 1500 || now() - last < 0.2 || game::loading()) return;
+    last = now();
+    const uint32_t me = game::player();
+    if (!me) return;
+    auto id = [](uint32_t packed) { return packed == 0xFFFFFFFF ? -1 : static_cast<int>(packed & 0xFFFF); };
+    char buf[512];
+    int n = std::snprintf(buf, sizeof(buf), "me %d/%d%s", id(game::anim_state(me, 0)), id(game::anim_state(me, 1)),
+                          game::override_manipulator(me) ? " (override)" : "");
+    for (uint32_t chr : game::remote_player_chrs()) {
+        const uint32_t m = game::manipulator(chr);
+        uint32_t r0 = 0xFFFFFFFF, r1 = 0xFFFFFFFF;
+        if (m) {
+            read32(m + 0x1EC, &r0);
+            read32(m + 0x1F0, &r1);
+        }
+        n += std::snprintf(buf + n, sizeof(buf) - n, " | %08X got %d/%d plays %d/%d%s", chr, id(r0), id(r1),
+                           id(game::anim_state(chr, 0)), id(game::anim_state(chr, 1)),
+                           game::override_manipulator(chr) ? " (override)" : "");
+        if (n >= static_cast<int>(sizeof(buf)) - 64) break;
+    }
+    if (last_line == buf) return;
+    last_line = buf;
+    ++lines;
+    LOG_INFO("[coop] anim %s", buf);
 }
 
 void set_callbacks() {
@@ -1043,6 +1178,7 @@ void set_callbacks() {
     rules::set_flag_listener(&queue_flag);
     rules::set_bonfire_warp_listener(&send_bonfire_warp);
     rules::set_bonfire_lit_listener(&send_bonfire_lit);
+    rules::set_separation_listener([](bool host) { g_separation = host ? 2 : 1; });
     steam::on_lobby_member([](uint64_t lobby, uint64_t user, bool entered) {
         if (lobby != g_lobby) return;
         if (entered) {
@@ -1051,7 +1187,7 @@ void set_callbacks() {
             return;
         }
         if (g_role == Role::Guest && user == g_host) {
-            guest_go_home(L"");
+            guest_go_home(kMsgReturnHome, "the host left the lobby");
         } else if (g_role == Role::Host) {
             for (const auto& p : g_peers) {
                 if (p.id == user) say(fmt(p.invader ? kMsgInvaderLeft : kMsgLeft, text::widen(p.name)));
@@ -1080,6 +1216,15 @@ void tick() {
     if (!steam::ready()) return;
     set_callbacks();
     steam::poll(on_message);
+    if (g_separation) {
+        const int what = g_separation;
+        g_separation = 0;
+        if (what == 2 && g_role == Role::Host) {
+            close_world();
+        } else if (what == 1 && g_role == Role::Guest) {
+            leave();
+        }
+    }
     if (g_role == Role::Host) host_tick();
     if (g_role == Role::Guest) guest_tick();
     text::set_seamless_active(g_role != Role::None);
@@ -1088,6 +1233,7 @@ void tick() {
     // game's own rules).
     party::tick(!g_invade && (g_step == Step::Hosting || g_step == Step::InWorld), &peer_state);
     update_remote_players();
+    if (g_role != Role::None && g_anim_log) anim_sync_log();
     rules::tick();
     {
         const auto& st = rules::state();
@@ -1189,12 +1335,19 @@ void leave() {
         return;
     }
     if (g_step == Step::InWorld || g_step == Step::Loading) {
-        guest_go_home(L"");
+        guest_go_home(kMsgReturnHome, "we left");
     } else {
         rules::state().leaving = true;
         if (game::session_state() != 0) game::leave_session();
         finish(L"");
     }
+}
+
+void close_world() {
+    if (g_role != Role::Host) return;
+    LOG_INFO("[coop] The host closes the world (%zu other player(s))", g_peers.size());
+    say(kMsgWorldClosed);
+    leave();
 }
 
 void cycle_rules() {

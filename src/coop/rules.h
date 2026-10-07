@@ -42,6 +42,10 @@ void set_bonfire_lit_listener(void (*fn)(int bonfire));
 // The same, on behalf of another player (does not report back).
 void remote_bonfire_warp(int bonfire);
 void remote_bonfire_lit(int bonfire);
+// The local player used a Black Separation Crystal in a seamless session (game thread, inside the player's
+// update): `fn(true)` the host closes their world, `fn(false)` a guest goes home. The game's own separation
+// (the host's phantom menu, the guest's Lua leave) is skipped.
+void set_separation_listener(void (*fn)(bool host));
 
 // The other players' characters in our world, for the teams (world rules, invaders).
 struct RemotePlayer {

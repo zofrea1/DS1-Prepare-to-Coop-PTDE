@@ -369,12 +369,7 @@ bool chr_pos(uint32_t chr, float out[3]) {
 
 template <typename F>
 void each_remote_player(F&& fn) {
-    uint32_t wcm = 0, n = 0, arr = 0;
-    if (!read32(kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x24, &n) || !read32(wcm + 0x28, &arr) || !arr) return;
-    for (uint32_t i = 0; i < n && i < 8; ++i) {
-        uint32_t chr = 0;
-        if (read32(arr + i * 0x20, &chr) && chr) fn(chr);
-    }
+    for (uint32_t chr : game::remote_player_chrs()) fn(chr);
 }
 
 }  // namespace

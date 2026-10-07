@@ -60,6 +60,18 @@ bool own_world();
 int chr_type();                // PlayerIns+0x70: 0 human, 1 white, 2 black, 8 hollow, 12 intruder
 int map_id();                  // PlayerIns+0x444
 bool position(Vec3* pos, float* angle);
+// Another character's position (PlayerIns/ChrIns: +0x28 controller, +0x1C physics, +0x10 position).
+bool chr_position(uint32_t chr, Vec3* pos);
+// The other players' characters in our world: WorldChrMan's player slots 1.. (+0x24 count, +0x28 array of
+// 0x20-byte entries; slot 0 is the local player).
+std::vector<uint32_t> remote_player_chrs();
+// A character's current animation on layer 0 or 1, packed as the network samples carry it (0xE2C030: anim id in
+// the low 16 bits), 0xFFFFFFFF none.
+uint32_t anim_state(uint32_t chr, int layer);
+// A character's controller (+0x28) manipulators: +0x54 its own (PadManipulator for the local player,
+// NetworkManipulator for another player), +0x244 an override that drives it instead while set.
+uint32_t manipulator(uint32_t chr);
+uint32_t override_manipulator(uint32_t chr);
 int last_bonfire();
 bool loading();                // no local player (map load in progress)
 bool in_game();                // a character is loaded (not title/menu)

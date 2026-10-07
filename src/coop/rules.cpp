@@ -3,6 +3,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "session.h"
 #include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -10,6 +11,7 @@
 
 #include <cstring>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace coop::rules {
@@ -40,10 +42,32 @@ constexpr uint32_t kRetMapChangeParty = 0x00EFDDFA;
 void* g_leave_orig = nullptr;
 void* g_party_orig = nullptr;
 int g_blocked_leaves = 0;
+// Set while this process hosts a seamless session, and cleared only once the game session is solo.
+// Survives finish() clearing the role, so a guest disconnect that arrives a moment later still does not
+// take the host to the title screen.
+bool g_seamless_hosted = false;
+// Item own-world writes (see below) must not be broadcast as shared progress.
+int g_flag_quiet = 0;
+void clear_guest_item_handles();
 
 bool seamless_rules() { return g_state.active && !g_state.leaving && !g_state.invader; }
 
+// A co-op guest's leave_session looks to the host like the whole session ended. These callers then run the
+// title leave when only one member remains. Vanilla phantom leave does not title-kick the host; block these
+// only for the seamless host, in its own world, while the game session is still hosting.
+constexpr uint32_t kRetMemberLeft = 0x00D2E83F;
+constexpr uint32_t kRetMemberLeftMenu = 0x00DB4A4A;
+constexpr uint32_t kRetMemberLeftMenu2 = 0x00DB4AD1;
+
+bool host_stays(uint32_t ret) {
+    if (ret != kRetMemberLeft && ret != kRetMemberLeftMenu && ret != kRetMemberLeftMenu2) return false;
+    if (!g_seamless_hosted || g_state.invader || !game::own_world() || game::session_state() != 3) return false;
+    if (++g_blocked_leaves <= 50) LOG_INFO("[coop] Kept the host in the world (leave from %08X skipped)", ret);
+    return true;
+}
+
 bool __stdcall allow_leave(uint32_t ret) {
+    if (host_stays(ret)) return false;
     if (!seamless_rules()) return true;
     switch (ret) {
         case kRetLuaLeave:
@@ -107,6 +131,16 @@ bool g_marked = false;
 
 void __cdecl before_map_load() {
     g_marked = false;
+    clear_guest_item_handles();
+    // The warp map was already chosen from the last bonfire. Write it again in case the load resets it
+    // before the spawn reads it. A follow sets the remembered bonfire first, so this does not snap back
+    // to the previous one. Going home sets leaving and keeps the guest's own bonfire.
+    if (g_state.guest && !g_state.invader && !g_state.leaving) {
+        const int bonfire = session::guest_respawn_bonfire();
+        if (bonfire >= 0) {
+            if (const uint32_t gm = game::game_man()) *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
+        }
+    }
     if (seamless_rules() && g_state.guest && game::session_state() == 6 && game::join_step() == 4) {
         game::set_join_step(3);
         g_marked = true;
@@ -221,12 +255,14 @@ bool shared_flag(int id) { return id >= 0 && !(id >= 4000 && id <= 4999); }
 
 void __stdcall before_set_flag(int id) {
     g_old_value = -1;
+    if (g_flag_quiet) return;
     if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return;
     if (!seamless_rules() || !shared_flag(id)) return;
     g_old_value = game::flag(id) ? 1 : 0;
 }
 
 void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
+    if (g_flag_quiet) return;
     if (!seamless_rules() || !efm) return;
     const bool on = (value & 0xFF) != 0;
     if (g_old_value >= 0 && g_old_value != (on ? 1 : 0) && GetCurrentThreadId() == g_main_thread) {
@@ -846,6 +882,191 @@ __declspec(naked) void hk_separation_host() {
     }
 }
 
+// ---------------------------------------------------------------- per-player treasure
+// A guest pickup ORs the item's event-flag bit in the item manager (0xDC76F0) and never calls the flag setter,
+// so the guest's own world is not updated and the host is not told. On the next load the other-world bits are
+// rebuilt from the host, and the item is back. Doors use the same object-flag class as chests, so this does
+// not hook those getters: only item-list flags are treated as treasure.
+//
+// A flag seen on an item is remembered. While the guest's own-world copy of it is on, get_flag reports it on
+// (events leave the treasure alone) and the spawned item is disabled locally. The host's copy is untouched.
+constexpr uint32_t kItemManVar = 0x0137D6BC;
+constexpr uint32_t kItemLookup = 0x00DC4AE0;  // thiscall(manager), stdcall(handle) -> item, ret 4
+constexpr uint32_t kItemEnable = 0x00DC6490;  // thiscall(manager), stdcall(handle, enable), ret 8
+constexpr uint32_t kItemRemove = 0x00DC76F0;  // stdcall(manager, handle, setFlag), ret 0xC
+constexpr uint32_t kGetFlag = 0x00D38C40;     // eax = EventFlagMan, ecx = 0, stdcall(id) -> al, ret 4
+constexpr uint32_t kItemLists[] = {0x1C, 0x24, 0x2C, 0x34};
+
+void* g_getflag_orig = nullptr;
+void* g_remove_orig = nullptr;
+std::set<int> g_item_flags;
+std::set<int> g_owned_flags;  // own-world bit is on; cached so get_flag does not re-enter every check
+std::set<uint32_t> g_hidden_items;
+int g_in_own_flag = 0;
+
+void clear_guest_item_handles() { g_hidden_items.clear(); }
+
+uint32_t lookup_item(uint32_t manager, uint32_t handle) {
+    if (!manager || !handle) return 0;
+    uint32_t item = 0;
+    __try {
+        __asm {
+            push handle
+            mov ecx, manager
+            mov eax, kItemLookup
+            call eax
+            mov item, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return item;
+}
+
+bool disable_item(uint32_t manager, uint32_t handle) {
+    __try {
+        __asm {
+            push 0
+            push handle
+            mov ecx, manager
+            mov eax, kItemEnable
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+// Own-world bit, through the get_flag trampoline. game::flag() would re-enter the hook.
+bool own_flag_on(int id) {
+    const uint32_t efm = game::event_flag_man();
+    if (!efm || !g_getflag_orig || id < 0 || g_in_own_flag) return false;
+    uint32_t active = 0;
+    if (!read32(efm + 0x10C, &active)) return false;
+    ++g_in_own_flag;
+    *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
+    uint8_t on = 0;
+    void* fn = g_getflag_orig;
+    __try {
+        __asm {
+            push id
+            xor ecx, ecx
+            mov eax, efm
+            call fn
+            mov on, al
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        on = 0;
+    }
+    *ptr<uint32_t>(efm + 0x10C) = active;
+    --g_in_own_flag;
+    return on != 0;
+}
+
+bool guest_owns_flag(int id) {
+    if (id < 0 || g_in_own_flag) return false;
+    if (g_owned_flags.count(id)) return true;
+    if (!g_item_flags.count(id) || !own_flag_on(id)) return false;
+    g_owned_flags.insert(id);
+    return true;
+}
+
+int __stdcall guest_item_flag_on(uint32_t, int id) {
+    if (!g_state.guest || g_state.invader) return 0;
+    return guest_owns_flag(id) ? 1 : 0;
+}
+
+__declspec(naked) void hk_get_flag() {
+    __asm {
+        pushad
+        push dword ptr [esp + 36]  // flag id
+        push dword ptr [esp + 4]   // EventFlagMan, saved eax
+        call guest_item_flag_on
+        test eax, eax
+        popad
+        jnz force_on
+        jmp g_getflag_orig
+    force_on:
+        mov eax, 1
+        ret 4
+    }
+}
+
+void remember_item_flag(int id) {
+    if (id < 0) return;
+    g_item_flags.insert(id);
+}
+
+void __stdcall note_guest_pickup(uint32_t manager, uint32_t handle) {
+    if (!g_state.guest || g_state.invader) return;
+    const uint32_t item = lookup_item(manager, handle);
+    if (!item) return;
+    uint32_t flag = 0;
+    if (!read32(item + 0x18, &flag) || (flag & 0x80000000u)) return;
+    const int id = static_cast<int>(flag);
+    remember_item_flag(id);
+    ++g_flag_quiet;
+    game::set_own_world_flag(id, true);
+    --g_flag_quiet;
+    g_owned_flags.insert(id);
+    static int lines = 0;
+    if (++lines <= 40) {
+        LOG_INFO("[coop] Guest took item flag %d; it stays taken for them, the host keeps theirs", id);
+    }
+}
+
+__declspec(naked) void hk_item_remove() {
+    __asm {
+        pushad
+        push dword ptr [esp + 40]  // handle
+        push dword ptr [esp + 40]  // manager (shifted by the push above)
+        call note_guest_pickup
+        popad
+        jmp g_remove_orig
+    }
+}
+
+void hide_owned_items() {
+    if (!g_state.guest || g_state.invader || game::loading() || !g_getflag_orig) return;
+    uint32_t manager = 0;
+    if (!read32(kItemManVar, &manager) || !manager) return;
+    __try {
+        for (uint32_t off : kItemLists) {
+            uint32_t node = 0;
+            if (!read32(manager + off, &node)) continue;
+            for (int guard = 0; node && guard < 4096; ++guard) {
+                uint32_t next = 0, handle = 0, flag = 0;
+                if (!read32(node, &next)) break;
+                read32(node + 0x10, &handle);
+                read32(node + 0x18, &flag);
+                node = next;
+                if (!handle || (flag & 0x80000000u)) continue;
+                const int id = static_cast<int>(flag);
+                remember_item_flag(id);
+                if (!guest_owns_flag(id) || !g_hidden_items.insert(handle).second) continue;
+                if (!disable_item(manager, handle)) {
+                    g_hidden_items.erase(handle);
+                    continue;
+                }
+                static int lines = 0;
+                if (++lines <= 40) LOG_INFO("[coop] Item flag %d is already the guest's; hidden here", id);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        static int lines = 0;
+        if (++lines <= 5) LOG_ERROR("[coop] Scanning the item lists failed");
+    }
+}
+
+void note_hosted_session() {
+    if (game::session_state() == 0) {
+        g_seamless_hosted = false;
+        return;
+    }
+    if (g_state.host && !g_state.invader && game::own_world() && game::session_state() == 3) g_seamless_hosted = true;
+}
+
 int install_one(const char* what, bool ok) {
     if (!ok) LOG_ERROR("[coop] Hook not installed: %s (code does not match this build)", what);
     return ok ? 0 : 1;
@@ -919,6 +1140,18 @@ int install() {
         failed += install_one("event flag dual write", g_set_flag_orig != nullptr);
     }
     {
+        // push ebx ; xor bl,bl ; push esi ; mov esi,[esp+0Ch]
+        static const uint8_t k[8] = {0x53, 0x32, 0xDB, 0x56, 0x8B, 0x74, 0x24, 0x0C};
+        g_getflag_orig = detour(kGetFlag, k, sizeof(k), reinterpret_cast<void*>(&hk_get_flag));
+        failed += install_one("guest item flags", g_getflag_orig != nullptr);
+    }
+    {
+        // mov eax,[esp+8] ; mov ecx,[esp+4]
+        static const uint8_t k[8] = {0x8B, 0x44, 0x24, 0x08, 0x8B, 0x4C, 0x24, 0x04};
+        g_remove_orig = detour(kItemRemove, k, sizeof(k), reinterpret_cast<void*>(&hk_item_remove));
+        failed += install_one("guest item pickup", g_remove_orig != nullptr);
+    }
+    {
         const int bad = install_loot();
         if (bad) LOG_ERROR("[coop] %d of 6 loot rule patches did not match this build", bad);
         failed += install_one("loot rules", bad == 0);
@@ -986,6 +1219,14 @@ void tick() {
     // while it leaves (the area unload on the way home must clean up the same way the items were made).
     g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;
     apply_teams();
+    note_hosted_session();
+    if (!g_state.guest) {
+        g_item_flags.clear();
+        g_owned_flags.clear();
+        g_hidden_items.clear();
+    } else {
+        hide_owned_items();
+    }
     if (!seamless_rules()) return;
     if (g_state.host && game::session_state() == 3) game::keep_room_open();
 }

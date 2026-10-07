@@ -4,6 +4,7 @@
 #include "hook.h"
 #include "log.h"
 #include "rules.h"
+#include "session.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -223,8 +224,11 @@ int max_hp(uint32_t chr) {
 // Util_RequestRegene (the rest that respawns the world). As in Remastered Seamless Co-op the co-op items the
 // player lacks are given and every Crimson Blossom withers before the game's own rest; afterwards the other
 // players are told (their worlds reset too).
-void __stdcall before_rest() {
-    LOG_INFO("[coop] Rested at a bonfire");
+void __stdcall before_rest(int object_id) {
+    LOG_INFO("[coop] Rested at a bonfire (object %d)", object_id);
+    // The guest's sit timer never writes GameMan+0xB04, so a death kept using the bonfire from the join
+    // (Firelink, in the test). The respawn id is the object id plus 1000.
+    session::note_guest_rest(object_id);
     if (g_before_rest_fn) g_before_rest_fn();
 }
 
@@ -235,6 +239,7 @@ void __stdcall after_rest() {
 __declspec(naked) void hk_regene() {
     __asm {
         pushad
+        push dword ptr [esp + 36]  // stdcall arg: was [esp+4], pushad added 32
         call before_rest
         popad
         push dword ptr [esp + 4]

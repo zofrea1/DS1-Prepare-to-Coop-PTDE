@@ -15,6 +15,7 @@ namespace {
 constexpr uint32_t kCreateSession = 0x00D2D4F0;   // thiscall(sess, int map, float timeout) -> bool, ret 8
 constexpr uint32_t kJoinSession = 0x00D2D320;     // thiscall(sess, NRSessionSearchResult*), ret 4
 constexpr uint32_t kLeaveSession = 0x00D2B460;    // esi = sess
+constexpr uint32_t kAbortSession = 0x00D2B060;    // stdcall(sess), ret 4: state 0, no title transition
 // Our own session as an NRSessionSearchResult (vanilla host code at 0xDB44EE).
 constexpr uint32_t kRefreshSelfResult = 0x006FE430;  // thiscall(sess+4, sess+0x28, 1), ret 8
 constexpr uint32_t kResultCopy = 0x006F9D90;         // thiscall(result, src), ret 4
@@ -324,6 +325,19 @@ void leave_session() {
         mov eax, kLeaveSession
         call eax
         pop esi
+    }
+}
+
+void abort_session() {
+    const uint32_t s = sess_man();
+    if (!s) return;
+    __try {
+        __asm {
+            push s
+            mov eax, kAbortSession
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 

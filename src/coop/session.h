@@ -70,4 +70,11 @@ const std::vector<PeerInfo>& peers();
 // The host's arrival point for guests: where the host last rested at a bonfire (set on every rest).
 void remember_rest_point();
 
+// Guest: a death in the host's world respawns at this bonfire. `object_id` is the bonfire object
+// Util_RequestRegene was given; the respawn id is that plus 1000. Ignored unless we are a co-op guest.
+void note_guest_rest(int object_id);
+// The same, with an id that is already a respawn bonfire (the host's, on join or when following a Homeward Bone).
+void note_guest_respawn(int bonfire);
+int guest_respawn_bonfire();
+
 }  // namespace coop::session

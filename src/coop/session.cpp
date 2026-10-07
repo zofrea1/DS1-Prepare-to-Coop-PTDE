@@ -221,6 +221,7 @@ int g_follow_bonfire = -1;
 double g_follow_at = 0;
 // Guest bookkeeping.
 int g_home_bonfire = -1;
+int g_guest_bonfire = -1;  // respawn id while we are a guest (-1 none)
 bool g_home_warp_sent = true;  // GoingHome: the warp home was requested (or the game makes its own)
 int g_home_map = -1;
 int g_host_map = -1;
@@ -325,6 +326,7 @@ void finish(const std::wstring& why) {
     g_peers.clear();
     g_homeward_at = 0;
     g_follow_bonfire = -1;
+    g_guest_bonfire = -1;
     reset_rules();
     set_step(Step::Idle);
 }
@@ -590,6 +592,8 @@ void guest_on_welcome(const Welcome& w) {
     g_home_map = game::map_id();
     g_host_map = w.map;
     g_host_bonfire = w.bonfire;
+    // Until the guest rests, a death uses the host's bonfire. Set before the join: the reload can run inside it.
+    if (w.bonfire >= 0 && !g_invade) g_guest_bonfire = w.bonfire;
     const game::Vec3 pos{w.pos[0], w.pos[1], w.pos[2]};
     if (!game::join_from_invitation(w.invitation, w.invitation_size, w.map, pos, w.angle)) {
         finish(kMsgConnectTimeout);
@@ -702,6 +706,7 @@ void guest_tick() {
             if (g_follow_bonfire >= 0 && now() >= g_follow_at && game::in_game() && !game::loading()) {
                 const int bonfire = g_follow_bonfire;
                 g_follow_bonfire = -1;
+                g_guest_bonfire = bonfire;
                 *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
                 world::warp_now(game::bonfire_map(bonfire), -1);
             }
@@ -952,16 +957,12 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         case kAnim: {
             AnimMsg m;
             if (!as(&m) || g_role == Role::None || game::loading()) return;
-            for (const auto& [chr, id] : g_chr_peer) {
-                if (id != from) continue;
-                motion::Anim a{m.kind, m.anim, m.a2, m.a3};
-                static int lines = 0;
-                if (++lines <= 200) {
-                    LOG_INFO("[coop] %s plays animation %d (%s): shown on their character %08X",
-                             steam::persona(from).c_str(), m.anim, m.kind ? "forced" : "event", chr);
-                }
-                motion::play_remote_anim(chr, a);
+            static int lines = 0;
+            if (++lines <= 20) {
+                LOG_INFO("[coop] Ignored ceremony animation %d from %s", m.anim, steam::persona(from).c_str());
             }
+            motion::Anim a{m.kind, m.anim, m.a2, m.a3};
+            motion::play_remote_anim(0, a);
             break;
         }
         case kPing: {
@@ -1442,10 +1443,20 @@ void leave() {
     fill_header(&bye, kBye);
     broadcast(bye);
     if (g_role == Role::Host) {
-        rules::state().leaving = true;
-        if (game::session_state() != 0) game::leave_session();
+        // leave_session (0xD2B460) sets the session to "leaving" and the host is dropped at the title screen.
+        // The position saved on the way out has no floor, so the next load falls through the world once.
+        // abort_session returns the game session to solo without that transition. Guests were already told
+        // to go home. The host is not warped. leaving stays clear so a member-left during the cleanup is
+        // still blocked (see rules).
+        const int before = game::session_state();
+        if (before != 0) game::abort_session();
+        const int after = game::session_state();
+        if (after != 0) {
+            if (const uint32_t s = game::sess_man()) *ptr<int>(s + game::kSessState) = 0;
+            LOG_ERROR("[coop] Session cleanup left state %d (was %d); forced it to solo", after, before);
+        }
         finish(L"");
-        LOG_INFO("[coop] Session disbanded");
+        LOG_INFO("[coop] Session disbanded (game session %d, host stays in the world)", before);
         return;
     }
     if (g_step == Step::InWorld || g_step == Step::Loading) {
@@ -1518,6 +1529,24 @@ void remember_rest_point() {
     r.valid = r.map != -1;
     g_rest = r;
 }
+
+void note_guest_respawn(int bonfire) {
+    if (g_role != Role::Guest || g_invade || bonfire < 0) return;
+    g_guest_bonfire = bonfire;
+    if (const uint32_t gm = game::game_man()) *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
+}
+
+void note_guest_rest(int object_id) {
+    if (g_role != Role::Guest || g_invade) return;
+    if (object_id <= 100000 || object_id >= 30000000) {
+        LOG_INFO("[coop] Rest object %d is not a bonfire; respawn unchanged", object_id);
+        return;
+    }
+    note_guest_respawn(object_id + 1000);
+    LOG_INFO("[coop] Guest respawn bonfire is now %d (rested at object %d)", object_id + 1000, object_id);
+}
+
+int guest_respawn_bonfire() { return (g_role == Role::Guest && !g_invade) ? g_guest_bonfire : -1; }
 
 std::vector<std::wstring> panel_lines(int mode) {
     std::vector<std::wstring> out;

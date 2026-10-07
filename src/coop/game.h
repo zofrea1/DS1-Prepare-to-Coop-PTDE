@@ -82,8 +82,11 @@ bool create_session(int map, float timeout);
 bool build_invitation(int join_type, int flag, std::vector<uint8_t>* out);
 // Guest: joins the session an invitation describes (the vanilla guest code path), then sets the spawn point.
 bool join_from_invitation(const uint8_t* data, uint32_t size, int map, const Vec3& pos, float angle);
-// The game's own leave (also used for invasion endings and genuine disconnects).
+// The game's own leave (also used for invasion endings and genuine disconnects). Sets the session to
+// "leaving", which takes the host to the title screen.
 void leave_session();
+// Back to a solo session (state 0) without that leave. The host stays in the world.
+void abort_session();
 // Stop new members and the empty-room countdown.
 void keep_room_open();
 

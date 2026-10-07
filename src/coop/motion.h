@@ -7,11 +7,10 @@
 //    from 0.01 m/s, run from 2, sprint from 6). Remastered sends the sender's own gait with every sample and only
 //    falls back to the speed (sprint from 4.5). Each player sends its gait here; the receiving game's choice is
 //    replaced by it while the character is moving, and the fallback's sprint threshold is Remastered's.
-//  * Event animations: the bonfire rest (sitting down, the sitting loop, standing up, kindling) and the bonfire
-//    warp are played by the event script on the local player only (Lua PlayAnimation / PlayLoopAnimation /
-//    ForcePlayAnimation, 0xD71A20 / 0xD719C0) and are not in the player samples. They are sent here and played
-//    on that player's character in the other games, as the game's own synchro animations do (entity
-//    10001 + the character's net player number, PlayerIns+0x410).
+// Bonfire ceremonies (sitting, standing, kindling, Reverse Hollowing) are not replayed on the other player's
+// character. The event cores that play them (0xD71A20 / 0xD719C0) also take that character off the network
+// manipulator and clear its collision, so the other player could push the body and its animations stopped.
+// play_remote_anim ignores them, including ceremonies an older build still sends.
 
 #include <cstdint>
 #include <vector>

@@ -66,54 +66,7 @@ game::Vec3 g_prev_pos{};
 bool g_have_prev = false;
 double g_speed = 0;
 Gait g_local = kStand;
-
-// ---------------------------------------------------------------- event animations
-constexpr uint32_t kPlayCore = 0x00D71A20;   // eax = anim, stdcall(entity, a2, a3)
-constexpr uint32_t kForceCore = 0x00D719C0;  // the same for ForcePlayAnimation
-constexpr int kLocalPlayer = 10000;
-constexpr int kNetPlayer = 10001;
-void* g_play_orig = nullptr;
-void* g_force_orig = nullptr;
-bool g_replaying = false;
 std::vector<Anim> g_pending;
-
-bool synced_anim(int anim) {
-    return (anim >= 7590 && anim <= 7730) ||  // bonfire: sit down, sitting loop, stand up, kindle, warp
-           (anim >= 8280 && anim <= 8290);    // bonfire warp out
-}
-
-void __stdcall note_anim(int kind, int anim, int entity, int a2, int a3) {
-    if (g_replaying || entity != kLocalPlayer || !synced_anim(anim) || g_pending.size() >= 32) return;
-    g_pending.push_back(Anim{static_cast<uint8_t>(kind), anim, a2, a3});
-}
-
-__declspec(naked) void hk_play_core() {
-    __asm {
-        pushad
-        push dword ptr [esp + 44]
-        push dword ptr [esp + 44]
-        push dword ptr [esp + 44]
-        push eax
-        push 0
-        call note_anim
-        popad
-        jmp g_play_orig
-    }
-}
-
-__declspec(naked) void hk_force_core() {
-    __asm {
-        pushad
-        push dword ptr [esp + 44]
-        push dword ptr [esp + 44]
-        push dword ptr [esp + 44]
-        push eax
-        push 1
-        call note_anim
-        popad
-        jmp g_force_orig
-    }
-}
 
 }  // namespace
 
@@ -133,12 +86,6 @@ bool install() {
         const uint32_t operand = reinterpret_cast<uint32_t>(&g_sprint_speed);
         std::memcpy(code + 4, &operand, 4);
         if (!patch(kSprintSite, k, code, sizeof(code))) ++failed;
-    }
-    {
-        static const uint8_t k[5] = {0x53, 0x8A, 0x5C, 0x24, 0x10};  // push ebx ; mov bl,[esp+10h]
-        g_play_orig = detour(kPlayCore, k, sizeof(k), reinterpret_cast<void*>(&hk_play_core));
-        g_force_orig = detour(kForceCore, k, sizeof(k), reinterpret_cast<void*>(&hk_force_core));
-        if (!g_play_orig || !g_force_orig) ++failed;
     }
     QueryPerformanceFrequency(&g_freq);
     if (failed) LOG_ERROR("[coop] %d motion sync patch(es) did not match this build", failed);
@@ -214,26 +161,9 @@ void clear_remote_gaits() {
     }
 }
 
-void play_remote_anim(uint32_t chr, const Anim& a) {
-    uint32_t netno = 0;
-    if (!chr || !read32(chr + 0x410, &netno) || netno > 8) return;
-    const int entity = kNetPlayer + static_cast<int>(netno);
-    const int anim = a.anim, a2 = a.a2, a3 = a.a3;
-    const uint32_t core = a.kind ? kForceCore : kPlayCore;
-    g_replaying = true;
-    __try {
-        __asm {
-            push a3
-            push a2
-            push entity
-            mov eax, anim
-            mov edx, core
-            call edx
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_ERROR("[coop] Playing animation %d on another player's character failed", anim);
-    }
-    g_replaying = false;
+void play_remote_anim(uint32_t, const Anim&) {
+    // See motion.h. Driving a remote character through the event animation cores leaves it intangible and,
+    // after Reverse Hollowing, stuck sitting. Nothing is played here.
 }
 
 }  // namespace coop::motion

@@ -571,8 +571,12 @@ int wanted_team(uint32_t chr) {
     return -1;
 }
 
+// The world rules make another player hostile for fighting only (friendly fire): checks that are not about
+// hitting someone run with the teams the game gave the characters (see teams_neutral).
+int g_neutral = 0;
+
 int __stdcall team_override(uint32_t chr) {
-    if (!g_state.active || g_state.leaving || !chr) return -1;
+    if (!g_state.active || g_state.leaving || !chr || g_neutral) return -1;
     if (chr != game::player() && !is_remote_player(chr)) return -1;
     return wanted_team(chr);
 }
@@ -618,6 +622,72 @@ void apply_teams() {
         bool present = false;
         for (uint32_t c : chrs) present |= c == it->first;
         it = present ? std::next(it) : g_team_saved.erase(it);
+    }
+}
+
+// Friendly fire (Ominous Tome, world rules 1) puts allies on team 13 so they can hurt each other. Lock-on and the
+// bonfire's "an enemy is here" check are not part of that: they run with the teams the game gave the characters.
+// Teams mode (world rules 2) keeps team 13 for those checks, so opponents lock on and a nearby opponent blocks a rest.
+bool friendly_fire_only() { return g_state.active && g_state.world_rules == 1; }
+
+void __cdecl teams_neutral() {
+    if (g_neutral++ != 0) return;
+    if (!friendly_fire_only()) return;
+    for (const auto& [chr, saved] : g_team_saved) {
+        if (wanted_team(chr) == kTeamEveryone) write_team(chr, saved);
+    }
+}
+
+void __cdecl teams_restore() {
+    if (g_neutral <= 0 || --g_neutral != 0) return;
+    if (!friendly_fire_only()) return;
+    for (const auto& [chr, saved] : g_team_saved) {
+        const int want = wanted_team(chr);
+        if (want == kTeamEveryone) write_team(chr, want);
+    }
+}
+
+// Lock-on (0xDBACD0, stdcall(LockTgtMan, dt, ?), called every frame at 0xE4025B and 0xE41BD9) keeps the
+// lockable points whose character is hostile to the player. Friendly fire (the Ominous Tome) lets allies hurt each
+// other but not lock on to each other, so the lock-on runs with the teams the game gave them.
+constexpr uint32_t kLockOn = 0x00DBACD0;
+constexpr uint32_t kLockOnSites[] = {0x00E4025B, 0x00E41BD9};
+
+__declspec(naked) void hk_lock_on() {
+    __asm {
+        pushad
+        call teams_neutral
+        popad
+        push dword ptr [esp + 12]
+        push dword ptr [esp + 12]
+        push dword ptr [esp + 12]
+        mov eax, kLockOn
+        call eax
+        pushad
+        call teams_restore
+        popad
+        ret 12
+    }
+}
+
+// The bonfire refuses a rest while a character hostile to players is about and fighting (0xE3DF90, thiscall
+// (WorldChrMan, block), called from the bonfire object at 0xD58B49). A player made hostile by the world rules does
+// not count, so a companion does not lock the bonfire.
+constexpr uint32_t kBonfireFoes = 0x00E3DF90;
+constexpr uint32_t kBonfireFoesSite = 0x00D58B49;
+
+__declspec(naked) void hk_bonfire_foes() {
+    __asm {
+        pushad
+        call teams_neutral
+        popad
+        push dword ptr [esp + 4]
+        mov eax, kBonfireFoes
+        call eax
+        pushad
+        call teams_restore
+        popad
+        ret 4
     }
 }
 
@@ -855,6 +925,11 @@ int install() {
     }
     failed += install_one("guest's own items", install_items() == 0);
     failed += install_one("bonfire party check", redirect_call(0x00D58AE4, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
+    failed += install_one("bonfire foes check",
+                          redirect_call(kBonfireFoesSite, kBonfireFoes, reinterpret_cast<void*>(&hk_bonfire_foes)));
+    for (uint32_t site : kLockOnSites) {
+        failed += install_one("lock-on (friendly fire)", redirect_call(site, kLockOn, reinterpret_cast<void*>(&hk_lock_on)));
+    }
     {
         static const uint8_t k[6] = {0x8B, 0x0D, 0xA0, 0x84, 0x37, 0x01};  // mov ecx,[013784A0h]
         g_have_party_orig = reinterpret_cast<BoolFn>(

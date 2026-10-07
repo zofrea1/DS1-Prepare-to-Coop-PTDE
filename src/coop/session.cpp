@@ -4,6 +4,7 @@
 #include "hook.h"
 #include "items.h"
 #include "log.h"
+#include "motion.h"
 #include "party.h"
 #include "rules.h"
 #include "steam.h"
@@ -43,6 +44,8 @@ enum MsgType : uint8_t {
     kBonfireLit = 13,  // a bonfire was lit for the first time (guest -> host -> guests)
     kArrived = 14,     // guest/invader -> host -> all: arrived in the host's world
     kLeft = 15,        // host -> guests: another player left
+    kGait = 16,        // everyone -> everyone: our walk/run/sprint (on change and twice a second)
+    kAnim = 17,        // everyone -> everyone: an event animation we played (bonfire rest, bonfire warp)
 };
 
 enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4 };
@@ -111,6 +114,17 @@ struct PlayerEvent {
     uint64_t who;
     uint8_t invader;
     char name[64];
+};
+struct GaitMsg {
+    Header h;
+    int8_t gait;
+};
+struct AnimMsg {
+    Header h;
+    uint8_t kind;
+    int32_t anim;
+    int32_t a2;
+    int32_t a3;
 };
 constexpr int kFlagsPerMsg = 96;
 struct FlagsMsg {
@@ -214,7 +228,12 @@ int g_host_bonfire = -1;
 bool g_callbacks_set = false;
 // A Black Separation Crystal was used (1 guest, 2 host); handled on the next tick, outside the player's update.
 int g_separation = 0;
-bool g_anim_log = true;  // animation sync diagnostic lines in the log (session only)
+bool g_anim_log = false;  // animation sync diagnostic lines in the log (session only)
+// Which player each other character in our world belongs to (kept while both exist, see update_remote_players).
+std::map<uint32_t, uint64_t> g_chr_peer;
+// Our gait as last sent (motion sync).
+int g_sent_gait = -1;
+double g_last_gait = 0;
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -922,6 +941,29 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                           g_peers.end());
             break;
         }
+        case kGait: {
+            GaitMsg m;
+            if (!as(&m) || g_role == Role::None) return;
+            PeerInfo* p = peer(from);
+            p->gait = m.gait;
+            p->gait_at = now();
+            break;
+        }
+        case kAnim: {
+            AnimMsg m;
+            if (!as(&m) || g_role == Role::None || game::loading()) return;
+            for (const auto& [chr, id] : g_chr_peer) {
+                if (id != from) continue;
+                motion::Anim a{m.kind, m.anim, m.a2, m.a3};
+                static int lines = 0;
+                if (++lines <= 200) {
+                    LOG_INFO("[coop] %s plays animation %d (%s): shown on their character %08X",
+                             steam::persona(from).c_str(), m.anim, m.kind ? "forced" : "event", chr);
+                }
+                motion::play_remote_anim(chr, a);
+            }
+            break;
+        }
         case kPing: {
             Simple m;
             if (!as(&m)) return;
@@ -1023,9 +1065,19 @@ const PeerInfo* peer_by_char_name(const std::wstring& name) {
     return nullptr;
 }
 
-party::PeerState peer_state(const std::wstring& name) {
+const PeerInfo* peer_by_chr(uint32_t chr) {
+    auto it = g_chr_peer.find(chr);
+    if (it == g_chr_peer.end()) return nullptr;
+    for (const auto& p : g_peers) {
+        if (p.id == it->second) return &p;
+    }
+    return nullptr;
+}
+
+party::PeerState peer_state(uint32_t chr, const std::wstring& name) {
     party::PeerState s;
-    const PeerInfo* p = peer_by_char_name(name);
+    const PeerInfo* p = chr ? peer_by_chr(chr) : nullptr;
+    if (!p) p = peer_by_char_name(name);
     if (!p) return s;
     s.known = true;
     s.invader = p->invader;
@@ -1054,7 +1106,15 @@ void update_remote_players() {
     std::vector<Match> chrs;
     for (uint32_t chr : game::remote_player_chrs()) chrs.push_back({chr, nullptr, "none"});
     const std::vector<party::Remote> members = party::remotes();
+    // A match made earlier stays (the position match is only good to a few metres and flip-flopped).
     for (auto& m : chrs) {
+        if (const PeerInfo* p = peer_by_chr(m.chr)) {
+            m.peer = p;
+            m.how = "kept";
+        }
+    }
+    for (auto& m : chrs) {
+        if (m.peer) continue;
         for (const auto& r : members) {
             if (r.chr != m.chr) continue;
             if (const PeerInfo* p = peer_by_char_name(r.name)) {
@@ -1110,7 +1170,8 @@ void update_remote_players() {
             last_open->how = "elimination";
         }
     }
-    std::string report;
+    std::string report, key;
+    std::map<uint32_t, uint64_t> matched;
     for (const auto& m : chrs) {
         rules::RemotePlayer rp;
         rp.chr = m.chr;
@@ -1118,20 +1179,37 @@ void update_remote_players() {
             rp.known = true;
             rp.invader = m.peer->invader;
             rp.host = m.peer->id == g_host && g_role == Role::Guest;
+            matched[m.chr] = m.peer->id;
         }
         out.push_back(rp);
         char line[160];
         std::snprintf(line, sizeof(line), "%s%08X=%s(%s%s)", report.empty() ? "" : ", ", m.chr,
                       m.peer ? m.peer->name.c_str() : "?", m.how, rp.host ? ", host" : rp.invader ? ", invader" : "");
         report += line;
+        std::snprintf(line, sizeof(line), "%08X=%s;", m.chr, m.peer ? m.peer->name.c_str() : "?");
+        key += line;
     }
-    static std::string last_report;
+    g_chr_peer = matched;
+    static std::string last_key;
     static int reports = 0;
-    if (report != last_report && reports < 100) {
+    if (key != last_key && reports < 100) {
         ++reports;
-        last_report = report;
+        last_key = key;
         LOG_INFO("[coop] Other players' characters here: %s (%zu session member record(s))",
                  report.empty() ? "none" : report.c_str(), members.size());
+        // Why the name match fails (it never matched in the 2026-10-07 test): the names on both sides.
+        std::string names;
+        for (const auto& r : members) {
+            char n8[64] = "";
+            WideCharToMultiByte(CP_UTF8, 0, r.name.c_str(), -1, n8, sizeof(n8), nullptr, nullptr);
+            names += std::string(" member[") + std::to_string(r.slot) + "]='" + n8 + "'";
+        }
+        for (const auto& p : g_peers) {
+            char n8[64] = "";
+            WideCharToMultiByte(CP_UTF8, 0, p.char_name.c_str(), -1, n8, sizeof(n8), nullptr, nullptr);
+            names += " " + p.name + "='" + n8 + "'";
+        }
+        LOG_INFO("[coop] Character names:%s", names.c_str());
     }
     rules::set_remote_players(out);
 }
@@ -1234,6 +1312,42 @@ void tick() {
     party::tick(!g_invade && (g_step == Step::Hosting || g_step == Step::InWorld), &peer_state);
     update_remote_players();
     if (g_role != Role::None && g_anim_log) anim_sync_log();
+    // Motion sync: our gait and event animations out; the others' gaits onto their characters here.
+    {
+        const int gait = motion::local_gait();
+        const std::vector<motion::Anim> anims = motion::take_local_anims();
+        if (g_role != Role::None && g_lobby && !g_invade) {
+            if (gait != g_sent_gait || now() - g_last_gait > 0.5) {
+                g_sent_gait = gait;
+                g_last_gait = now();
+                GaitMsg m{};
+                fill_header(&m, kGait);
+                m.gait = static_cast<int8_t>(gait);
+                broadcast(m, false);
+            }
+            for (const motion::Anim& a : anims) {
+                AnimMsg m{};
+                fill_header(&m, kAnim);
+                m.kind = a.kind;
+                m.anim = a.anim;
+                m.a2 = a.a2;
+                m.a3 = a.a3;
+                broadcast(m);
+                static int lines = 0;
+                if (++lines <= 200) LOG_INFO("[coop] Sent our animation %d to the others", a.anim);
+            }
+        }
+        motion::clear_remote_gaits();
+        if (g_role != Role::None && !game::loading()) {
+            for (const auto& [chr, id] : g_chr_peer) {
+                for (const auto& p : g_peers) {
+                    if (p.id != id || p.invader) continue;
+                    const bool fresh = p.gait >= 0 && now() - p.gait_at < 1.5;
+                    motion::set_remote_gait(chr, fresh ? static_cast<motion::Gait>(p.gait) : motion::kUnknown);
+                }
+            }
+        }
+    }
     rules::tick();
     {
         const auto& st = rules::state();

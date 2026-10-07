@@ -30,6 +30,8 @@ struct PeerInfo {
     double last_seen = 0;
     std::wstring char_name;  // their character's name (matches them to their character in our world)
     double alive_since = 0;  // when they last reported coming back alive
+    int gait = -1;           // their walk/run/sprint as they report it (motion::Gait), -1 unknown
+    double gait_at = 0;      // when they last reported it
 };
 
 void configure(const Config& cfg);

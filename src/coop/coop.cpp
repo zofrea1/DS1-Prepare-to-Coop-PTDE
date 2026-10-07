@@ -4,6 +4,7 @@
 #include "hook.h"
 #include "items.h"
 #include "log.h"
+#include "motion.h"
 #include "overlay.h"
 #include "rules.h"
 #include "session.h"
@@ -275,6 +276,7 @@ void coop_install(const Settings& settings) {
     LOG_INFO("[coop] Guests run the world's events in their own game: %s", g_cfg.guest_world_events ? "yes" : "no (host only)");
     const bool texts = coop::text::install();
     const bool world = coop::world::install();
+    if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     g_items = coop::items::install();
     coop::items::set_use_handler(&use_item);
     coop::items::set_can_use(&can_use);

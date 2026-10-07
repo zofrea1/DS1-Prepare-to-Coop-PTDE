@@ -30,8 +30,8 @@ constexpr uint32_t kMemberCopy = 0x006F80F0;   // thiscall(dst, const src*), ret
 constexpr uint32_t kMemberEqual = 0x006F8250;  // thiscall(a, const b*) -> bool, ret 4
 constexpr uint32_t kFindPlayer = 0x00E3D930;   // (WorldChrMan, member) -> PlayerIns or 0, ret 0x28
 constexpr uint32_t kWaitPush = 0x00D2AFD0;     // ecx = SessMan, (member), ret 0x24: put on the waiting list
-// Removing a member's character, as the member-left handler (0xD2E5C0) does.
-constexpr uint32_t kPartyRemove = 0x00EA2A10;  // eax = character handle, push PartyMemberInfo; ret 4
+// Removing a member's character, as the member-left handler (0xD2E5C0) does after taking it out of
+// PartyMemberInfo (0xEA2A10, not used here: see remove_character).
 constexpr uint32_t kChrRemove = 0x00E3E600;    // eax = PlayerIns, push WorldChrMan; ret 4
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -112,17 +112,15 @@ bool push_waiting(uint32_t member) {
     return true;
 }
 
+// Only the character goes; the player's PartyMemberInfo entry stays. Taking the entry out (0xEA2A10, as the
+// member-left handler does) is the game's "a player left" path: for the host on a guest's side it shows
+// "Disconnected from master of world" and five seconds later warps the guest home (the 2026-10-07 fall loop).
+// The rebuilt character takes the freed player slot again, so its handle (slot | map << 14) matches the entry.
 bool remove_character(uint32_t chr) {
-    const uint32_t gm = game::game_man();
     const uint32_t wcm = world_chr_man();
-    uint32_t pmi = 0, handle = 0;
-    if (!gm || !wcm || !read32(gm + game::kGmParty, &pmi) || !pmi || !read32(chr + 4, &handle)) return false;
+    if (!wcm) return false;
     __try {
         __asm {
-            push pmi
-            mov eax, handle
-            mov edx, kPartyRemove
-            call edx
             push wcm
             mov eax, chr
             mov edx, kChrRemove
@@ -207,7 +205,7 @@ std::vector<Remote> remotes() {
     return out;
 }
 
-void tick(bool active, PeerState (*peer)(const std::wstring&)) {
+void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)) {
     const bool loading = game::loading() || !game::in_game();
     if (loading) {
         g_was_loading = true;
@@ -233,7 +231,7 @@ void tick(bool active, PeerState (*peer)(const std::wstring&)) {
             if (n.slot == r.slot) member = n.member;
         }
         if (!member) continue;
-        const PeerState ps = peer ? peer(r.name) : PeerState{};
+        const PeerState ps = peer ? peer(r.chr, r.name) : PeerState{};
         if (ps.invader) continue;  // invaders keep the game's own rules
         char name[64];
         WideCharToMultiByte(CP_UTF8, 0, r.name.c_str(), -1, name, sizeof(name), nullptr, nullptr);
@@ -242,26 +240,18 @@ void tick(bool active, PeerState (*peer)(const std::wstring&)) {
             if (waiting(member)) continue;
             if (push_waiting(member)) {
                 g_queued_at[r.slot] = now();
-                LOG_INFO("[coop] %s's character is missing after a load: asked the game to create it again", name);
+                LOG_INFO("[coop] %s's character is missing: asked the game to create it again", name);
             }
             continue;
         }
         if (hp(r.chr) > 0) continue;
-        // Their character here is dead. Rebuild it once they report being alive again (they respawned).
-        bool back = ps.known ? ps.alive : false;
-        if (!ps.known && peer) {
-            // No player by that name: rebuild only if every known player reports being alive.
-            back = true;
-            for (const Remote& o : list) {
-                const PeerState q = peer(o.name);
-                if (q.known && !q.alive) back = false;
-            }
-        }
-        if (!back) continue;
+        // Their character here is dead. Rebuild it once that player reports being alive again (they respawned);
+        // a character no player can be matched to stays as it is. The old character goes first; a later check
+        // finds the slot empty and asks for the new one, which then takes the same player slot.
+        if (!ps.known || !ps.alive) continue;
         if (remove_character(r.chr)) {
             g_removed.insert(r.chr);
-            if (!waiting(member)) push_waiting(member);
-            g_queued_at[r.slot] = now();
+            g_queued_at[r.slot] = now() - 4.0;  // ask for the new character on the next check
             LOG_INFO("[coop] %s is back after dying: their character is created again", name);
         }
     }

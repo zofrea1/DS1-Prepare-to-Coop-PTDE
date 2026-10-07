@@ -32,7 +32,8 @@ struct PeerState {
     bool alive = false;     // reports being alive and has done so for a moment
 };
 
-// Every frame on the game thread while a seamless session is established. `peer` answers by character name.
-void tick(bool active, PeerState (*peer)(const std::wstring& name));
+// Every frame on the game thread while a seamless session is established. `peer` answers for a character (and
+// its character name) which session player it belongs to.
+void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name));
 
 }  // namespace coop::party

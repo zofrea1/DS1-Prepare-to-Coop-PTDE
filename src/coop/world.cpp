@@ -3,6 +3,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "rules.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -251,7 +252,31 @@ bool limbo_wanted() {
            (boss_fight() || g_invader_present);
 }
 
+// The game's own ways of sending a summoned player home (the host left or died, the room is gone, a kick) end
+// with SetSosSignWarp (GameMan+0xB00 = 1: go back to where the sign was, in the player's own world),
+// SetDefaultMapUid(-1) and this warp. A co-op guest stays in the host's world (our session code sends it home
+// when the session really ends): the warp becomes a respawn at its bonfire in the host's world, instead of a
+// drop at the sign's coordinates into the host's map (the endless fall of the 2026-10-07 test).
+void keep_guest_in_world() {
+    const auto& st = rules::state();
+    const uint32_t gm = game::game_man();
+    uint8_t sign_warp = 0;
+    if (!st.active || !st.guest || st.invader || st.leaving || !gm || !read8(gm + 0xB00, &sign_warp) || !sign_warp) {
+        return;
+    }
+    *ptr<uint8_t>(gm + 0xB00) = 0;
+    const int bonfire = game::last_bonfire();
+    const int map = game::bonfire_map(bonfire);
+    if (map != -1) {
+        *ptr<int>(gm + game::kGmWarpMap) = map;
+        *ptr<int>(gm + game::kGmWarpPoint) = -1;
+        *ptr<uint8_t>(gm + game::kGmUseBonfire) = 1;
+    }
+    LOG_INFO("[coop] The game tried to send us home; respawning at bonfire %d in the host's world instead", bonfire);
+}
+
 char __cdecl hk_warp_kick() {
+    if (!g_bypass) keep_guest_in_world();
     if (!g_bypass && !g_limbo && limbo_wanted()) {
         g_limbo = true;
         g_rest_heard = false;

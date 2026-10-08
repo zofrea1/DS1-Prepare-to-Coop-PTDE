@@ -47,6 +47,11 @@ void remote_bonfire_lit(int bonfire);
 // (the host's phantom menu, the guest's Lua leave) is skipped.
 void set_separation_listener(void (*fn)(bool host));
 
+// WarpNextStageKick is about to run. A dead guest is aimed at their respawn bonfire (the host's, until the
+// guest rests). WarpSelfBloodMark's map 0x01000000 has no collision; that kick is not started. Returns true
+// when the kick itself must not run.
+bool prepare_warp_kick(bool dead);
+
 // The other players' characters in our world, for the teams (world rules, invaders).
 struct RemotePlayer {
     uint32_t chr = 0;

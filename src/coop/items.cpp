@@ -21,7 +21,7 @@ constexpr uint32_t kPlayerVtable = 0x0118A5D4;  // PlayerIns
 constexpr int kUseGoodsSlot = 128;              // UseGoods(goods id, ?) thiscall, ret 8
 constexpr uint32_t kUseGoodsOrig = 0x00E50C70;
 constexpr uint32_t kAddItem = 0x00D664C0;       // Lua AddInventoryItem(id, category, count), stdcall
-constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, max; 0 = all)
+constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, count). count <= 0 removes one stack.
 constexpr uint32_t kGoodsCategory = 0x40000000;
 constexpr int kCount = kLast - kFirst + 1;
 constexpr int kRowSize = 0x5C;  // EQUIP_PARAM_GOODS_ST
@@ -244,13 +244,102 @@ void give(int32_t goods_id, int n) {
     }
 }
 
+// A key item (goodsType 1, the Crimson Blossom) sits in the key range and its slot byte at +0x10 is 0.
+// The game's erase (0xC09770) refuses that byte, so a rest never withered the stack. Marking the slot
+// lets the same erase clear it, including the key-item counter at inventory+0x12C.
+void mark_key_item_removable(int32_t goods_id) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t n = 0, keys = 0, last = 0, a = 0, b = 0;
+    if (!read32(inv + 0x110, &n) || !read32(inv + 0x118, &keys) || !read32(inv + 0x13C, &last) ||
+        !read32(inv + 0x120, &a) || !read32(inv + 0x124, &b)) {
+        return;
+    }
+    const uint32_t end = (last + 1 < n) ? last + 1 : n;
+    for (uint32_t i = 0; i < end && i < 4096; ++i) {
+        const uint32_t base = i < keys ? a : b;
+        if (base < 0x10000) continue;
+        const uint32_t e = base + i * 0x1C;
+        uint32_t cat = 0, id = 0;
+        uint8_t flag = 0;
+        if (!read32(e, &cat) || !read32(e + 4, &id) || !read8(e + 0x10, &flag)) return;
+        if (cat == kGoodsCategory && static_cast<int32_t>(id) == goods_id && flag == 0) {
+            *ptr<uint8_t>(e + 0x10) = 1;
+        }
+    }
+}
+
+void blank_slot(uint32_t e) {
+    *ptr<int32_t>(e) = -1;
+    *ptr<int32_t>(e + 4) = -1;
+    *ptr<int32_t>(e + 8) = 0;
+    *ptr<uint8_t>(e + 0x10) = 0;
+}
+
+bool slot_is_goods(uint32_t base, uint32_t index, int32_t goods_id, uint32_t* slot) {
+    if (base < 0x10000) return false;
+    const uint32_t e = base + index * 0x1C;
+    uint32_t cat = 0, id = 0;
+    if (!read32(e, &cat) || !read32(e + 4, &id)) return false;
+    if (cat != kGoodsCategory || static_cast<int32_t>(id) != goods_id) return false;
+    *slot = e;
+    return true;
+}
+
+// The game left the stack. Blank whichever copy remains. The key counter is decremented only when the
+// copy the game's own lookup reads was still there (a successful erase already decremented it).
+int blank_matching_slots(int32_t goods_id) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return 0;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t n = 0, keys = 0, last = 0, a = 0, b = 0;
+    if (!read32(inv + 0x110, &n) || !read32(inv + 0x118, &keys) || !read32(inv + 0x13C, &last) ||
+        !read32(inv + 0x120, &a) || !read32(inv + 0x124, &b)) {
+        return 0;
+    }
+    int cleared = 0;
+    const uint32_t end = (last + 1 < n) ? last + 1 : n;
+    for (uint32_t i = 0; i < end && i < 4096; ++i) {
+        const uint32_t primary_base = i < keys ? a : b;
+        const uint32_t mirror_base = i < keys ? b : a;
+        uint32_t primary = 0, mirror = 0;
+        const bool have_primary = slot_is_goods(primary_base, i, goods_id, &primary);
+        const bool have_mirror = a != b && slot_is_goods(mirror_base, i, goods_id, &mirror);
+        if (!have_primary && !have_mirror) continue;
+        if (have_primary) blank_slot(primary);
+        if (have_mirror) blank_slot(mirror);
+        if (have_primary && i < keys) {
+            uint32_t counter = 0, held = 0;
+            if (read32(inv + 0x134, &counter) && counter > 0x10000 && read32(counter, &held) && held > 0 &&
+                held < 100000) {
+                *ptr<uint32_t>(counter) = held - 1;
+            }
+        }
+        if (have_primary && i == last) {
+            --last;
+            *ptr<uint32_t>(inv + 0x13C) = last;
+        }
+        ++cleared;
+    }
+    return cleared;
+}
+
 void remove_all(int32_t goods_id) {
     if (!game::in_game()) return;
+    const int before = count(goods_id);
+    mark_key_item_removable(goods_id);
     __try {
         using Fn = uint8_t(__stdcall*)(uint32_t, int32_t, int32_t);
-        reinterpret_cast<Fn>(kRemoveItem)(kGoodsCategory, goods_id, 0);
+        const int stacks = before > 0 ? before : 1;
+        reinterpret_cast<Fn>(kRemoveItem)(kGoodsCategory, goods_id, stacks);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LOG_ERROR("[coop] Removing item %d failed", goods_id);
+    }
+    const int cleared = blank_matching_slots(goods_id);
+    const int after = count(goods_id);
+    if (before > 0 || cleared > 0 || after > 0) {
+        LOG_INFO("[coop] Crimson Blossoms withered (%d held, %d slot(s) cleared, %d left)", before, cleared, after);
     }
 }
 

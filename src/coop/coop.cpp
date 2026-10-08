@@ -5,7 +5,6 @@
 #include "items.h"
 #include "log.h"
 #include "motion.h"
-#include "overlay.h"
 #include "rules.h"
 #include "session.h"
 #include "steam.h"
@@ -186,7 +185,8 @@ int blossom_count() { return coop::items::count(coop::items::kBlossom); }
 void before_rest() {
     if (g_items) {
         coop::items::grant_missing();
-        if (blossom_count() > 0) coop::items::remove_all(coop::items::kBlossom);
+        coop::items::remove_all(coop::items::kBlossom);
+        coop::world::clear_death_debuff();
     }
     coop::session::remember_rest_point();
 }
@@ -226,11 +226,6 @@ void tick_body() {
     coop::session::tick();
     coop::world::tick();
     if (g_cfg.hotkeys) hotkeys();
-    static ULONGLONG last_panel = 0;
-    if (GetTickCount64() - last_panel > 250) {
-        last_panel = GetTickCount64();
-        coop::overlay::set_lines(coop::session::panel_lines(g_cfg.overhead_display));
-    }
     static ULONGLONG last_beat = 0;
     if (GetTickCount64() - last_beat > 60000) {
         last_beat = GetTickCount64();
@@ -276,6 +271,7 @@ void coop_install(const Settings& settings) {
     LOG_INFO("[coop] Guests run the world's events in their own game: %s", g_cfg.guest_world_events ? "yes" : "no (host only)");
     const bool texts = coop::text::install();
     const bool world = coop::world::install();
+    if (!coop::session::install_nameplate()) LOG_ERROR("[coop] Companion nameplates were not changed");
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait is not synced");
     g_items = coop::items::install();
     coop::items::set_use_handler(&use_item);

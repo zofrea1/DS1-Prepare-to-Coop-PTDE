@@ -62,13 +62,20 @@ bool invader();      // we invade
 double homeward_time();
 void clear_homeward_time();
 
-// The player panel: a heading, then one line per player with the OverheadPlayerDisplay details
-// (0 names, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping). Empty outside a session.
+// Kept for the session text. The on-screen box that used to draw these lines is not shown; soul level and
+// ping are appended to the name on each companion's floating health bar instead.
 std::vector<std::wstring> panel_lines(int mode);
 const std::vector<PeerInfo>& peers();
+// The game draws a companion's name from the player-data string. This replaces that pointer, while the
+// floating bar is updated, with "(name, SL: N, Pms)".
+bool install_nameplate();
 
 // The host's arrival point for guests: where the host last rested at a bonfire (set on every rest).
 void remember_rest_point();
+
+// The in-game net step is being destroyed and no warp is in progress. leave_session would save a position
+// with no floor, so the game session is returned to solo first. False when this end is a map load.
+bool host_step_ending();
 
 // Guest: a death in the host's world respawns at this bonfire. `object_id` is the bonfire object
 // Util_RequestRegene was given; the respawn id is that plus 1000. Ignored unless we are a co-op guest.

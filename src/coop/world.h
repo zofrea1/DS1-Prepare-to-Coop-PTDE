@@ -31,6 +31,8 @@ void set_before_rest_handler(void (*fn)());
 void set_death_handler(void (*fn)());
 // How many Crimson Blossoms the player carries (the death debuff's strength).
 void set_blossom_counter(int (*fn)());
+// A bonfire rest: take off every death-debuff effect immediately. The inventory clear is separate.
+void clear_death_debuff();
 // Another player rested: reset this world (enemies respawn), clear rest-cured effects, end limbo.
 void remote_rest();
 

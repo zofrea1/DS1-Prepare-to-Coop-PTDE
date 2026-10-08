@@ -289,6 +289,8 @@ char __cdecl hk_warp_kick() {
         LOG_INFO("[coop] Limbo: the respawn waits until the fight ends, everyone falls or someone rests");
         return 1;
     }
+    // Before the original body sets the warp request. A death is aimed at the bonfire; the empty map is not loaded.
+    if (!g_bypass && rules::prepare_warp_kick(local_dead())) return 1;
     return g_warp_orig();
 }
 
@@ -296,6 +298,7 @@ void release_limbo(const char* why) {
     if (!g_limbo) return;
     g_limbo = false;
     LOG_INFO("[coop] Limbo ends (%s)", why);
+    if (rules::prepare_warp_kick(local_dead())) return;
     g_bypass = true;
     g_warp_orig();
     g_bypass = false;
@@ -444,8 +447,67 @@ void share_lights(const std::vector<RemoteLight>& peers) {
     }
 }
 
+// PlayerIns::update (0xE73060) looks up a param row through [PlayerIns+0x29C]. After the guest traveled
+// from Firelink into Undead Burg, that struct was still set but its table pointer (struct+8) was null or
+// 0xA0000. The next instruction reads [table+0x180] and the process dies (both 2026-10-08 crashes, at
+// 0xE730D0). The same function already skips this lookup when the struct itself is missing (0xE730FB).
+// A missing or unreadable row takes that skip. eax is not live at the use-row instruction (0xE730E1).
+constexpr uint32_t kParamLookup = 0x00E730C7;
+
+static uint32_t __stdcall param_row(uint32_t obj, int index) {
+    uint32_t table = 0, count = 0, rows = 0, row = 0, inner = 0;
+    uint8_t flag = 0;
+    const bool ok = index >= 0 && read32(obj + 8, &table) && table >= 0x10000 && read32(table + 0x180, &count) &&
+                    index < static_cast<int>(count) && read32(table + 0x188, &rows) && rows >= 0x10000 &&
+                    read32(rows + static_cast<uint32_t>(index) * 4, &row) && row >= 0x10000 &&
+                    read32(row + 0x5C, &inner) && inner >= 0x10000 && read8(inner + 0x27, &flag);
+    if (ok) return row;
+    static int logged = 0;
+    if (logged < 8) {
+        ++logged;
+        LOG_INFO("[coop] Player param row skipped (struct %08X index %d table %08X)", obj, index, table);
+    }
+    return 0;
+}
+
+static __declspec(naked) void hk_param_row() {
+    __asm {
+        pushad
+        push edx
+        push eax
+        call param_row
+        mov dword ptr [esp + 4], eax
+        popad
+        test esi, esi
+        jz no_row
+        mov eax, 0E730E1h
+        jmp eax
+    no_row:
+        mov eax, 0E730FBh
+        jmp eax
+    }
+}
+
+bool install_param_guard() {
+    // mov eax,[eax+8] ; xor esi,esi ; test edx,edx ; jl +11 ; cmp edx,[eax+180] ; jge +9
+    // mov eax,[eax+188] ; mov esi,[eax+edx*4]
+    static const uint8_t k[26] = {0x8B, 0x40, 0x08, 0x33, 0xF6, 0x85, 0xD2, 0x7C, 0x11, 0x3B, 0x90, 0x80, 0x01,
+                                   0x00, 0x00, 0x7D, 0x09, 0x8B, 0x80, 0x88, 0x01, 0x00, 0x00, 0x8B, 0x34, 0x90};
+    if (!bytes_match(kParamLookup, k, sizeof(k))) return false;
+    uint8_t jmp[26];
+    std::memset(jmp, 0x90, sizeof(jmp));
+    jmp[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_param_row) - (kParamLookup + 5));
+    std::memcpy(jmp + 1, &rel, 4);
+    return patch(kParamLookup, k, jmp, sizeof(jmp));
+}
+
 bool install() {
     int failed = 0;
+    if (!install_param_guard()) {
+        ++failed;
+        LOG_ERROR("[coop] Player param lookup guard did not match this build");
+    }
     {
         static const uint8_t k[7] = {0x33, 0xC0, 0x53, 0x8B, 0x5C, 0x24, 0x08};
         g_fx_orig = detour(kSpEffectGetter, k, sizeof(k), reinterpret_cast<void*>(&hk_fx_row));
@@ -516,6 +578,22 @@ void set_rest_handler(void (*fn)()) { g_rest_fn = fn; }
 void set_before_rest_handler(void (*fn)()) { g_before_rest_fn = fn; }
 void set_death_handler(void (*fn)()) { g_death_fn = fn; }
 void set_blossom_counter(int (*fn)()) { g_blossom_count_fn = fn; }
+
+void clear_death_debuff() {
+    const uint32_t me = game::player();
+    int removed = 0;
+    if (me) {
+        for (int id = kDebuff; id < kDebuff + 5; ++id) {
+            if (!find_effect(me, id, nullptr)) continue;
+            remove(me, id);
+            ++removed;
+        }
+    }
+    if (removed || g_debuff_applied) {
+        LOG_INFO("[coop] Death debuff cleared (%d effect(s))", removed);
+    }
+    g_debuff_applied = 0;
+}
 
 void remote_rest() {
     uint32_t wcm = 0, state = 0;

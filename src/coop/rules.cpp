@@ -70,9 +70,14 @@ bool __stdcall allow_leave(uint32_t ret) {
     if (host_stays(ret)) return false;
     if (!seamless_rules()) return true;
     switch (ret) {
+        case kRetStepEnd:
+            // Quit destroys this step with no warp requested. leave_session then saves a spot with no floor.
+            // A map load has already set the warp request, and is left as a skipped leave.
+            if (session::host_step_ending()) return false;
+            if (++g_blocked_leaves <= 50) LOG_INFO("[coop] Kept the session (leave from %08X skipped)", ret);
+            return false;
         case kRetLuaLeave:
         case kRetWarpKick:
-        case kRetStepEnd:
         case kRetIdleTimer:
         case kRetRoomTimeout:
         case kRetMapChange:
@@ -119,22 +124,160 @@ __declspec(naked) void hk_party_reset() {
     }
 }
 
+// The party census (0xEA1A70) resolves each member handle and then reads the character's type at +0x70.
+// A failed lookup leaves esi at 0 and falls through to that read. Quit destroys the characters first, so
+// a handle that was not -1 crashes there. An empty result skips the slot, which is what a missing
+// character already means.
+constexpr uint32_t kPartyCensus = 0x00EA1AE0;  // mov eax, [esi+70h] ; sub eax, edi
+constexpr uint32_t kPartyCensusNext = 0x00EA1B02;
+void* g_census_orig = nullptr;
+void* g_census_next = reinterpret_cast<void*>(kPartyCensusNext);
+
+__declspec(naked) void hk_party_census() {
+    __asm {
+        test esi, esi
+        jz missing
+        jmp g_census_orig
+    missing:
+        jmp g_census_next
+    }
+}
+
 // ---------------------------------------------------------------- reloads stay in the host's world
-// MoveMapStep's constructor (0xEFC470, fastcall + 2 stack args) decides own world vs someone else's by
-// SessMan+0x194 == 3, which the game only sets for the first summon reload. For a co-op guest's later loads
-// (death, following the host) the step is set to 3 just for the constructor's decision and put back to 4
-// afterwards: while it reads 3 the loader would also take the summon spawn point (0xEEFCE1) instead of the
-// requested warp (the bonfire), and the arrival code would run again.
+// MoveMapStep's constructor (0xEFC470) decides own world vs someone else's by SessMan+0x194 == 3, which the
+// game only sets for the first summon reload. A later load (death, following the host) sets the step to 3
+// for that decision and puts it back to 4 when the constructor returns. That is all the constructor is for.
+//
+// The area that streams is chosen earlier. The load starter (0xEF0820) reads GameMan+0x14 before it calls
+// the constructor, and a death gets that id from 0xD5F680: if the sign-warp byte (GameMan+0xB00) is set it
+// reloads the join map, otherwise it reloads the last bonfire. Writing the bonfire map inside the constructor
+// is too late for the first read, so the loading screen and the collision stay on the join area while a later
+// step is told a different map. The guest then has no floor.
+//
+// Where they stand is a separate choice. Once the area is in, 0xEFA944 sees own-world == 0 and copies the
+// join position (GameMan+0xAB0) without looking at the bonfire. A death in the host's own area therefore
+// stands on the join point, and a death in another area stands there with that area's collision missing.
+// The bonfire case of the regen switch (0xD763CA, via 0xD5F680) is what a solo death uses. A guest death in
+// this test did not take that case: WarpSelfBloodMark (0xD649D0) stores map 0x01000000 and calls the kick
+// directly. That map has no collision. The kick is aimed at the guest's bonfire before its request bit is set.
 constexpr uint32_t kMoveMapCtor = 0x00EFC470;
+constexpr uint32_t kSpawnChoice = 0x00EEFCE1;  // cmp dword [eax+194h], 3
+constexpr uint32_t kSpawnResume = 0x00EEFCFB;  // read the warp map, skip the join-map write
+constexpr uint32_t kRegenSwitch = 0x00D76390;  // esi = script; arg picks a warp, 1 = last bonfire
+constexpr uint32_t kChooseWarpMap = 0x00D5F680;  // stdcall(point): writes GameMan+0x14 from the bonfire or the sign
+constexpr uint32_t kDeathWarpRet = 0x00D763DD;   // the bonfire case's call
+constexpr uint32_t kBloodMapWarpRet = 0x00D60078;  // SetSelfBloodMapUid when the death event has no map
+constexpr uint32_t kPlaceChoice = 0x00EFA944;    // cmp byte [esi+0xB4F], bl  (own world?)
+constexpr uint32_t kPlaceBonfire = 0x00EFAA0C;   // spawn on GameMan+0xB04
 void* g_movemap_orig = nullptr;
+void* g_spawn_orig = nullptr;
+void* g_spawn_resume = reinterpret_cast<void*>(kSpawnResume);
+void* g_regen_orig = nullptr;
+void* g_choose_orig = nullptr;
+void* g_place_orig = nullptr;
+void* g_bonfire_place = reinterpret_cast<void*>(kPlaceBonfire);
 bool g_marked = false;
+// Set for the constructor only, so a death's spawn step does not copy the join map over the bonfire map.
+bool g_bonfire_spawn = false;
+// Set by the death warp, kept until the placement step of that same load.
+bool g_death_respawn = false;
+bool g_place_bonfire = false;
+
+// The regen switch checks GameMan+0xB04 before it will call the bonfire case. A guest's rest writes that
+// field, and a load clears it again, so it is put back here. The sign-warp byte would make the case reload
+// the join map instead of the bonfire; it is cleared so the bonfire is the one that streams.
+void __cdecl note_guest_death_warp() {
+    if (!seamless_rules() || !g_state.guest || game::session_state() != 6) return;
+    const int bonfire = session::guest_respawn_bonfire();
+    const int map = game::bonfire_map(bonfire);
+    const uint32_t gm = game::game_man();
+    if (!gm || bonfire < 0 || map == -1) return;
+    *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
+    *ptr<int>(gm + 0xB08) = -1;
+    *ptr<uint8_t>(gm + 0xB00) = 0;
+}
+
+// Return address of 0xD5F680. Two callers reload a dead guest: the bonfire case of the regen switch, and
+// SetSelfBloodMapUid when the death event has no map of its own (that one then forces the warp point to -1).
+// Every other caller keeps the game's coordinates. The bonfire is written here, before the original body
+// reads it; a load clears it, and the sign-warp byte would stream the join map instead.
+// stdcall: the naked hook pushes this argument and popad does not drop it. A cdecl callee leaves the
+// dword on the stack, popad restores the wrong registers, and the original returns into data.
+void __stdcall note_death_respawn_load(uint32_t ret) {
+    if (ret != kDeathWarpRet && ret != kBloodMapWarpRet) return;
+    if (!seamless_rules() || !g_state.guest || game::session_state() != 6) return;
+    const int bonfire = session::guest_respawn_bonfire();
+    const int map = game::bonfire_map(bonfire);
+    const uint32_t gm = game::game_man();
+    if (!gm || bonfire < 0 || map == -1) return;
+    *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
+    *ptr<int>(gm + 0xB08) = -1;
+    *ptr<uint8_t>(gm + 0xB00) = 0;
+    g_death_respawn = true;
+    LOG_INFO("[coop] Death reloads the bonfire's area (bonfire %d, map %08X)", bonfire, map);
+}
+
+// WarpSelfBloodMark's map. Area 1 block 0 is not a level; loading it leaves no floor.
+constexpr int kEmptyWarpMap = 0x01000000;
+
+// Writes the guest's respawn bonfire into the warp the kick is about to start, and remembers it for the
+// placement step. The kick's caller may already have stored the empty map; this runs first and replaces it.
+bool arm_guest_death_reload() {
+    if (!seamless_rules() || !g_state.guest || game::session_state() != 6) return false;
+    const int bonfire = session::guest_respawn_bonfire();
+    const int map = game::bonfire_map(bonfire);
+    const uint32_t gm = game::game_man();
+    if (!gm || bonfire < 0 || map == -1) return false;
+    *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
+    *ptr<int>(gm + 0xB08) = -1;
+    *ptr<uint8_t>(gm + 0xB00) = 0;
+    *ptr<uint8_t>(gm + game::kGmUseBonfire) = 1;
+    *ptr<int>(gm + game::kGmWarpMap) = map;
+    *ptr<int>(gm + game::kGmWarpPoint) = -1;
+    if (!g_death_respawn) {
+        LOG_INFO("[coop] Death reloads the bonfire's area (bonfire %d, map %08X)", bonfire, map);
+    }
+    g_death_respawn = true;
+    return true;
+}
+
+bool kick_prepare(bool dead) {
+    if (!seamless_rules()) return false;
+    const uint32_t gm = game::game_man();
+    if (!gm) return false;
+    if (dead) arm_guest_death_reload();
+    int map = 0;
+    if (!read32(gm + game::kGmWarpMap, reinterpret_cast<uint32_t*>(&map)) || map != kEmptyWarpMap) return false;
+    // Still the empty map. A dead host is sent to their own bonfire; anyone else skips the kick so the
+    // empty level is never streamed.
+    if (dead && g_state.host && game::own_world()) {
+        const int bonfire = game::last_bonfire();
+        const int real = game::bonfire_map(bonfire);
+        if (real != -1) {
+            *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
+            *ptr<uint8_t>(gm + game::kGmUseBonfire) = 1;
+            *ptr<int>(gm + game::kGmWarpMap) = real;
+            *ptr<int>(gm + game::kGmWarpPoint) = -1;
+            LOG_INFO("[coop] Death reloads the bonfire's area (bonfire %d, map %08X)", bonfire, real);
+            return false;
+        }
+    }
+    *ptr<int>(gm + game::kGmWarpMap) = -1;
+    LOG_INFO("[coop] Warp to empty map 01000000 was not started");
+    return true;
+}
 
 void __cdecl before_map_load() {
     g_marked = false;
+    g_bonfire_spawn = false;
+    // A walk, a follow, or the trip home did not come from the death warp. Drop a stale request so the
+    // next placement is not pulled onto the bonfire. The death load itself still has the flag, because
+    // the warp set it and this constructor is the first step of that load.
+    if (g_state.leaving) g_death_respawn = false;
+    g_place_bonfire = g_death_respawn;
     clear_guest_item_handles();
-    // The warp map was already chosen from the last bonfire. Write it again in case the load resets it
-    // before the spawn reads it. A follow sets the remembered bonfire first, so this does not snap back
-    // to the previous one. Going home sets leaving and keeps the guest's own bonfire.
+    // Remember the bonfire for the placement step. The warp map is not written here: the load starter
+    // has already read it, and replacing it now streams one area and spawns into another.
     if (g_state.guest && !g_state.invader && !g_state.leaving) {
         const int bonfire = session::guest_respawn_bonfire();
         if (bonfire >= 0) {
@@ -144,6 +287,7 @@ void __cdecl before_map_load() {
     if (seamless_rules() && g_state.guest && game::session_state() == 6 && game::join_step() == 4) {
         game::set_join_step(3);
         g_marked = true;
+        if (g_place_bonfire) g_bonfire_spawn = true;
         LOG_INFO("[coop] Map load stays in the host's world");
     }
 }
@@ -151,6 +295,73 @@ void __cdecl before_map_load() {
 void __cdecl after_map_load() {
     if (g_marked && game::join_step() == 3) game::set_join_step(4);
     g_marked = false;
+    g_bonfire_spawn = false;
+    // The placement step is still ahead of this. It reads g_place_bonfire, which stays set.
+    g_death_respawn = false;
+}
+
+// True: jump to 0xEEFCFB. The compare itself is not executed, so the join map is left alone.
+bool __cdecl use_bonfire_spawn() { return g_bonfire_spawn; }
+
+// True: jump to the bonfire placement. The load clears the use-bonfire byte, so it is set again here,
+// after the area has streamed and before the coordinates are chosen.
+bool __cdecl place_at_bonfire() {
+    if (!g_place_bonfire) return false;
+    g_place_bonfire = false;
+    const int bonfire = session::guest_respawn_bonfire();
+    const uint32_t gm = game::game_man();
+    if (!gm || bonfire < 0 || game::bonfire_map(bonfire) == -1) return false;
+    *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
+    *ptr<int>(gm + 0xB08) = -1;
+    *ptr<uint8_t>(gm + game::kGmUseBonfire) = 1;
+    *ptr<uint8_t>(gm + 0xB00) = 0;
+    LOG_INFO("[coop] Guest placed at bonfire %d", bonfire);
+    return true;
+}
+
+__declspec(naked) void hk_spawn_choice() {
+    __asm {
+        pushad
+        call use_bonfire_spawn
+        test al, al
+        popad
+        jz orig
+        jmp g_spawn_resume
+    orig:
+        jmp g_spawn_orig
+    }
+}
+
+__declspec(naked) void hk_regen_switch() {
+    __asm {
+        pushad
+        call note_guest_death_warp
+        popad
+        jmp g_regen_orig
+    }
+}
+
+__declspec(naked) void hk_choose_warp_map() {
+    __asm {
+        pushad
+        push dword ptr [esp + 32]  // caller's return address; note_death_respawn_load is stdcall and pops it
+        call note_death_respawn_load
+        popad
+        jmp g_choose_orig
+    }
+}
+
+__declspec(naked) void hk_place_choice() {
+    __asm {
+        pushad
+        call place_at_bonfire
+        test al, al
+        popad
+        jz orig
+        jmp g_bonfire_place
+    orig:
+        jmp g_place_orig
+    }
 }
 
 __declspec(naked) void hk_movemap() {
@@ -1074,6 +1285,8 @@ int install_one(const char* what, bool ok) {
 
 }  // namespace
 
+bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
+
 State& state() { return g_state; }
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
@@ -1118,9 +1331,40 @@ int install() {
         failed += install_one("party reset guard", g_party_orig != nullptr);
     }
     {
+        // mov eax, [esi+70h] ; sub eax, edi. The following je stays in place.
+        static const uint8_t k[5] = {0x8B, 0x46, 0x70, 0x2B, 0xC7};
+        g_census_orig = detour(kPartyCensus, k, sizeof(k), reinterpret_cast<void*>(&hk_party_census));
+        failed += install_one("party census null character", g_census_orig != nullptr);
+    }
+    {
         static const uint8_t k[7] = {0x6A, 0xFF, 0x68, 0xE5, 0x34, 0x07, 0x01};  // push -1 ; push 010734E5h
         g_movemap_orig = detour(kMoveMapCtor, k, sizeof(k), reinterpret_cast<void*>(&hk_movemap));
         failed += install_one("map load world choice", g_movemap_orig != nullptr);
+    }
+    {
+        // cmp dword ptr [eax+194h], 3. The following jne is a short jump and stays in place.
+        static const uint8_t k[7] = {0x83, 0xB8, 0x94, 0x01, 0x00, 0x00, 0x03};
+        g_spawn_orig = detour(kSpawnChoice, k, sizeof(k), reinterpret_cast<void*>(&hk_spawn_choice));
+        failed += install_one("guest bonfire spawn", g_spawn_orig != nullptr);
+    }
+    {
+        // xor eax,eax ; cmp [esi+4], eax. The following je is a short jump and stays in place.
+        // 39 46 04 is the register form. 83 7E 04 00 (cmp [esi+4], 0) is not what the exe has.
+        static const uint8_t k[5] = {0x33, 0xC0, 0x39, 0x46, 0x04};
+        g_regen_orig = detour(kRegenSwitch, k, sizeof(k), reinterpret_cast<void*>(&hk_regen_switch));
+        failed += install_one("guest death bonfire", g_regen_orig != nullptr);
+    }
+    {
+        // sub esp,8 ; push edi ; lea edi,[esp+4]
+        static const uint8_t k[8] = {0x83, 0xEC, 0x08, 0x57, 0x8D, 0x7C, 0x24, 0x04};
+        g_choose_orig = detour(kChooseWarpMap, k, sizeof(k), reinterpret_cast<void*>(&hk_choose_warp_map));
+        failed += install_one("death area choice", g_choose_orig != nullptr);
+    }
+    {
+        // cmp byte [esi+0xB4F], bl. The following jne stays in place.
+        static const uint8_t k[6] = {0x38, 0x9E, 0x4F, 0x0B, 0x00, 0x00};
+        g_place_orig = detour(kPlaceChoice, k, sizeof(k), reinterpret_cast<void*>(&hk_place_choice));
+        failed += install_one("guest bonfire placement", g_place_orig != nullptr);
     }
     failed += install_one("arrival chr type", redirect_call(kArrivalSite, kArrivalType, reinterpret_cast<void*>(&hk_arrival)));
     {

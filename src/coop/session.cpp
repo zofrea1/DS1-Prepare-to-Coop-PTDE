@@ -165,6 +165,7 @@ constexpr const wchar_t* kMsgNoOne = L"No sessions found";
 constexpr const wchar_t* kMsgReturnHome = L"Returning to your world...";
 constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returning to your world...";
 constexpr const wchar_t* kMsgWorldClosed = L"Your world is closed. Guests return to their worlds";
+constexpr const wchar_t* kMsgWorldOpen = L"Your world is open";
 
 // ---------------------------------------------------------------- state
 enum class Role { None, Host, Guest };
@@ -208,9 +209,12 @@ double g_last_state = 0;
 double g_last_info = 0;
 double g_last_ping = 0;
 int g_hello_tries = 0;
+int g_search_waves = 0;
+int g_search_gen = 0;
 std::vector<Pending> g_pending;
 std::vector<PeerInfo> g_peers;
 int g_ping_ms = -1;
+int64_t g_ping_qpc = 0;  // guest: counter when the last ping was sent (0 none)
 std::vector<std::pair<int, bool>> g_flag_queue;
 int g_host_coop_players = 1;
 RestPoint g_rest;
@@ -355,11 +359,13 @@ void host_open_lobby() {
         steam::set_lobby_data(lobby, "ptdesc_name", steam::persona(steam::self()).c_str());
         steam::set_lobby_data(lobby, "ptdesc_invade", g_cfg.allow_invaders ? "1" : "0");
         steam::set_lobby_data(lobby, "ptdesc_taunt", "0");
+        steam::set_lobby_joinable(lobby, true);
         auto& st = rules::state();
         st.active = true;
         st.host = true;
         set_step(Step::Hosting);
         LOG_INFO("[coop] Hosting a seamless session (lobby %016llx)", static_cast<unsigned long long>(lobby));
+        say(kMsgWorldOpen);
     });
 }
 
@@ -509,16 +515,19 @@ void guest_send_hello() {
     set_step(Step::Hello);
 }
 
-void guest_search() {
-    set_step(Step::Searching);
+void issue_search() {
+    const int gen = ++g_search_gen;
+    ++g_search_waves;
     std::vector<std::pair<std::string, std::string>> filters = {{"ptdesc_ver", std::to_string(kProtocol)}};
     if (g_invade) {
         filters.push_back({"ptdesc_invade", "1"});
     } else {
         filters.push_back({"ptdesc_key", g_key});
     }
-    steam::find_lobbies(filters, 50, [](std::vector<uint64_t> found) {
-        if (g_step != Step::Searching) return;
+    steam::find_lobbies(filters, 50, [gen](std::vector<uint64_t> found) {
+        LOG_INFO("[coop] Lobby list returned %zu", found.size());
+        // A newer request replaces this one. An older empty answer must not cancel the retry.
+        if (gen != g_search_gen || g_step != Step::Searching) return;
         const uint64_t me = steam::self();
         found.erase(std::remove_if(found.begin(), found.end(),
                                    [me](uint64_t l) { return steam::lobby_owner(l) == me; }),
@@ -550,6 +559,12 @@ void guest_search() {
             guest_send_hello();
         });
     });
+}
+
+void guest_search() {
+    g_search_waves = 0;
+    set_step(Step::Searching);
+    issue_search();
 }
 
 void apply_host_rules(int world_rules, bool infection, bool taunt) {
@@ -657,6 +672,14 @@ void guest_tick() {
     const double in_step = now() - g_step_since;
     switch (g_step) {
         case Step::Searching:
+            // One lobby-list request hung after the previous session's P2P failure. Ask once more
+            // without restarting the wait; an empty answer still finishes as "No sessions found".
+            if (g_search_waves < 2 && in_step > 8.0) {
+                LOG_INFO("[coop] Still searching; asking Steam again");
+                issue_search();
+            }
+            if (in_step > 20.0) finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
+            break;
         case Step::LobbyJoin:
             if (in_step > 20.0) finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
             break;
@@ -926,6 +949,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (from == g_host && g_role == Role::Guest) {
                 guest_go_home(kMsgHostClosed, "the host closed the session");
             } else if (g_role == Role::Host) {
+                steam::close(from);
                 const PeerInfo* p = peer(from);
                 PlayerEvent e = player_event(kLeft, from, p->invader, p->name);
                 broadcast(e, true, from);
@@ -974,9 +998,18 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kPong: {
             Simple m;
-            if (!as(&m)) return;
-            const uint32_t rtt = GetTickCount() - m.value;
-            if (from == g_host) g_ping_ms = static_cast<int>(rtt);
+            if (!as(&m) || from != g_host || g_ping_qpc == 0) return;
+            // GetTickCount jumps by about 15 ms, so a fast reply was stored as 0 and both nameplates
+            // showed 0ms until the next sample. The counter here is the guest's own round trip.
+            LARGE_INTEGER now_q{}, freq{};
+            QueryPerformanceCounter(&now_q);
+            QueryPerformanceFrequency(&freq);
+            const int64_t delta = now_q.QuadPart - g_ping_qpc;
+            g_ping_qpc = 0;
+            if (delta <= 0 || freq.QuadPart <= 0) return;
+            const int64_t ms = (delta * 1000) / freq.QuadPart;
+            if (ms >= 10000) return;
+            g_ping_ms = ms < 1 ? 1 : static_cast<int>(ms);
             break;
         }
         default:
@@ -1268,6 +1301,7 @@ void set_callbacks() {
         if (g_role == Role::Guest && user == g_host) {
             guest_go_home(kMsgReturnHome, "the host left the lobby");
         } else if (g_role == Role::Host) {
+            steam::close(user);
             for (const auto& p : g_peers) {
                 if (p.id == user) say(fmt(p.invader ? kMsgInvaderLeft : kMsgLeft, text::widen(p.name)));
             }
@@ -1278,6 +1312,11 @@ void set_callbacks() {
     });
     steam::on_p2p_failed([](uint64_t peer_id, int error) {
         LOG_INFO("[coop] P2P with %016llx failed (%d)", static_cast<unsigned long long>(peer_id), error);
+        steam::close(peer_id);
+        if (g_role != Role::Host) return;
+        const auto keep = std::remove_if(g_peers.begin(), g_peers.end(),
+                                         [peer_id](const PeerInfo& q) { return q.id == peer_id; });
+        if (keep != g_peers.end()) g_peers.erase(keep, g_peers.end());
     });
 }
 
@@ -1383,6 +1422,9 @@ void tick() {
         }
         if (g_role == Role::Guest && g_host && now() - g_last_ping > 2.0) {
             g_last_ping = now();
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            g_ping_qpc = qpc.QuadPart;
             Simple p{};
             fill_header(&p, kPing);
             p.value = GetTickCount();
@@ -1434,6 +1476,82 @@ void invade() {
     guest_search();
 }
 
+// 0xEA1900 writes -1 over the four party member handles and does not touch the characters. Quit destroys
+// the characters and then counts whoever those handles still name; a handle whose character is gone is
+// read at +0x70 (the chr type) and the process dies.
+void blank_party_handles(uint32_t party) {
+    if (party < 0x10000) return;
+    __asm {
+        mov eax, party
+        mov edx, 0x00EA1900
+        call edx
+    }
+}
+
+// abort_session returns the session state to solo but leaves the member vector and the party counts.
+// HasParty (and the pause menu) still see a session, so Quit stays grey. Emptying the vector drops the
+// member records without running their destructors; the next session allocates its own. The handles are
+// cleared as well, so the quit path does not walk a guest who has already left.
+void release_solo_session(bool drop_members) {
+    const uint32_t sess = game::sess_man();
+    const int members = game::member_count();
+    // Quit keeps a single record. Dropping it here, inside the net-step destructor, is the host's own
+    // record after a reload, and the save that follows has no floor. Disband still drops every record.
+    if (drop_members && sess && members > 0) {
+        uint32_t begin = 0;
+        if (read32(sess + game::kSessMembersBegin, &begin) && begin) {
+            *ptr<uint32_t>(sess + game::kSessMembersEnd) = begin;
+        }
+    }
+    int party_count = 0;
+    int party_slot = -1;
+    const uint32_t gm = game::game_man();
+    uint32_t party = 0;
+    if (gm && read32(gm + game::kGmParty, &party) && party > 0x10000) {
+        uint32_t n10 = 0, n14 = 0, slot = 0;
+        read32(party + 0x10, &n10);
+        read32(party + 0x14, &n14);
+        read32(party + 0x7C, &slot);
+        party_count = static_cast<int>(n10);
+        party_slot = static_cast<int>(slot);
+        if (static_cast<int>(n10) > 1) *ptr<int>(party + 0x10) = 1;
+        if (static_cast<int>(n14) > 1) *ptr<int>(party + 0x14) = 1;
+        if (party_slot != -1) *ptr<int>(party + 0x7C) = -1;
+        blank_party_handles(party);
+    }
+    LOG_INFO("[coop] Multiplayer flags cleared (members %d, party %d, slot %d)", members, party_count, party_slot);
+}
+
+bool host_step_ending() {
+    if (g_role != Role::Host || g_step != Step::Hosting) return false;
+    // A guest still in the world is a map load or a disconnect, not a quit. Closing here would
+    // send them home every time the host changed areas.
+    if (!g_peers.empty()) return false;
+    if (!game::own_world() || game::session_state() != 3 || game::loading()) return false;
+    // abort_session loops while this byte is set. A map load sets it; a quit does not.
+    const uint32_t sess = game::sess_man();
+    uint8_t load_marker = 0;
+    if (!sess || !read8(sess + 0x1C8, &load_marker) || load_marker) return false;
+    const uint32_t gm = game::game_man();
+    uint8_t warp = 0;
+    if (!gm || !read8(gm + game::kGmWarpRequest, &warp) || warp) return false;
+    static bool in_call = false;
+    if (in_call) return false;
+    in_call = true;
+    const int before = game::session_state();
+    game::abort_session();
+    const int after = game::session_state();
+    if (after != 0) {
+        *ptr<int>(sess + game::kSessState) = 0;
+        LOG_ERROR("[coop] Quit cleanup left the session at %d; forced it to solo", after);
+    }
+    release_solo_session(false);
+    LOG_INFO("[coop] Quit ends the session without leaving the map (was state %d)", before);
+    finish(L"");
+    in_call = false;
+    return true;
+}
+
 void leave() {
     if (g_role == Role::None) {
         LOG_INFO("[coop] Leave request ignored (not in a session)");
@@ -1455,6 +1573,7 @@ void leave() {
             if (const uint32_t s = game::sess_man()) *ptr<int>(s + game::kSessState) = 0;
             LOG_ERROR("[coop] Session cleanup left state %d (was %d); forced it to solo", after, before);
         }
+        release_solo_session(true);
         finish(L"");
         LOG_INFO("[coop] Session disbanded (game session %d, host stays in the world)", before);
         return;
@@ -1547,6 +1666,91 @@ void note_guest_rest(int object_id) {
 }
 
 int guest_respawn_bonfire() { return (g_role == Role::Guest && !g_invade) ? g_guest_bonfire : -1; }
+
+// FrpgMenuDlgFloatingPCGauge::update (0xFA8C90, vtable 0x011CAFEC) reads the companion's name from the
+// menu slot and sets it on both name widgets (0xFA8BAB and 0xFA8BDF call 0x789050). That helper is also
+// how every other menu sets text, so only these two calls are retargeted. The name itself is 16 wide
+// characters; the longer line lives in our buffers.
+constexpr uint32_t kNameSet = 0x00789050;
+constexpr uint32_t kFloatingNameA = 0x00FA8BAB;
+constexpr uint32_t kFloatingNameB = 0x00FA8BDF;
+void* g_name_set = nullptr;
+// Three buffers per companion. One update sets two widgets, and a setter that keeps the pointer must see a
+// different buffer on the next update or the soul level and ping stay at whatever the first frame copied.
+wchar_t g_nameplate[4][3][96] = {};
+int g_nameplate_n[4] = {};
+
+bool read_shown_name(const wchar_t* at, wchar_t* out, int cap) {
+    if (!at || cap < 2) return false;
+    const uint32_t base = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(at));
+    for (int i = 0; i < cap - 1; ++i) {
+        uint32_t word = 0;
+        if (!read32(base + static_cast<uint32_t>(i) * 2, &word)) return false;
+        out[i] = static_cast<wchar_t>(word & 0xFFFF);
+        if (!out[i]) return i > 0;
+    }
+    out[cap - 1] = 0;
+    return true;
+}
+
+bool utf8_is(const wchar_t* shown, const std::string& utf8) {
+    if (utf8.empty() || utf8.size() > 48) return false;
+    wchar_t buf[49];
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, buf, 49);
+    return n > 1 && wcscmp(shown, buf) == 0;
+}
+
+// The bar's current name, or null when this string is not a companion we know.
+const wchar_t* __stdcall nameplate_for(const wchar_t* shown) {
+    if (g_role == Role::None) return nullptr;
+    wchar_t name[24] = {};
+    if (!read_shown_name(shown, name, 24) || wcslen(name) > 16) return nullptr;
+    int slot = 0;
+    for (const auto& p : g_peers) {
+        if (slot >= 4) break;
+        if (now() - p.last_seen > 10.0) continue;
+        const int mine = slot++;
+        if (!utf8_is(name, p.name) && (p.char_name.empty() || wcscmp(name, p.char_name.c_str()) != 0)) continue;
+        int ping = p.ping_ms;
+        // The host does not measure a round trip. A guest's own measurement is the host's ping.
+        if (g_role == Role::Guest && p.id == g_host) ping = g_ping_ms;
+        const int side = g_nameplate_n[mine] % 3;
+        g_nameplate_n[mine] = side + 1;
+        if (ping <= 0) {
+            swprintf_s(g_nameplate[mine][side], L"(%ls, SL: %d, --ms)", name, p.soul_level);
+        } else {
+            swprintf_s(g_nameplate[mine][side], L"(%ls, SL: %d, %dms)", name, p.soul_level, ping);
+        }
+        return g_nameplate[mine][side];
+    }
+    return nullptr;
+}
+
+// ecx is the name widget. The wide string is the one stack argument (the callee pops it).
+__declspec(naked) void hk_floating_name() {
+    __asm {
+        push ecx
+        push edx
+        push dword ptr [esp + 12]
+        call nameplate_for
+        test eax, eax
+        jz keep
+        mov dword ptr [esp + 12], eax
+    keep:
+        pop edx
+        pop ecx
+        jmp g_name_set
+    }
+}
+
+bool install_nameplate() {
+    g_name_set = reinterpret_cast<void*>(kNameSet);
+    const bool a = redirect_call(kFloatingNameA, kNameSet, reinterpret_cast<void*>(&hk_floating_name));
+    const bool b = redirect_call(kFloatingNameB, kNameSet, reinterpret_cast<void*>(&hk_floating_name));
+    if (!a || !b) return false;
+    LOG_INFO("[coop] Companion names on the floating health bar include soul level and ping");
+    return true;
+}
 
 std::vector<std::wstring> panel_lines(int mode) {
     std::vector<std::wstring> out;

@@ -15,6 +15,7 @@ struct State {
     bool guest = false;       // we are a co-op guest in someone's world
     bool invader = false;     // we invade (vanilla invader rules apply to us)
     bool leaving = false;     // we are leaving on purpose: the game's own leave code may run
+    bool closing = false;     // host: the session is being disbanded; the guests are on their way out
     bool invader_present = false;  // an invader is in the session (vanilla multiplayer limits apply)
     int own_chr_type = -1;    // guest: our chr type at home (0 human, 8 hollow)
     // The host's world rules (the host decides, guests mirror them).
@@ -51,6 +52,9 @@ void set_separation_listener(void (*fn)(bool host));
 // guest rests). WarpSelfBloodMark's map 0x01000000 has no collision; that kick is not started. Returns true
 // when the kick itself must not run.
 bool prepare_warp_kick(bool dead);
+
+// Per-frame record of where the local player stood, for the bloodstain of a guest who dies in the host's world.
+void track_safe_position();
 
 // The other players' characters in our world, for the teams (world rules, invaders).
 struct RemotePlayer {

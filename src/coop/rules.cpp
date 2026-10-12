@@ -49,6 +49,7 @@ bool g_seamless_hosted = false;
 // Item own-world writes (see below) must not be broadcast as shared progress.
 int g_flag_quiet = 0;
 void clear_guest_item_handles();
+bool patch_call(uint32_t at, const uint8_t* expect, size_t n, void* helper);
 
 bool seamless_rules() { return g_state.active && !g_state.leaving && !g_state.invader; }
 
@@ -61,6 +62,9 @@ constexpr uint32_t kRetMemberLeftMenu2 = 0x00DB4AD1;
 
 bool host_stays(uint32_t ret) {
     if (ret != kRetMemberLeft && ret != kRetMemberLeftMenu && ret != kRetMemberLeftMenu2) return false;
+    // A host who is disbanding lets the game end the session when the last guest has left, as it does after
+    // the Black Separation Crystal's menu.
+    if (g_state.closing) return false;
     if (!g_seamless_hosted || g_state.invader || !game::own_world() || game::session_state() != 3) return false;
     if (++g_blocked_leaves <= 50) LOG_INFO("[coop] Kept the host in the world (leave from %08X skipped)", ret);
     return true;
@@ -71,9 +75,9 @@ bool __stdcall allow_leave(uint32_t ret) {
     if (!seamless_rules()) return true;
     switch (ret) {
         case kRetStepEnd:
-            // Quit destroys this step with no warp requested. leave_session then saves a spot with no floor.
-            // A map load has already set the warp request, and is left as a skipped leave.
-            if (session::host_step_ending()) return false;
+            // This destructor runs for a map load and again a few seconds after the last guest leaves.
+            // leave_session would save a spot with no floor. Ending the session here closed the world on
+            // its own, and the next join never got past "host data not received".
             if (++g_blocked_leaves <= 50) LOG_INFO("[coop] Kept the session (leave from %08X skipped)", ret);
             return false;
         case kRetLuaLeave:
@@ -122,6 +126,193 @@ __declspec(naked) void hk_party_reset() {
     skip:
         ret 4
     }
+}
+
+// ---------------------------------------------------------------- a guest leaving is not the master leaving
+// When a member's character is taken out of the party (0xEA2A10), 0xD79380 shows the "left" notice and looks at
+// that member's summon type (remote player data +0x110). Type 0 means the master of the world: the game shows
+// "Disconnected from master of world" (20001025), requests a save, raises flag 4047 and arms the event
+// script's OnLeave_Limit for five seconds later. That handler sets the sign warp and kicks the player back to
+// where they were summoned from. A co-op guest keeps their own body and is never given a summon type, so on
+// the host's side every guest who left looked like the master leaving: five seconds later the host was warped
+// to a summon sign that never existed (no map, no floor), and the save made on the way out put them there
+// again on the next load. In one's own world nobody else is the master, so the return home is not armed
+// there. A co-op guest is taken home by the session code and is not armed either.
+constexpr uint32_t kMasterLeftSite = 0x00D79481;  // test bl,bl ; je 0xD794E1 ; call 0xD6B2A0
+constexpr uint32_t kMasterLeftSave = 0x00D6B2A0;  // save request, the first call of the armed branch
+
+bool __cdecl arm_master_left() {
+    const char* why = nullptr;
+    if (game::own_world()) {
+        why = "this is our own world";
+    } else if (g_state.active && g_state.guest && !g_state.invader) {
+        why = "the session takes a co-op guest home";
+    }
+    if (!why) return true;
+    static int lines = 0;
+    if (++lines <= 40) LOG_INFO("[coop] A player left: the game's return home is not armed (%s)", why);
+    return false;
+}
+
+// Returns with ZF set when the armed branch must be skipped (the patched site jumps to the function's end).
+__declspec(naked) void hk_master_left() {
+    __asm {
+        test bl, bl
+        jz done
+        pushad
+        sub esp, 0x80
+        movdqu xmmword ptr [esp], xmm0
+        movdqu xmmword ptr [esp + 0x10], xmm1
+        movdqu xmmword ptr [esp + 0x20], xmm2
+        movdqu xmmword ptr [esp + 0x30], xmm3
+        movdqu xmmword ptr [esp + 0x40], xmm4
+        movdqu xmmword ptr [esp + 0x50], xmm5
+        movdqu xmmword ptr [esp + 0x60], xmm6
+        movdqu xmmword ptr [esp + 0x70], xmm7
+        call arm_master_left
+        movdqu xmm0, xmmword ptr [esp]
+        movdqu xmm1, xmmword ptr [esp + 0x10]
+        movdqu xmm2, xmmword ptr [esp + 0x20]
+        movdqu xmm3, xmmword ptr [esp + 0x30]
+        movdqu xmm4, xmmword ptr [esp + 0x40]
+        movdqu xmm5, xmmword ptr [esp + 0x50]
+        movdqu xmm6, xmmword ptr [esp + 0x60]
+        movdqu xmm7, xmmword ptr [esp + 0x70]
+        add esp, 0x80
+        test al, al
+        popad
+        jz done
+        mov eax, kMasterLeftSave
+        call eax
+        or eax, 1
+    done:
+        ret
+    }
+}
+
+bool install_master_left() {
+    static const uint8_t k[9] = {0x84, 0xDB, 0x74, 0x5C, 0xE8, 0x16, 0x1E, 0xFF, 0xFF};
+    uint8_t code[9] = {0xE8, 0, 0, 0, 0, 0x74, 0x59, 0x90, 0x90};  // call stub ; je 0xD794E1 ; nop ; nop
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_master_left) - (kMasterLeftSite + 5));
+    std::memcpy(code + 1, &rel, 4);
+    return patch(kMasterLeftSite, k, code, sizeof(code));
+}
+
+// ---------------------------------------------------------------- a guest's bloodstain
+// The death penalty (0xD78B10, the event script's UpDateBloodMark) writes the bloodstain record
+// (GameDataMan+0x1C: position, map, souls, humanity). In one's own world the position is where the player's
+// replay record starts (PlayerIns+0x5E0: a few seconds before the death). In someone else's world the game
+// takes the place the player was summoned from instead (GameMan+0xAE0), because a phantom's stain belongs in
+// their own world. A co-op guest was never summoned from anywhere: the stain went to coordinates that were
+// never filled in, in a map they were not in, and the souls could not be found in either world. Remastered
+// Seamless Co-op answers this "own world?" test with "not an invader"; a co-op guest's stain is left where
+// they fell, in the world they are playing in, and it is at the same place when they are back home.
+constexpr uint32_t kBloodWorldSite = 0x00D78BA0;  // cmp byte ptr [eax+0B4Fh], 0 ; the je that follows stays
+
+struct SafeSpot {
+    double at;
+    game::Vec3 pos;
+    int map;
+};
+SafeSpot g_spots[32];
+int g_spot_next = 0, g_spot_count = 0;
+double g_last_spot = 0;
+
+double seconds() { return GetTickCount64() / 1000.0; }
+
+// Where the player stood about three seconds ago (while alive), or false when nothing was recorded.
+bool recent_safe_spot(SafeSpot* out) {
+    const double t = seconds();
+    const SafeSpot* best = nullptr;
+    for (int i = 0; i < g_spot_count; ++i) {
+        const SafeSpot& s = g_spots[i];
+        const double age = t - s.at;
+        if (age < 2.5 || age > 30.0) continue;
+        if (!best || s.at > best->at) best = &s;
+    }
+    if (!best) return false;
+    *out = *best;
+    return true;
+}
+
+bool __cdecl blood_in_own_world() {
+    if (game::own_world()) return true;
+    if (!g_state.active || !g_state.guest || g_state.invader || game::session_state() != 6) return false;
+    const uint32_t me = game::player();
+    uint32_t replay = 0;
+    if (!me || !read32(me + 0x5E0, &replay) || replay < 0x10000) return false;
+    // The replay record's start is the game's own choice. In another world it may never have been written:
+    // then the stain goes to where the player stood a few seconds ago, or to where they are now.
+    game::Vec3 here{}, start{};
+    uint32_t start_map = 0;
+    if (!game::position(&here, nullptr)) return false;
+    bool usable = true;
+    __try {
+        std::memcpy(&start, reinterpret_cast<const void*>(static_cast<uintptr_t>(replay + 0x20)), sizeof(start));
+        start_map = *ptr<uint32_t>(replay + 0x38);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    const float dx = start.x - here.x, dy = start.y - here.y, dz = start.z - here.z;
+    const float far2 = dx * dx + dy * dy + dz * dz;
+    const int map = game::map_id();
+    if (far2 > 60.0f * 60.0f || (map != -1 && (start_map & 0xFFFF0000) != (static_cast<uint32_t>(map) & 0xFFFF0000))) {
+        usable = false;
+    }
+    if (!usable) {
+        SafeSpot spot{};
+        if (!recent_safe_spot(&spot)) {
+            spot.pos = here;
+            spot.map = map;
+        }
+        __try {
+            std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(replay + 0x20)), &spot.pos, sizeof(spot.pos));
+            if (spot.map != -1) *ptr<int>(replay + 0x38) = spot.map;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+        LOG_INFO("[coop] Bloodstain: the replay record was not usable here; using (%.1f, %.1f, %.1f) map %08X",
+                 spot.pos.x, spot.pos.y, spot.pos.z, spot.map);
+    } else {
+        LOG_INFO("[coop] Bloodstain left in the host's world at (%.1f, %.1f, %.1f) map %08X", start.x, start.y,
+                 start.z, start_map);
+    }
+    return true;
+}
+
+// Replaces the compare: ZF set means "someone else's world" to the je that follows. Every register is kept
+// (eax is GameMan in the branch for someone else's world).
+__declspec(naked) void hk_blood_world() {
+    __asm {
+        pushad
+        sub esp, 0x80
+        movdqu xmmword ptr [esp], xmm0
+        movdqu xmmword ptr [esp + 0x10], xmm1
+        movdqu xmmword ptr [esp + 0x20], xmm2
+        movdqu xmmword ptr [esp + 0x30], xmm3
+        movdqu xmmword ptr [esp + 0x40], xmm4
+        movdqu xmmword ptr [esp + 0x50], xmm5
+        movdqu xmmword ptr [esp + 0x60], xmm6
+        movdqu xmmword ptr [esp + 0x70], xmm7
+        call blood_in_own_world
+        movdqu xmm0, xmmword ptr [esp]
+        movdqu xmm1, xmmword ptr [esp + 0x10]
+        movdqu xmm2, xmmword ptr [esp + 0x20]
+        movdqu xmm3, xmmword ptr [esp + 0x30]
+        movdqu xmm4, xmmword ptr [esp + 0x40]
+        movdqu xmm5, xmmword ptr [esp + 0x50]
+        movdqu xmm6, xmmword ptr [esp + 0x60]
+        movdqu xmm7, xmmword ptr [esp + 0x70]
+        add esp, 0x80
+        test al, al
+        popad
+        ret
+    }
+}
+
+bool install_blood_world() {
+    static const uint8_t k[7] = {0x80, 0xB8, 0x4F, 0x0B, 0x00, 0x00, 0x00};
+    return patch_call(kBloodWorldSite, k, sizeof(k), reinterpret_cast<void*>(&hk_blood_world));
 }
 
 // The party census (0xEA1A70) resolves each member handle and then reads the character's type at +0x70.
@@ -242,15 +433,16 @@ bool arm_guest_death_reload() {
 }
 
 bool kick_prepare(bool dead) {
-    if (!seamless_rules()) return false;
     const uint32_t gm = game::game_man();
     if (!gm) return false;
-    if (dead) arm_guest_death_reload();
+    // A guest who is still in the session is aimed at their respawn bonfire before the map is checked.
+    if (seamless_rules() && dead) arm_guest_death_reload();
     int map = 0;
     if (!read32(gm + game::kGmWarpMap, reinterpret_cast<uint32_t*>(&map)) || map != kEmptyWarpMap) return false;
-    // Still the empty map. A dead host is sent to their own bonfire; anyone else skips the kick so the
-    // empty level is never streamed.
-    if (dead && g_state.host && game::own_world()) {
+    // WarpSelfBloodMark stores 01000000. That is not a level. A death reloads the bonfire, including
+    // after the world was closed and the session rules are no longer on. A living player's warp to a
+    // bloodstain in their own world is left to the game. During a session that warp is not started.
+    if (dead && game::own_world()) {
         const int bonfire = game::last_bonfire();
         const int real = game::bonfire_map(bonfire);
         if (real != -1) {
@@ -262,6 +454,7 @@ bool kick_prepare(bool dead) {
             return false;
         }
     }
+    if (!dead && !seamless_rules()) return false;
     *ptr<int>(gm + game::kGmWarpMap) = -1;
     LOG_INFO("[coop] Warp to empty map 01000000 was not started");
     return true;
@@ -1107,6 +1300,10 @@ constexpr uint32_t kItemEnable = 0x00DC6490;  // thiscall(manager), stdcall(hand
 constexpr uint32_t kItemRemove = 0x00DC76F0;  // stdcall(manager, handle, setFlag), ret 0xC
 constexpr uint32_t kGetFlag = 0x00D38C40;     // eax = EventFlagMan, ecx = 0, stdcall(id) -> al, ret 4
 constexpr uint32_t kItemLists[] = {0x1C, 0x24, 0x2C, 0x34};
+// Bonfire talk adds Level Up, Kindle and Reverse Hollowing only when this flag is on.
+// It is set in the player's own world once the Undead Asylum is cleared. A guest's active
+// store is the host's world, which does not carry that bit, so the three rows never appear.
+constexpr int kBonfireServiceFlag = 11810000;
 
 void* g_getflag_orig = nullptr;
 void* g_remove_orig = nullptr;
@@ -1185,6 +1382,13 @@ bool guest_owns_flag(int id) {
 
 int __stdcall guest_item_flag_on(uint32_t, int id) {
     if (!g_state.guest || g_state.invader) return 0;
+    if (id == kBonfireServiceFlag && seamless_rules() && own_flag_on(id)) {
+        static int reported = 0;
+        if (reported++ == 0) {
+            LOG_INFO("[coop] Bonfire level up, kindle and reverse hollowing use the guest's own flag %d", id);
+        }
+        return 1;
+    }
     return guest_owns_flag(id) ? 1 : 0;
 }
 
@@ -1330,6 +1534,8 @@ int install() {
         g_party_orig = detour(kPartyReset, k, sizeof(k), reinterpret_cast<void*>(&hk_party_reset));
         failed += install_one("party reset guard", g_party_orig != nullptr);
     }
+    failed += install_one("member left (no return home for the master of the world)", install_master_left());
+    failed += install_one("guest bloodstain position", install_blood_world());
     {
         // mov eax, [esi+70h] ; sub eax, edi. The following je stays in place.
         static const uint8_t k[5] = {0x8B, 0x46, 0x70, 0x2B, 0xC7};
@@ -1455,6 +1661,30 @@ int install() {
 
 void set_guest_world_events(bool on) { g_world_events = on; }
 
+void track_safe_position() {
+    const double t = seconds();
+    if (t - g_last_spot < 0.25) return;
+    g_last_spot = t;
+    const uint32_t me = game::player();
+    uint32_t hp = 0;
+    game::Vec3 pos{};
+    if (!me || game::loading() || !read32(me + 0x2D4, &hp) || static_cast<int>(hp) <= 0 ||
+        !game::position(&pos, nullptr)) {
+        return;
+    }
+    // Not while falling: a stain in the air or at the bottom of a pit cannot be reached.
+    static game::Vec3 last{};
+    static double last_t = 0;
+    const double dt = t - last_t;
+    const bool falling = last_t > 0 && dt < 1.0 && (last.y - pos.y) / dt > 4.0;
+    last = pos;
+    last_t = t;
+    if (falling) return;
+    g_spots[g_spot_next] = SafeSpot{t, pos, game::map_id()};
+    g_spot_next = (g_spot_next + 1) % 32;
+    if (g_spot_count < 32) ++g_spot_count;
+}
+
 void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = players; }
 
 void tick() {
@@ -1470,9 +1700,10 @@ void tick() {
         g_hidden_items.clear();
     } else {
         hide_owned_items();
+        if (g_state.active && !g_state.invader) track_safe_position();
     }
     if (!seamless_rules()) return;
-    if (g_state.host && game::session_state() == 3) game::keep_room_open();
+    if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();
 }
 
 }  // namespace coop::rules

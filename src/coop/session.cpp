@@ -26,7 +26,7 @@ namespace {
 
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
-constexpr uint32_t kProtocol = 3;
+constexpr uint32_t kProtocol = 4;
 
 enum MsgType : uint8_t {
     kHello = 1,        // guest/invader -> host: please let me in
@@ -45,7 +45,7 @@ enum MsgType : uint8_t {
     kArrived = 14,     // guest/invader -> host -> all: arrived in the host's world
     kLeft = 15,        // host -> guests: another player left
     kGait = 16,        // everyone -> everyone: our walk/run/sprint (on change and twice a second)
-    kAnim = 17,        // everyone -> everyone: an event animation we played (bonfire rest, bonfire warp)
+    kAnim = 17,        // everyone -> everyone: a bonfire event animation of ours started or stopped
 };
 
 enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4 };
@@ -100,6 +100,7 @@ struct Info {
     int32_t light;  // light SpEffects the player carries (bit mask)
     char name[64];
     wchar_t char_name[17];  // character name: matches the player to their character in our world
+    int32_t ceremony;       // the bonfire animation the player is looping (the sit), 0 none
 };
 struct BonfireMsg {
     Header h;
@@ -121,10 +122,9 @@ struct GaitMsg {
 };
 struct AnimMsg {
     Header h;
-    uint8_t kind;
+    uint8_t kind;  // 0 start, 1 stop
     int32_t anim;
-    int32_t a2;
-    int32_t a3;
+    uint8_t loop;
 };
 constexpr int kFlagsPerMsg = 96;
 struct FlagsMsg {
@@ -173,6 +173,7 @@ enum class Step {
     Idle,
     HostLobby,     // creating our lobby
     Hosting,
+    Closing,       // host: disbanding; the guests leave, then the game session ends
     Searching,     // guest: looking for a lobby
     LobbyJoin,     // guest: entering the host's lobby
     Hello,         // guest: waiting for the host's invitation
@@ -239,6 +240,10 @@ std::map<uint32_t, uint64_t> g_chr_peer;
 // Our gait as last sent (motion sync).
 int g_sent_gait = -1;
 double g_last_gait = 0;
+// Host, while disbanding: when it began and whether the game's own leave was asked for.
+double g_close_at = 0;
+bool g_close_left = false;
+bool g_close_forced = false;  // a guest was still in the game session when it was ended
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -331,6 +336,9 @@ void finish(const std::wstring& why) {
     g_homeward_at = 0;
     g_follow_bonfire = -1;
     g_guest_bonfire = -1;
+    g_close_at = 0;
+    g_close_left = false;
+    g_close_forced = false;
     reset_rules();
     set_step(Step::Idle);
 }
@@ -406,6 +414,8 @@ void host_answer(const Pending& p) {
     // No invasions in the Undead Asylum or Firelink Shrine (as in Remastered Seamless Co-op).
     const int host_map = game::map_id();
     if (p.invade && (host_map == 0x12010000 || host_map == 0x0A020000)) w.status = kRefused;
+    // Between maps or at the title screen there is no world to arrive in yet: the joiner asks again.
+    if (w.status == kOk && (!game::in_game() || game::loading() || !game::own_world())) w.status = kBusy;
     std::vector<uint8_t> inv;
     if (w.status == kOk) {
         // join type: -1 white (co-op, own body kept by the guest's rules), -2 black (invader)
@@ -446,7 +456,70 @@ void host_answer(const Pending& p) {
              w.status);
 }
 
+// The party counts the game keeps beside the session (PartyMemberInfo +0x10/+0x14, slot +0x7C). The game
+// brings them down itself when a guest's character is taken out of the party. They are only put right here
+// when a guest never left and the session had to be ended over them: HasParty would keep Quit grey.
+void settle_party_counts() {
+    const uint32_t gm = game::game_man();
+    uint32_t party = 0;
+    if (!gm || !read32(gm + game::kGmParty, &party) || party < 0x10000) return;
+    uint32_t n10 = 0, n14 = 0, slot = 0;
+    read32(party + 0x10, &n10);
+    read32(party + 0x14, &n14);
+    read32(party + 0x7C, &slot);
+    if (static_cast<int>(n10) <= 1 && static_cast<int>(n14) <= 1 && static_cast<int>(slot) == -1) return;
+    if (static_cast<int>(n10) > 1) *ptr<int>(party + 0x10) = 1;
+    if (static_cast<int>(n14) > 1) *ptr<int>(party + 0x14) = 1;
+    if (static_cast<int>(slot) != -1) *ptr<int>(party + 0x7C) = -1;
+    LOG_INFO("[coop] Party counts settled after the session (were %d/%d, slot %d)", static_cast<int>(n10),
+             static_cast<int>(n14), static_cast<int>(slot));
+}
+
+// The host disbands the way the game ends a session after the Black Separation Crystal's menu: the guests
+// leave first (they were told), their characters go out of the party through the game's own member-left code,
+// and when the host is the last member the game's own leave closes the session (0xD2B460: leaving, then solo).
+// Ending the session over the guests' heads (the earlier builds) left the party and the member list behind.
+void host_close_tick() {
+    const int state = game::session_state();
+    const double waited = now() - g_close_at;
+    if (state == 0) {
+        if (g_close_forced) settle_party_counts();
+        LOG_INFO("[coop] Session disbanded (%.1f s); the host stays in the world", waited);
+        finish(L"");
+        return;
+    }
+    const int members = game::member_count();
+    // Hosting (3): once alone, or when a guest has not left after six seconds. Still being created or failed
+    // (1, 2, 5): after a moment, the same leave clears it. Leaving (7) is the game's own leave in progress.
+    const bool hosting_done = state == 3 && (members <= 1 || waited > 6.0);
+    const bool never_hosted = state != 3 && state != 7 && waited > 3.0;
+    if (!g_close_left && (hosting_done || never_hosted)) {
+        g_close_left = true;
+        g_close_forced = state == 3 && members > 1;
+        rules::state().leaving = true;
+        LOG_INFO("[coop] Ending the game session (state %d, %d member(s) in it, %.1f s after the request)", state,
+                 members, waited);
+        game::leave_session();
+        return;
+    }
+    if (waited > 25.0) {
+        // The game's leave never finished (no answer from Steam): return the session to solo by hand.
+        LOG_ERROR("[coop] The game session did not close (state %d); returned to solo", state);
+        rules::state().leaving = true;
+        game::abort_session();
+        if (game::session_state() != 0) {
+            if (const uint32_t s = game::sess_man()) *ptr<int>(s + game::kSessState) = 0;
+        }
+        settle_party_counts();
+        finish(L"");
+    }
+}
+
 void host_tick() {
+    if (g_step == Step::Closing) {
+        host_close_tick();
+        return;
+    }
     if (g_step != Step::Hosting) return;
     host_ensure_game_session();
     const bool ready = game::session_state() == 3;
@@ -782,6 +855,7 @@ void send_info() {
     i.light = world::local_lights();
     strncpy_s(i.name, steam::persona(steam::self()).c_str(), _TRUNCATE);
     wcsncpy_s(i.char_name, party::local_name().c_str(), _TRUNCATE);
+    i.ceremony = motion::local_loop_anim();
     broadcast(i, false);
 }
 
@@ -790,6 +864,63 @@ std::wstring event_name(const PlayerEvent& e) {
     std::memcpy(name, e.name, 64);
     name[64] = 0;
     return text::widen(name);
+}
+
+// The character in our world that belongs to a player (0 none), from the last match (update_remote_players).
+// Only characters the game still lists are answered: a map load frees them all.
+uint32_t chr_of_peer(uint64_t id) {
+    for (const auto& [chr, who] : g_chr_peer) {
+        if (who != id) continue;
+        for (uint32_t live : game::remote_player_chrs()) {
+            if (live == chr) return chr;
+        }
+    }
+    return 0;
+}
+
+// Bonfire animations are passed on as they start and stop. A message can be missed (a character that was
+// not built yet, a player who arrived while the other was already sitting), so each player also reports
+// the loop they are in once a second, and the character here is brought in line with that: the sit is
+// started for a character that is not sitting, and a sit nobody reports any more is stopped.
+void reconcile_ceremonies() {
+    static double last = 0;
+    if (now() - last < 0.5) return;
+    last = now();
+    if (g_role == Role::None || game::loading()) return;
+    static std::map<uint64_t, double> tried;  // one attempt per player every few seconds
+    static int lines = 0;
+    for (const auto& p : g_peers) {
+        if (p.invader || now() - p.last_seen > 3.0 || now() - p.anim_at < 1.5) continue;
+        const uint32_t chr = chr_of_peer(p.id);
+        if (!chr) continue;
+        const int have = motion::remote_loop_anim(chr);
+        if (p.ceremony == have) {
+            // Not sitting on either side. A one-shot the game never let go of is cleared once its player
+            // has been quiet for longer than any of these animations lasts.
+            const int open = have == 0 ? motion::remote_open_anim(chr) : 0;
+            if (open == 0 || now() - p.anim_at < 15.0) continue;
+            double& tried_at = tried[p.id];
+            if (now() - tried_at < 3.0) continue;
+            tried_at = now();
+            if (motion::play_remote_anim(chr, motion::Anim{1, 0, 0}) && ++lines <= 60) {
+                LOG_INFO("[coop] %s's bonfire animation %d was still held on their character: cleared",
+                         p.name.c_str(), open);
+            }
+            continue;
+        }
+        double& at = tried[p.id];
+        if (now() - at < 3.0) continue;
+        at = now();
+        if (p.ceremony != 0) {
+            if (motion::play_remote_anim(chr, motion::Anim{0, p.ceremony, 1}) && ++lines <= 60) {
+                LOG_INFO("[coop] %s is sitting at a bonfire (animation %d): shown on their character",
+                         p.name.c_str(), p.ceremony);
+            }
+        } else if (motion::play_remote_anim(chr, motion::Anim{1, 0, 0}) && ++lines <= 60) {
+            LOG_INFO("[coop] %s is no longer in bonfire animation %d: stopped on their character", p.name.c_str(),
+                     have);
+        }
+    }
 }
 
 void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
@@ -859,6 +990,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             p->light = m.light;
             m.char_name[16] = 0;
             p->char_name = m.char_name;
+            p->ceremony = motion::synced_anim(m.ceremony) ? m.ceremony : 0;
             p->last_seen = now();
             break;
         }
@@ -981,12 +1113,22 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         case kAnim: {
             AnimMsg m;
             if (!as(&m) || g_role == Role::None || game::loading()) return;
-            static int lines = 0;
-            if (++lines <= 20) {
-                LOG_INFO("[coop] Ignored ceremony animation %d from %s", m.anim, steam::persona(from).c_str());
+            PeerInfo* p = peer(from);
+            p->anim_at = now();
+            if (m.kind == 0) {
+                if (!motion::synced_anim(m.anim)) return;
+                p->ceremony = m.loop ? m.anim : 0;
+            } else {
+                p->ceremony = 0;
             }
-            motion::Anim a{m.kind, m.anim, m.a2, m.a3};
-            motion::play_remote_anim(0, a);
+            const uint32_t chr = chr_of_peer(from);
+            static int lines = 0;
+            if (++lines <= 200) {
+                LOG_INFO("[coop] %s: bonfire animation %s %d%s%s", p->name.c_str(), m.kind == 0 ? "start" : "stop",
+                         m.kind == 0 ? m.anim : 0, m.kind == 0 && m.loop ? " (loop)" : "",
+                         chr ? "" : " (their character is not here)");
+            }
+            if (chr) motion::play_remote_anim(chr, motion::Anim{m.kind, m.anim, m.loop});
             break;
         }
         case kPing: {
@@ -1370,16 +1512,22 @@ void tick() {
                 fill_header(&m, kAnim);
                 m.kind = a.kind;
                 m.anim = a.anim;
-                m.a2 = a.a2;
-                m.a3 = a.a3;
+                m.loop = a.loop;
                 broadcast(m);
                 static int lines = 0;
-                if (++lines <= 200) LOG_INFO("[coop] Sent our animation %d to the others", a.anim);
+                if (++lines <= 200) {
+                    LOG_INFO("[coop] Our bonfire animation %s %d%s: told the others", a.kind == 0 ? "start" : "stop",
+                             a.anim, a.loop ? " (loop)" : "");
+                }
             }
         }
         motion::clear_remote_gaits();
+        // A map load frees every character: the matches made before it point at freed memory.
+        if (game::loading()) g_chr_peer.clear();
         if (g_role != Role::None && !game::loading()) {
+            const std::vector<uint32_t> live = game::remote_player_chrs();
             for (const auto& [chr, id] : g_chr_peer) {
+                if (std::find(live.begin(), live.end(), chr) == live.end()) continue;
                 for (const auto& p : g_peers) {
                     if (p.id != id || p.invader) continue;
                     const bool fresh = p.gait >= 0 && now() - p.gait_at < 1.5;
@@ -1388,6 +1536,7 @@ void tick() {
             }
         }
     }
+    reconcile_ceremonies();
     rules::tick();
     {
         const auto& st = rules::state();
@@ -1476,106 +1625,35 @@ void invade() {
     guest_search();
 }
 
-// 0xEA1900 writes -1 over the four party member handles and does not touch the characters. Quit destroys
-// the characters and then counts whoever those handles still name; a handle whose character is gone is
-// read at +0x70 (the chr type) and the process dies.
-void blank_party_handles(uint32_t party) {
-    if (party < 0x10000) return;
-    __asm {
-        mov eax, party
-        mov edx, 0x00EA1900
-        call edx
-    }
-}
-
-// abort_session returns the session state to solo but leaves the member vector and the party counts.
-// HasParty (and the pause menu) still see a session, so Quit stays grey. Emptying the vector drops the
-// member records without running their destructors; the next session allocates its own. The handles are
-// cleared as well, so the quit path does not walk a guest who has already left.
-void release_solo_session(bool drop_members) {
-    const uint32_t sess = game::sess_man();
-    const int members = game::member_count();
-    // Quit keeps a single record. Dropping it here, inside the net-step destructor, is the host's own
-    // record after a reload, and the save that follows has no floor. Disband still drops every record.
-    if (drop_members && sess && members > 0) {
-        uint32_t begin = 0;
-        if (read32(sess + game::kSessMembersBegin, &begin) && begin) {
-            *ptr<uint32_t>(sess + game::kSessMembersEnd) = begin;
-        }
-    }
-    int party_count = 0;
-    int party_slot = -1;
-    const uint32_t gm = game::game_man();
-    uint32_t party = 0;
-    if (gm && read32(gm + game::kGmParty, &party) && party > 0x10000) {
-        uint32_t n10 = 0, n14 = 0, slot = 0;
-        read32(party + 0x10, &n10);
-        read32(party + 0x14, &n14);
-        read32(party + 0x7C, &slot);
-        party_count = static_cast<int>(n10);
-        party_slot = static_cast<int>(slot);
-        if (static_cast<int>(n10) > 1) *ptr<int>(party + 0x10) = 1;
-        if (static_cast<int>(n14) > 1) *ptr<int>(party + 0x14) = 1;
-        if (party_slot != -1) *ptr<int>(party + 0x7C) = -1;
-        blank_party_handles(party);
-    }
-    LOG_INFO("[coop] Multiplayer flags cleared (members %d, party %d, slot %d)", members, party_count, party_slot);
-}
-
-bool host_step_ending() {
-    if (g_role != Role::Host || g_step != Step::Hosting) return false;
-    // A guest still in the world is a map load or a disconnect, not a quit. Closing here would
-    // send them home every time the host changed areas.
-    if (!g_peers.empty()) return false;
-    if (!game::own_world() || game::session_state() != 3 || game::loading()) return false;
-    // abort_session loops while this byte is set. A map load sets it; a quit does not.
-    const uint32_t sess = game::sess_man();
-    uint8_t load_marker = 0;
-    if (!sess || !read8(sess + 0x1C8, &load_marker) || load_marker) return false;
-    const uint32_t gm = game::game_man();
-    uint8_t warp = 0;
-    if (!gm || !read8(gm + game::kGmWarpRequest, &warp) || warp) return false;
-    static bool in_call = false;
-    if (in_call) return false;
-    in_call = true;
-    const int before = game::session_state();
-    game::abort_session();
-    const int after = game::session_state();
-    if (after != 0) {
-        *ptr<int>(sess + game::kSessState) = 0;
-        LOG_ERROR("[coop] Quit cleanup left the session at %d; forced it to solo", after);
-    }
-    release_solo_session(false);
-    LOG_INFO("[coop] Quit ends the session without leaving the map (was state %d)", before);
-    finish(L"");
-    in_call = false;
-    return true;
-}
-
 void leave() {
     if (g_role == Role::None) {
         LOG_INFO("[coop] Leave request ignored (not in a session)");
+        return;
+    }
+    if (g_role == Role::Host && g_step == Step::Closing) {
+        LOG_INFO("[coop] Leave request ignored (the session is already closing)");
         return;
     }
     Simple bye{};
     fill_header(&bye, kBye);
     broadcast(bye);
     if (g_role == Role::Host) {
-        // leave_session (0xD2B460) sets the session to "leaving" and the host is dropped at the title screen.
-        // The position saved on the way out has no floor, so the next load falls through the world once.
-        // abort_session returns the game session to solo without that transition. Guests were already told
-        // to go home. The host is not warped. leaving stays clear so a member-left during the cleanup is
-        // still blocked (see rules).
-        const int before = game::session_state();
-        if (before != 0) game::abort_session();
-        const int after = game::session_state();
-        if (after != 0) {
-            if (const uint32_t s = game::sess_man()) *ptr<int>(s + game::kSessState) = 0;
-            LOG_ERROR("[coop] Session cleanup left state %d (was %d); forced it to solo", after, before);
+        if (g_step != Step::Hosting) {
+            // The lobby was still being made: nothing to end in the game.
+            finish(L"");
+            return;
         }
-        release_solo_session(true);
-        finish(L"");
-        LOG_INFO("[coop] Session disbanded (game session %d, host stays in the world)", before);
+        // See host_close_tick. The guests go first; the host's own game session ends when it is alone.
+        // Earlier builds ended the game session right here, with the guests still in it.
+        if (g_lobby) steam::set_lobby_joinable(g_lobby, false);
+        g_pending.clear();
+        g_close_at = now();
+        g_close_left = false;
+        g_close_forced = false;
+        rules::state().closing = true;
+        set_step(Step::Closing);
+        LOG_INFO("[coop] Disbanding: %zu guest(s) told to leave (game session %d, %d member(s))", g_peers.size(),
+                 game::session_state(), game::member_count());
         return;
     }
     if (g_step == Step::InWorld || g_step == Step::Loading) {
@@ -1623,7 +1701,7 @@ void host_homeward() {
 }
 
 bool in_session() {
-    if (g_role == Role::Host) return g_step == Step::Hosting;
+    if (g_role == Role::Host) return g_step == Step::Hosting || g_step == Step::Closing;
     if (g_role == Role::Guest) {
         return g_step == Step::Hello || g_step == Step::Joining || g_step == Step::Loading || g_step == Step::InWorld;
     }
@@ -1757,7 +1835,9 @@ std::vector<std::wstring> panel_lines(int mode) {
     if (g_role == Role::None) return out;
     std::wstring head;
     if (g_role == Role::Host) {
-        head = g_step == Step::Hosting ? L"Seamless co-op: hosting" : L"Seamless co-op: creating session...";
+        head = g_step == Step::Hosting   ? L"Seamless co-op: hosting"
+               : g_step == Step::Closing ? L"Seamless co-op: closing..."
+                                         : L"Seamless co-op: creating session...";
     } else if (g_step == Step::InWorld) {
         head = (g_invade ? L"Invading " : L"In ") + text::widen(steam::persona(g_host)) + L"'s world";
     } else if (g_step == Step::GoingHome) {

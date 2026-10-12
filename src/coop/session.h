@@ -32,6 +32,8 @@ struct PeerInfo {
     double alive_since = 0;  // when they last reported coming back alive
     int gait = -1;           // their walk/run/sprint as they report it (motion::Gait), -1 unknown
     double gait_at = 0;      // when they last reported it
+    int ceremony = 0;        // the bonfire animation they report looping (their sit), 0 none
+    double anim_at = 0;      // when one of their event animations last arrived
 };
 
 void configure(const Config& cfg);
@@ -72,10 +74,6 @@ bool install_nameplate();
 
 // The host's arrival point for guests: where the host last rested at a bonfire (set on every rest).
 void remember_rest_point();
-
-// The in-game net step is being destroyed and no warp is in progress. leave_session would save a position
-// with no floor, so the game session is returned to solo first. False when this end is a map load.
-bool host_step_ending();
 
 // Guest: a death in the host's world respawns at this bonfire. `object_id` is the bonfire object
 // Util_RequestRegene was given; the respawn id is that plus 1000. Ignored unless we are a co-op guest.

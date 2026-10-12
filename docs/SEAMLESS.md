@@ -10,8 +10,10 @@ for PTDE's engine. The goal of this first stage is a faithful port: the same ite
 session behaviour. Where PTDE's engine sets a hard limit (four players instead of six), the port keeps the
 engine's limit.
 
-**Status:** building; second revision. The first test (two players) found the items unusable; this revision
-uses Remastered Seamless Co-op's item definitions and rules one to one. Not yet tried again in the game.
+**Status:** in two-player testing (round 13, 2026-10-08). Joining, playing, dying, resting and leaving work
+between two PCs. This round: a host is no longer sent to the title screen when a guest leaves, a guest's
+bloodstain stays where they fell, the Abyssal Eye Orb disbands through the game's own leave, and the bonfire
+animations are back.
 
 ## How to play
 
@@ -60,7 +62,8 @@ such features (Remastered's online play needs FromSoftware's servers, which that
 | Fog walls | The white walls that keep phantoms in the host's area are gone (boss fog stays). |
 | World events | Every player's game runs the world's scripted events, not only the host's (`GuestWorldEvents`): a guest exploring alone meets the Hellkite on the Undead Burg bridge, starts boss fights, rides lifts and gets the event rewards. Progress (event flags) is shared. |
 | Host travel | When the host warps by bonfire, the guests follow to the same bonfire. A guest's own bonfire warp does nothing. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later ("The power of the homeward bone consumes you..."). Guests cannot use Homeward Bones. |
-| Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). |
+| Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
+| Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. |
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency; otherwise white tendency events never happen and black ones only in a cursed world (with seamless co-op on, world tendency is replaced in every world, as in Remastered Seamless Co-op). |
 | Limbo | Dying during a boss fight or while an invader is present holds your respawn until the fight ends, everyone has fallen, or someone rests. |
@@ -136,6 +139,40 @@ block, a load with fewer than two members, event restart warps), the party reset
 The host's death would broadcast `LuaCallStart(4000, 1)`, which sends every guest home; it is not sent (an
 invader gets the victory from the mod instead). A guest's later loads (death, following the host) are marked
 as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides which world to load.
+
+### When a player leaves
+
+When a member's character is taken out of the party (`0xEA2A10`), the game looks at that member's summon type
+(`0xD79380`, remote player data `+0x110`). Type 0 is the master of the world: the game shows "Disconnected
+from master of world", requests a save and arms the event script's `OnLeave_Limit`, which five seconds later
+sets the sign warp and sends the player back to where they were summoned from. A co-op guest keeps their own
+body and has no summon type, so a host took every departing guest for the master and was warped to a summon
+point that never existed: the title screen, and a save without a floor under it. The return home is no longer
+armed in one's own world (nobody else is the master there) nor for a co-op guest (the session takes them
+home), and `SetSosSignWarp` (`0xD5E070`) is refused in one's own world.
+
+The host's Abyssal Eye Orb disbands the way the game ends a session after the Black Separation Crystal: the
+guests are told and leave, the game's own member-left code takes their characters out of the party, and when
+the host is the last member the game's own leave (`0xD2B460`) closes the session.
+
+### Bloodstains
+
+The death penalty (`0xD78B10`, the event script's `UpDateBloodMark`) records the stain at the start of the
+player's death replay (`PlayerIns+0x5E0`) in their own world, and at the place they were summoned from
+(`GameMan+0xAE0`) in someone else's. A co-op guest was never summoned from anywhere. As in Remastered Seamless
+Co-op, that test answers "own world" for a co-op guest, so the stain is where they fell. Creating the marker
+(`0xDB6010`) and picking it up (`FrpgEventConditionSelfBlood`, `0xD5B330`) do not depend on whose world it is.
+
+### Bonfire animations
+
+Sitting, the sitting loop, standing up, kindling and the bonfire menu's ceremonies are event animations
+(`0xE69590` starts one on a character, `0xE69470` stops it), which the player samples do not carry (they
+carry the character's state machine ids). Remastered Seamless Co-op watches the start function on the local
+player and, for nineteen bonfire animations, has every other game call it on that player's character. The
+port does the same and passes on the stops as well: PTDE's event script stops the sitting loop before it
+plays the standing up, and the bonfire menu stops and starts animations of its own. Each player also reports
+the loop they are in once a second, so a character that missed a message (it was not built yet, or its player
+was already sitting) is put right.
 
 ### Messages
 

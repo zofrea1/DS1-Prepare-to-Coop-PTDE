@@ -280,6 +280,23 @@ void keep_guest_in_world() {
     LOG_INFO("[coop] The game tried to send us home; respawning at bonfire %d in the host's world instead", bonfire);
 }
 
+// SetSosSignWarp (0xD5E070, GameMan+0xB00 = 1): the next SetDefaultMapUid then picks the map the player was
+// summoned from (GameMan+0xAD0) instead of their bonfire. In one's own world nobody was summoned from anywhere:
+// that map was never filled in, and loading it ends at the title screen with a save that has no floor. The
+// request is dropped there, so whatever asked for it gets an ordinary reload at the last bonfire.
+constexpr uint32_t kSetSignWarp = 0x00D5E070;
+using VoidFn = void(__cdecl*)();
+VoidFn g_sign_warp_orig = nullptr;
+
+void __cdecl hk_sign_warp() {
+    if (game::own_world()) {
+        static int lines = 0;
+        if (++lines <= 20) LOG_INFO("[coop] A return to the summon sign was asked for in our own world; not set");
+        return;
+    }
+    g_sign_warp_orig();
+}
+
 char __cdecl hk_warp_kick() {
     if (!g_bypass) keep_guest_in_world();
     if (!g_bypass && !g_limbo && limbo_wanted()) {
@@ -523,6 +540,11 @@ bool install() {
         static const uint8_t k[5] = {0xA1, 0x00, 0x87, 0x37, 0x01};  // mov eax,[01378700h]
         g_warp_orig = reinterpret_cast<CharFn>(detour(kWarpKick, k, sizeof(k), reinterpret_cast<void*>(&hk_warp_kick)));
         if (!g_warp_orig) ++failed;
+    }
+    {
+        static const uint8_t k[5] = {0xA1, 0xA0, 0x84, 0x37, 0x01};  // mov eax,[013784A0h]
+        g_sign_warp_orig = reinterpret_cast<VoidFn>(detour(kSetSignWarp, k, sizeof(k), reinterpret_cast<void*>(&hk_sign_warp)));
+        if (!g_sign_warp_orig) ++failed;
     }
     if (failed) LOG_ERROR("[coop] %d world rule hook(s) did not match this build", failed);
     return failed == 0;

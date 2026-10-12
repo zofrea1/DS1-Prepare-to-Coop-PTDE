@@ -272,7 +272,9 @@ void coop_install(const Settings& settings) {
     const bool texts = coop::text::install();
     const bool world = coop::world::install();
     if (!coop::session::install_nameplate()) LOG_ERROR("[coop] Companion nameplates were not changed");
-    if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait is not synced");
+    if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
+    coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
+    LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");
     g_items = coop::items::install();
     coop::items::set_use_handler(&use_item);
     coop::items::set_can_use(&can_use);

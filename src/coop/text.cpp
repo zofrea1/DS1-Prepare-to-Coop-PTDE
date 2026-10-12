@@ -6,7 +6,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cstdio>
 #include <cwchar>
+#include <intrin.h>
 
 namespace coop::text {
 
@@ -33,6 +35,17 @@ constexpr uint32_t kRecallMenuEvent = 0x00D74950;
 constexpr uint32_t kInfoOpen = 0x00D4C090;
 constexpr uint32_t kInfoAdd = 0x00D4C190;
 constexpr uint32_t kInfoAddBuffer = 0x00D4C290;
+// Two more ways into the box. 0xD4BB30 adds a list line (the "items / souls obtained" rows, through 0xD4BE50,
+// and the Lua AddInfomationList) to whatever box [0x1378548] holds, and 0xD4BFA0 opens the box for the items
+// AddInventoryItem hands out. A box this module holds back must be opened before either of them runs: a list
+// line would otherwise go into the box before it (one already closed), and the held-back box would open a frame
+// later with nothing in it, a modal list that waits for a button and has nothing to show.
+constexpr uint32_t kInfoAddList = 0x00D4BB30;
+constexpr uint32_t kInfoOpenItems = 0x00D4BFA0;
+// The return address of the box opened by the member-left notice (0xD79380 calls 0xD4C090 at 0xD79418). That
+// notice is always 20001020 or 20001025, both dropped in a seamless session. Its line is only added when the
+// leaving member's record can still be found (0xD5E820); when it cannot, the held-back box opened empty.
+constexpr uint32_t kRetMemberLeftBox = 0x00D7941D;
 
 // FMG pointers in MsgRepository (base, then the 1.0.2 patch FMG the game checks first).
 constexpr uint32_t kGoodsName[2] = {0x2C, 0x1C0};
@@ -63,6 +76,9 @@ using InfoOpenFn = void(__cdecl*)(int, int, int, int, int);
 InfoOpenFn g_info_open_orig = nullptr;
 void* g_info_add_orig = nullptr;
 void* g_info_buffer_orig = nullptr;
+void* g_info_list_orig = nullptr;
+void* g_info_items_orig = nullptr;
+bool g_member_left_box = false;  // the member-left notice's box was dropped this frame (its line goes too)
 
 bool g_seamless = false;
 ULONGLONG g_seamless_until = 0;
@@ -143,6 +159,11 @@ void __cdecl hk_info_open(int type, int a, int b, int c, int d) {
         g_info_open_orig(type, a, b, c, d);
         return;
     }
+    if (reinterpret_cast<uint32_t>(_ReturnAddress()) == kRetMemberLeftBox) {
+        // Never shown in a seamless session, with or without its line (see kRetMemberLeftBox).
+        g_member_left_box = true;
+        return;
+    }
     g_open.pending = true;
     g_open.args[0] = type;
     g_open.args[1] = a;
@@ -153,6 +174,11 @@ void __cdecl hk_info_open(int type, int a, int b, int c, int d) {
 
 // true: drop this line (and the box opened for it)
 bool __stdcall info_line(uint32_t id) {
+    if (g_member_left_box && listed(kBlockedNotices, id)) {
+        g_member_left_box = false;
+        if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (seamless session)", id);
+        return true;
+    }
     if (g_open.pending && listed(kBlockedNotices, id)) {
         g_open.pending = false;
         if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (seamless session)", id);
@@ -184,6 +210,24 @@ __declspec(naked) void hk_info_buffer() {
         call info_buffer_line
         popad
         jmp g_info_buffer_orig
+    }
+}
+
+__declspec(naked) void hk_info_list() {
+    __asm {
+        pushad
+        call info_buffer_line
+        popad
+        jmp g_info_list_orig
+    }
+}
+
+__declspec(naked) void hk_info_items() {
+    __asm {
+        pushad
+        call info_buffer_line
+        popad
+        jmp g_info_items_orig
     }
 }
 
@@ -236,9 +280,16 @@ bool install() {
         static const uint8_t k2[6] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8};
         g_info_add_orig = detour(kInfoAdd, k2, sizeof(k2), reinterpret_cast<void*>(&hk_info_add));
         g_info_buffer_orig = detour(kInfoAddBuffer, k2, sizeof(k2), reinterpret_cast<void*>(&hk_info_buffer));
-        if (!g_info_open_orig || !g_info_add_orig || !g_info_buffer_orig) {
-            LOG_ERROR("[coop] Information box code does not match this build (open %d, add %d, buffer %d)",
-                      g_info_open_orig != nullptr, g_info_add_orig != nullptr, g_info_buffer_orig != nullptr);
+        // push -1 ; push <SEH handler> (both)
+        static const uint8_t k3[7] = {0x6A, 0xFF, 0x68, 0x1C, 0xF1, 0x05, 0x01};
+        g_info_list_orig = detour(kInfoAddList, k3, sizeof(k3), reinterpret_cast<void*>(&hk_info_list));
+        static const uint8_t k4[7] = {0x6A, 0xFF, 0x68, 0x92, 0x87, 0x06, 0x01};
+        g_info_items_orig = detour(kInfoOpenItems, k4, sizeof(k4), reinterpret_cast<void*>(&hk_info_items));
+        if (!g_info_open_orig || !g_info_add_orig || !g_info_buffer_orig || !g_info_list_orig || !g_info_items_orig) {
+            LOG_ERROR("[coop] Information box code does not match this build (open %d, add %d, buffer %d, list %d, "
+                      "items %d)",
+                      g_info_open_orig != nullptr, g_info_add_orig != nullptr, g_info_buffer_orig != nullptr,
+                      g_info_list_orig != nullptr, g_info_items_orig != nullptr);
             ++failed;
         }
     }
@@ -286,6 +337,11 @@ void set_seamless_active(bool active) {
 
 void tick() {
     if (g_info_open_orig) open_pending();
+    g_member_left_box = false;
+}
+
+void debug_state(char* out, size_t size) {
+    _snprintf_s(out, size, _TRUNCATE, "filter %d pending %d", filtering() ? 1 : 0, g_open.pending ? 1 : 0);
 }
 
 }  // namespace coop::text

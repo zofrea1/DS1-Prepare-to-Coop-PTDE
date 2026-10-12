@@ -28,5 +28,7 @@ std::wstring widen(const std::string& utf8);
 void set_seamless_active(bool active);
 // Every frame on the game thread: opens an information box the game asked for and nothing claimed.
 void tick();
+// For the state probe: whether notices are filtered and a box is held back.
+void debug_state(char* out, size_t size);
 
 }  // namespace coop::text

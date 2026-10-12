@@ -246,6 +246,8 @@ bool g_close_left = false;
 bool g_close_forced = false;  // a guest was still in the game session when it was ended
 
 double now() { return GetTickCount64() / 1000.0; }
+// After a session ends, the party is put back to solo for a while (see settle_after_session).
+double g_settle_until = 0;
 
 void set_step(Step s) {
     g_step = s;
@@ -341,6 +343,7 @@ void finish(const std::wstring& why) {
     g_close_forced = false;
     reset_rules();
     set_step(Step::Idle);
+    g_settle_until = now() + 20.0;
 }
 
 PlayerEvent player_event(MsgType type, uint64_t who, bool invader, const std::string& name) {
@@ -475,6 +478,129 @@ void settle_party_counts() {
              static_cast<int>(n14), static_cast<int>(slot));
 }
 
+// 0xEA1900 writes -1 over the four party member handles and does not touch the characters. Quit destroys
+// the characters and then counts whoever those handles still name.
+void blank_party_handles(uint32_t party) {
+    if (party < 0x10000) return;
+    __try {
+        __asm {
+            mov eax, party
+            mov edx, 0x00EA1900
+            call edx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Once a session is over (the game session is solo and no other player's character is left in our world) the
+// party is put back to a solo game's: counts 1, no slot, no member handles. The game lowers the counts as each
+// member's character goes, but not in every way a session ends (a guest's own leave, a host left alone), and
+// a party that still counts two keeps HasPartyMembers true: the bonfire is unusable, talk refuses service and
+// the menu treats the game as multiplayer. Run for a while after every session (see tick).
+void settle_after_session() {
+    if (game::session_state() != 0 || game::loading() || !game::remote_player_chrs().empty()) return;
+    settle_party_counts();
+    const uint32_t gm = game::game_man();
+    uint32_t party = 0;
+    if (gm && read32(gm + game::kGmParty, &party) && party > 0x10000) blank_party_handles(party);
+}
+
+// ---------------------------------------------------------------- state probe (diagnostics)
+// One line with what decides whether the local player can act (interact, rest, answer a dialog) and whether the
+// game still counts a party, written whenever it changes (Ctrl+F12 writes it at once). For the reports where
+// world objects stop answering and dialogs take no input.
+uint32_t peek32(uint32_t addr);
+uint32_t peek8(uint32_t addr);
+
+bool __cdecl raw_has_party() {
+    using Fn = bool(__cdecl*)();
+    // It reads SessMan ([0x137D82C]) and GameMan's party ([0x13784A0] + 0xBEC) without checking them.
+    const uint32_t gm = game::game_man();
+    if (!game::sess_man() || !gm || peek32(gm + game::kGmParty) < 0x10000) return false;
+    __try {
+        return reinterpret_cast<Fn>(0x00D2A4B0)();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+uint32_t peek32(uint32_t addr) {
+    uint32_t v = 0xFFFFFFFF;
+    read32(addr, &v);
+    return v;
+}
+
+uint32_t peek8(uint32_t addr) {
+    uint8_t v = 0xFF;
+    if (!read8(addr, &v)) return 0xFF;
+    return v;
+}
+
+void probe_state(bool force) {
+    static double last = 0;
+    static std::string previous;
+    static int lines = 0;
+    if (!force && now() - last < 0.5) return;
+    last = now();
+    char text[640];
+    int n = 0;
+    auto put = [&](const char* fmt, auto... args) {
+        if (n < static_cast<int>(sizeof(text))) n += _snprintf_s(text + n, sizeof(text) - n, _TRUNCATE, fmt, args...);
+    };
+    const auto& st = rules::state();
+    put("sess %d mem %d", game::session_state(), game::member_count());
+    const uint32_t gm = game::game_man();
+    const uint32_t party = gm ? peek32(gm + game::kGmParty) : 0;
+    if (party > 0x10000) {
+        put(" party %d/%d slot %d", static_cast<int>(peek32(party + 0x10)), static_cast<int>(peek32(party + 0x14)),
+            static_cast<int>(peek32(party + 0x7C)));
+    }
+    put(" hasparty %d remote %d", raw_has_party() ? 1 : 0, static_cast<int>(game::remote_player_chrs().size()));
+    put(" rules %s%s%s%s%s", st.active ? "A" : "-", st.host ? "H" : "-", st.guest ? "G" : "-", st.leaving ? "L" : "-",
+        st.closing ? "C" : "-");
+    const uint32_t mm = peek32(0x013786D0);
+    if (mm > 0x10000 && mm != 0xFFFFFFFF) {
+        static const uint32_t kOpen[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC};
+        uint32_t open = 0;
+        for (size_t i = 0; i < sizeof(kOpen) / sizeof(kOpen[0]); ++i) {
+            if (peek8(mm + kOpen[i]) != 0) open |= 1u << i;
+        }
+        put(" menu req %d open %02X", static_cast<int>(peek32(mm + 0x60)), open);
+        const uint32_t dlg = peek32(mm + 0x9E8);
+        if (dlg > 0x10000 && dlg != 0xFFFFFFFF) {
+            put(" dialog %d res %d/%d", static_cast<int>(peek32(dlg)), static_cast<int>(peek32(dlg + 0x18)),
+                static_cast<int>(peek32(dlg + 0x1C)));
+        }
+    }
+    put(" box %s/%d", peek32(0x01378548) ? "yes" : "no", static_cast<int>(peek8(0x01378543)));
+    char filter[64];
+    text::debug_state(filter, sizeof(filter));
+    put(" %s", filter);
+    const uint32_t me = game::player();
+    if (me) {
+        const uint32_t pgd = game::player_game_data();
+        put(" chr %d/%d hp %s", game::chr_type(), pgd ? static_cast<int>(peek32(pgd + 0x9C)) : -1,
+            static_cast<int>(peek32(me + 0x2D4)) > 0 ? "up" : "down");
+        const bool slot_open = !(peek32(me + 0xFC) == peek32(0x012E0C64) && peek32(me + 0x100) == peek32(0x012E0C68));
+        const uint32_t request = peek32(me + 0x10);
+        int anim = -1, loop = 0;
+        if (request > 0x10000 && request != 0xFFFFFFFF) {
+            anim = static_cast<int>(peek32(request + 4));
+            loop = static_cast<int>(peek8(request + 8));
+        }
+        put(" event %s %d%s 1FE %04X", slot_open ? "open" : "none", anim, loop ? " loop" : "",
+            peek32(me + 0x1FE) & 0xFFFF);
+    } else {
+        put(" no character");
+    }
+    put(" left-joined %d", static_cast<int>(peek8(0x01376EE4)));
+    const std::string now_text(text);
+    if (!force && now_text == previous) return;
+    previous = now_text;
+    if (++lines > 800 && !force) return;
+    LOG_INFO("[coop] state: %s", text);
+}
+
 // The host disbands the way the game ends a session after the Black Separation Crystal's menu: the guests
 // leave first (they were told), their characters go out of the party through the game's own member-left code,
 // and when the host is the last member the game's own leave closes the session (0xD2B460: leaving, then solo).
@@ -484,6 +610,7 @@ void host_close_tick() {
     const double waited = now() - g_close_at;
     if (state == 0) {
         if (g_close_forced) settle_party_counts();
+        settle_after_session();
         LOG_INFO("[coop] Session disbanded (%.1f s); the host stays in the world", waited);
         finish(L"");
         return;
@@ -1028,7 +1155,14 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             const int n = std::min<int>(m.count, kFlagsPerMsg);
             const bool from_guest = g_role == Role::Host;
             if (!from_guest && from != g_host) return;
-            for (int i = 0; i < n; ++i) rules::apply_remote_flag(m.f[i].id, m.f[i].on != 0);
+            static int flag_lines = 0;
+            for (int i = 0; i < n; ++i) {
+                if (++flag_lines <= 300) {
+                    LOG_INFO("[coop] flag %d %s: from %s", m.f[i].id, m.f[i].on ? "on" : "off",
+                             steam::persona(from).c_str());
+                }
+                rules::apply_remote_flag(m.f[i].id, m.f[i].on != 0);
+            }
             if (from_guest) broadcast_raw(data, size, true, from);  // pass a guest's progress on
             break;
         }
@@ -1207,6 +1341,8 @@ void queue_flag(int id, bool on) {
     if (g_role == Role::None || !g_lobby) return;
     if (g_role == Role::Guest && (g_step != Step::InWorld || g_invade)) return;
     if (g_flag_queue.size() < 4096) g_flag_queue.push_back({id, on});
+    static int lines = 0;
+    if (++lines <= 300) LOG_INFO("[coop] flag %d %s: sent", id, on ? "on" : "off");
 }
 
 void flush_flags() {
@@ -1473,6 +1609,19 @@ void configure(const Config& cfg) {
 }
 
 void tick() {
+    {
+        static bool f12_down = false;
+        const bool down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+        probe_state(down && !f12_down);
+        f12_down = down;
+        if (g_role == Role::None && g_settle_until > 0 && now() < g_settle_until) {
+            static double last_settle = 0;
+            if (now() - last_settle >= 1.0) {
+                last_settle = now();
+                settle_after_session();
+            }
+        }
+    }
     if (!steam::ready()) return;
     set_callbacks();
     steam::poll(on_message);

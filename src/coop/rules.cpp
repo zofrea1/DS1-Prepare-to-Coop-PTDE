@@ -654,8 +654,31 @@ bool g_applying_remote = false;
 DWORD g_main_thread = 0;
 int g_old_value = -1;
 
-// Lua multiplayer state (4000-4999) is per player and never shared.
-bool shared_flag(int id) { return id >= 0 && !(id >= 4000 && id <= 4999); }
+// Flags that describe one player rather than the world. Common events set them in each game from that
+// game's own player, and the bonfire talk uses some of them as signals:
+//   250-258 owned items the bonfire menu asks for (smithboxes, Repair Box, Rite of Kindling, Bottomless Box)
+//   702, 706, 710, 715, 717, 719, 740 derived from the local player: where they stand, the Lordvessel
+//     (bonfire warp), covenant items, anything that can be attuned, the Pyromancer class
+//   750-755, 757-765 the local player's curse and parasite, Oswald's absolution (755: event 770 resets the
+//     player's sin), curse removal (754), status messages, and the bonfire ceremonies in progress: kindling
+//     (760) and Reverse Hollowing (762, 764). Common event 763 plays the Reverse Hollowing ceremony and then the
+//     sitting loop on the local player whenever 762 is set, so a guest's 762 made the host sit down wherever
+//     they stood.
+// Shared, a guest's Lordvessel gave the host bonfire warp, a host's Bottomless Box was written into a guest's
+// own world, and the status flags were sent back and forth as each game put its own player's value back.
+bool personal_flag(int id) {
+    if (id >= 250 && id <= 258) return true;
+    switch (id) {
+        case 702: case 706: case 710: case 715: case 717: case 719: case 740:
+            return true;
+        default:
+            break;
+    }
+    return (id >= 750 && id <= 755) || (id >= 757 && id <= 765);
+}
+
+// Lua multiplayer state (4000-4999) is per player and never shared, nor are the personal flags above.
+bool shared_flag(int id) { return id >= 0 && !(id >= 4000 && id <= 4999) && !personal_flag(id); }
 
 void __stdcall before_set_flag(int id) {
     g_old_value = -1;
@@ -1300,10 +1323,23 @@ constexpr uint32_t kItemEnable = 0x00DC6490;  // thiscall(manager), stdcall(hand
 constexpr uint32_t kItemRemove = 0x00DC76F0;  // stdcall(manager, handle, setFlag), ret 0xC
 constexpr uint32_t kGetFlag = 0x00D38C40;     // eax = EventFlagMan, ecx = 0, stdcall(id) -> al, ret 4
 constexpr uint32_t kItemLists[] = {0x1C, 0x24, 0x2C, 0x34};
-// Bonfire talk adds Level Up, Kindle and Reverse Hollowing only when this flag is on.
-// It is set in the player's own world once the Undead Asylum is cleared. A guest's active
-// store is the host's world, which does not carry that bit, so the three rows never appear.
-constexpr int kBonfireServiceFlag = 11810000;
+// The bonfire talk (t<map>0<nn>.esd) builds its menu with AddTalkListData(row, text, flag): a row is only added
+// when its flag is on. Level Up, Kindle and Reverse Hollowing need 11810000 (the Undead Asylum left behind),
+// Reinforce Weapon / Armor and Repair need 250 / 251 / 252, Attune Magic 719 and the Bottomless Box 258; Kindle
+// past the second level asks f15(257) (Rite of Kindling). They belong to the character: a guest's active store
+// is the host's world, which never has the guest's progress, so those rows were missing or followed the host.
+// Read by the talk scripts (and only there, so the world's own events in the host's world keep the host's
+// state), a guest gets their own world's value of these. The two talk reads of the flag getter:
+constexpr uint32_t kRetTalkRow = 0x00FCF7D6;   // AddTalkListData (talk command 1:19, 0xFCF69A), row flag
+constexpr uint32_t kRetTalkFlag = 0x00D4966C;  // GetEventFlag (talk function 15, 0xD495EC)
+constexpr int kCharacterFlags[] = {11810000, 250, 251, 252, 257, 258, 719};
+
+bool character_flag(int id) {
+    for (int f : kCharacterFlags) {
+        if (f == id) return true;
+    }
+    return false;
+}
 
 void* g_getflag_orig = nullptr;
 void* g_remove_orig = nullptr;
@@ -1346,8 +1382,9 @@ bool disable_item(uint32_t manager, uint32_t handle) {
     return true;
 }
 
-// Own-world bit, through the get_flag trampoline. game::flag() would re-enter the hook.
-bool own_flag_on(int id) {
+// Own-world bit, through the get_flag trampoline. game::flag() would re-enter the hook. False when it could
+// not be read.
+bool own_flag(int id, bool* out) {
     const uint32_t efm = game::event_flag_man();
     if (!efm || !g_getflag_orig || id < 0 || g_in_own_flag) return false;
     uint32_t active = 0;
@@ -1355,6 +1392,7 @@ bool own_flag_on(int id) {
     ++g_in_own_flag;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
     uint8_t on = 0;
+    bool read = true;
     void* fn = g_getflag_orig;
     __try {
         __asm {
@@ -1365,11 +1403,17 @@ bool own_flag_on(int id) {
             mov on, al
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        on = 0;
+        read = false;
     }
     *ptr<uint32_t>(efm + 0x10C) = active;
     --g_in_own_flag;
-    return on != 0;
+    if (read) *out = on != 0;
+    return read;
+}
+
+bool own_flag_on(int id) {
+    bool on = false;
+    return own_flag(id, &on) && on;
 }
 
 bool guest_owns_flag(int id) {
@@ -1380,14 +1424,18 @@ bool guest_owns_flag(int id) {
     return true;
 }
 
-int __stdcall guest_item_flag_on(uint32_t, int id) {
+// The getter's answer for a co-op guest: 0 the game's own (active store), 1 on, 2 off.
+int __stdcall guest_flag_answer(uint32_t ret, int id) {
     if (!g_state.guest || g_state.invader) return 0;
-    if (id == kBonfireServiceFlag && seamless_rules() && own_flag_on(id)) {
-        static int reported = 0;
-        if (reported++ == 0) {
-            LOG_INFO("[coop] Bonfire level up, kindle and reverse hollowing use the guest's own flag %d", id);
+    if ((ret == kRetTalkRow || ret == kRetTalkFlag) && character_flag(id) && seamless_rules()) {
+        bool on = false;
+        if (!own_flag(id, &on)) return 0;
+        static std::set<int> reported;
+        if (reported.insert(id * 2 + (on ? 1 : 0)).second && reported.size() <= 40) {
+            LOG_INFO("[coop] Bonfire menu: flag %d is %s in our own world (%s)", id, on ? "on" : "off",
+                     ret == kRetTalkRow ? "menu row" : "talk check");
         }
-        return 1;
+        return on ? 1 : 2;
     }
     return guest_owns_flag(id) ? 1 : 0;
 }
@@ -1395,15 +1443,19 @@ int __stdcall guest_item_flag_on(uint32_t, int id) {
 __declspec(naked) void hk_get_flag() {
     __asm {
         pushad
-        push dword ptr [esp + 36]  // flag id
-        push dword ptr [esp + 4]   // EventFlagMan, saved eax
-        call guest_item_flag_on
-        test eax, eax
+        push dword ptr [esp + 36]  // flag id ([esp + 32] is the return address)
+        push dword ptr [esp + 36]  // the caller's return address (shifted by the push above)
+        call guest_flag_answer
+        cmp eax, 1
         popad
-        jnz force_on
+        je force_on
+        ja force_off
         jmp g_getflag_orig
     force_on:
         mov eax, 1
+        ret 4
+    force_off:
+        xor eax, eax
         ret 4
     }
 }
@@ -1685,6 +1737,21 @@ void track_safe_position() {
     if (g_spot_count < 32) ++g_spot_count;
 }
 
+// A guest keeps the chr type they joined with (own_chr_type): every arrival in the host's world puts it back
+// (hk_arrival) and the way home restores it. Reverse Hollowing at a bonfire in the host's world makes a hollow
+// guest human (8 -> 0) while they stand there; without this, their next death, the next bonfire warp
+// they followed and the trip home made them hollow again, after the humanity was paid.
+void track_own_chr_type() {
+    if (!g_state.active || !g_state.guest || g_state.invader || g_state.leaving || g_state.own_chr_type != 8) return;
+    if (game::loading() || game::own_world()) return;
+    const uint32_t me = game::player();
+    uint32_t hp = 0;
+    if (!me || !read32(me + 0x2D4, &hp) || static_cast<int>(hp) <= 0) return;
+    if (game::chr_type() != 0) return;
+    g_state.own_chr_type = 0;
+    LOG_INFO("[coop] Reverse Hollowing in the host's world: we stay human from now on (was hollow on joining)");
+}
+
 void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = players; }
 
 void tick() {
@@ -1701,6 +1768,7 @@ void tick() {
     } else {
         hide_owned_items();
         if (g_state.active && !g_state.invader) track_safe_position();
+        track_own_chr_type();
     }
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();

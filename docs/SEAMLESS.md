@@ -155,6 +155,32 @@ The host's Abyssal Eye Orb disbands the way the game ends a session after the Bl
 guests are told and leave, the game's own member-left code takes their characters out of the party, and when
 the host is the last member the game's own leave (`0xD2B460`) closes the session.
 
+### A guest's bonfire menu
+
+The bonfire talk (`t<map>0<nn>.esd`, the same script at every bonfire) builds its menu with
+`AddTalkListData(row, text, flag)` (talk command 1:19, `0xFCF69A`): a row is only added when its flag is on.
+Level Up, Kindle and Reverse Hollowing need `11810000` (set when the player leaves the Undead Asylum),
+Reinforce Weapon, Reinforce Armor and Repair need `250`, `251` and `252` (the smithboxes and the Repair Box),
+Attune Magic `719` and the Bottomless Box `258`; kindling past the second level asks for `257` (Rite of
+Kindling) through the talk script's GetEventFlag (function 15, `0xD495EC`). These flags describe the
+character, but a guest's active flag store is the host's world, so the rows were missing or followed what the
+host owned. When the talk script reads one of them (return addresses `0xFCF7D6` and `0xD4966C` of the flag
+getter `0xD38C40`), a guest gets the value from their own world. Nothing else reads it from there: the world's
+own events in the host's world (the Asylum's, for example) keep the host's state.
+
+Kindling and Reverse Hollowing signal through flags: the menu sets `760` while kindling and `762`/`764` during
+Reverse Hollowing, and common event 763 plays the Reverse Hollowing ceremony and then the sitting loop on the
+local player whenever `762` is set. Shared progress had sent those to the other players, so a guest's Reverse
+Hollowing sat the host down wherever they were. Flags that describe one player are no longer shared: `250` to
+`258` (owned boxes, Rite of Kindling), `702`, `706`, `710` (Lordvessel: bonfire warp), `715`, `717`, `719`, `740`
+(class), and `750` to `765` except `756` (curse and parasite, Oswald's absolution and curse removal, status
+messages, the bonfire ceremonies). Before, a guest's Lordvessel gave the host bonfire warp, and a host's
+Bottomless Box was written into the guest's own world.
+
+A guest keeps the chr type they joined with, and every arrival in the host's world puts it back. Reverse
+Hollowing in the host's world (hollow to human) now updates that type, so the next death or bonfire warp, and
+the trip home, keep the guest human.
+
 ### Bloodstains
 
 The death penalty (`0xD78B10`, the event script's `UpDateBloodMark`) records the stain at the start of the

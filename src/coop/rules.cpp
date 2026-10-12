@@ -977,6 +977,49 @@ bool __cdecl hk_has_party() {
     return reinterpret_cast<Fn>(kHasParty)();
 }
 
+// ---------------------------------------------------------------- NPCs are people, not ghosts
+// A map's character (made by 0xE5B620, or by 0xE66090 for those built like a player: Oscar, Solaire) becomes a
+// wandering ghost (chr type 4: a phantom with NpcParam's ghostModelId, never hit) when NpcParam's
+// isChangeWanderGhost (+0x145 bit 7, "a wandering ghost while the player is a client") is set and the game is a
+// client (SessMan state 6) or was summoned by an NPC (PartyMemberInfo+0x7C != -1). A co-op guest met the host's
+// NPCs as phantoms it could talk to but not hurt (Remastered Seamless Co-op keeps them so); it now meets them as
+// they are, as in the seamless co-op of the later games. Invaders keep the vanilla rule.
+constexpr uint32_t kWanderGhostSites[] = {0x00E5B90D, 0x00E6618F};  // mov al,[eax+145h] ; shr al,7
+uint32_t g_npc_people = 0;         // NPCs kept as people (counted at creation)
+uint32_t g_npc_people_logged = 0;
+
+int __cdecl npc_wander_ghost() {
+    // The role is set before the join's reload, so the first load into the host's world already sees it.
+    if (g_state.active && g_state.guest && !g_state.invader) {
+        ++g_npc_people;
+        return 0;
+    }
+    return 1;
+}
+
+// eax = the NpcParam row; al = the bit, 0 for a co-op guest. Every other register is kept.
+__declspec(naked) void hk_wander_ghost() {
+    __asm {
+        movzx eax, byte ptr [eax + 0x145]
+        shr eax, 7
+        je done
+        push ecx
+        push edx
+        call npc_wander_ghost
+        pop edx
+        pop ecx
+    done:
+        ret
+    }
+}
+
+int install_wander_ghost() {
+    static const uint8_t k[9] = {0x8A, 0x80, 0x45, 0x01, 0x00, 0x00, 0xC0, 0xE8, 0x07};
+    int ok = 0;
+    for (uint32_t site : kWanderGhostSites) ok += patch_call(site, k, sizeof(k), reinterpret_cast<void*>(&hk_wander_ghost));
+    return 2 - ok;
+}
+
 // ---------------------------------------------------------------- a death is a death, not a phantom's
 // The event script's HavePartyMember (Lua native 0xD5E1D0: PartyMemberInfo+0x14 > 1) decides how a player dies:
 // without a party, or as the host, the death is counted and the game respawns them (SoloPlayDeath); a summoned
@@ -1893,6 +1936,7 @@ int install() {
         failed += install_one("HavePartyMember (deaths)", g_have_party_orig != nullptr);
     }
     failed += install_one("talk party check", redirect_call(0x00D4ABFB, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
+    failed += install_one("NPCs are people for a co-op guest", install_wander_ghost() == 0);
     {
         // mov ecx,[0137D790h] ; jmp 00D69B10h
         static const uint8_t k[11] = {0x8B, 0x0D, 0x90, 0xD7, 0x37, 0x01, 0xE9, 0xC5, 0xBE, 0x00, 0x00};
@@ -1980,6 +2024,11 @@ void tick() {
     // A co-op guest's loot and items follow the host's (single player) rules for as long as it is a guest, also
     // while it leaves (the area unload on the way home must clean up the same way the items were made).
     g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;
+    if (g_npc_people != g_npc_people_logged && !game::loading()) {
+        LOG_INFO("[coop] %u NPC(s) in the host's world are people, not wandering ghosts",
+                 g_npc_people - g_npc_people_logged);
+        g_npc_people_logged = g_npc_people;
+    }
     apply_teams();
     note_hosted_session();
     if (!g_state.guest) {

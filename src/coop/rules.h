@@ -35,6 +35,11 @@ void tick();
 void set_flag_listener(void (*fn)(int id, bool on));
 // Sets a flag another player changed, without reporting it back.
 void apply_remote_flag(int id, bool on);
+// Host: the world's map flags (groups 1 and 6 of every map) for a co-op guest who arrived; empty if unreadable.
+std::vector<uint8_t> world_flag_snapshot();
+// Guest: the host's snapshot replaces those groups in the visited world's store. Returns the blocks written,
+// or -1 for a snapshot that does not fit this store (nothing is written then).
+int apply_world_flag_snapshot(const uint8_t* data, size_t size);
 
 // The host travels by bonfire (WarpNextStage_Bonfire): `fn(bonfire)` tells the guests, who follow.
 void set_bonfire_warp_listener(void (*fn)(int bonfire));

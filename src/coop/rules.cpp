@@ -666,19 +666,39 @@ int g_old_value = -1;
 //     they stood.
 // Shared, a guest's Lordvessel gave the host bonfire warp, a host's Bottomless Box was written into a guest's
 // own world, and the status flags were sent back and forth as each game put its own player's value back.
+//
+// The rest of common.emevd's flags that each game works out from its own player (the game runs that script
+// on the host only; seamless co-op runs it in every game):
+//   259, 711-714, 720 (and 11020102), 722, 780-793: items the player holds; 716, 810: lots the player got
+//   280-290 the starting class; 830, 831, 11510150 where the player is; 840-849 gesture triggers
+//   850-859 the player's covenant (event 870): a guest in Way of White and a host with none sent 851 back
+//     and forth dozens of times a second from the moment the guest arrived (2026-10-12 test)
+//   600-603 a counter each game raises itself from the boss flags; 721, 723-728, 730-735 worked out from
+//     other flags in each game
+//   6000-8999: the visited world's store has no block of its own for these; the engine points it at the
+//     player's own world (0xD384E7), so another player's value would be written into this player's save.
 bool personal_flag(int id) {
-    if (id >= 250 && id <= 258) return true;
+    if (id >= 250 && id <= 259) return true;
     switch (id) {
-        case 702: case 706: case 710: case 715: case 717: case 719: case 740:
+        case 702: case 706: case 710: case 715: case 716: case 717: case 719: case 740: case 810:
+        case 830: case 831: case 11020102: case 11510150:
             return true;
         default:
             break;
     }
-    return (id >= 750 && id <= 755) || (id >= 757 && id <= 765);
+    return (id >= 280 && id <= 290) || (id >= 600 && id <= 603) || (id >= 711 && id <= 714) ||
+           (id >= 720 && id <= 735) || (id >= 750 && id <= 755) || (id >= 757 && id <= 765) ||
+           (id >= 780 && id <= 793) || (id >= 840 && id <= 859) || (id >= 6000 && id <= 8999);
 }
 
+// Item flags (5xxxxxxx: item lots and treasure taken) and conversation flags (7xxxxxxx) belong to each player:
+// a co-op guest keeps them in their own world (see hk_flag_store).
+bool player_flag_group(int id) { return (id >= 50000000 && id < 60000000) || (id >= 70000000 && id < 80000000); }
+
 // Lua multiplayer state (4000-4999) is per player and never shared, nor are the personal flags above.
-bool shared_flag(int id) { return id >= 0 && !(id >= 4000 && id <= 4999) && !personal_flag(id); }
+bool shared_flag(int id) {
+    return id >= 0 && !(id >= 4000 && id <= 4999) && !personal_flag(id) && !player_flag_group(id);
+}
 
 void __stdcall before_set_flag(int id) {
     g_old_value = -1;
@@ -907,6 +927,43 @@ int install_loot() {
     ok += patch_call(0x00DC91BA, kCmpEdx, 7, reinterpret_cast<void*>(&h_state6_edx));
     ok += patch_call(0x00DC91D3, kPartyEsi, 6, reinterpret_cast<void*>(&h_party_summoned));
     return 6 - ok;
+}
+
+// ---------------------------------------------------------------- the guest's own item and conversation flags
+// EventFlagMan+0x14 is the store of the player's own world, +0x90 the store of the world they visit, +0x10C the
+// active one. A store has ten groups (a flag's ten-millions digit; entries of 0xC: areas, count, bytes). The
+// table at 0x1160150 gives the visited world's store no area at all in group 5 (5xxxxxxx: "already obtained"
+// for item lots and treasure) or group 7 (7xxxxxxx: NPC conversations), so the block lookup (0xD38830) finds
+// nothing there: every such flag reads off and every write is lost. A summoned phantom never loots or talks;
+// a co-op guest does. Oscar's Estus (lot 1082) was given without being marked, so his key (lot 1080) went on
+// through lots 1081 (Big Pilgrim's Key) and 1082 (five more Estus). The Asylum Demon's lot 2660 gave a second
+// Big Pilgrim's Key (left on the floor) and went on to 2661, the Demon's Great Hammer that only a kill on the
+// first encounter unlocks (2026-10-12 test). The lookup takes a co-op guest's group 5 and 7 blocks from their
+// own world's store: their items and conversations are their own, read and kept there.
+constexpr uint32_t kFlagBlockStore = 0x00D388BA;  // mov ecx,[esp+14h] ; mov ecx,[ecx+10Ch]
+
+// ecx = the store; edi = the group. eax, edx, ebp, edi are live and kept.
+__declspec(naked) void hk_flag_store() {
+    __asm {
+        mov ecx, [esp + 0x18]  // EventFlagMan: the caller's [esp+14h], past our return address
+        cmp byte ptr [g_strict], 0
+        jne active
+        cmp edi, 5
+        je own
+        cmp edi, 7
+        je own
+    active:
+        mov ecx, [ecx + 0x10C]
+        ret
+    own:
+        add ecx, 0x14
+        ret
+    }
+}
+
+bool install_flag_store() {
+    static const uint8_t k[10] = {0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x89, 0x0C, 0x01, 0x00, 0x00};
+    return patch_call(kFlagBlockStore, k, sizeof(k), reinterpret_cast<void*>(&hk_flag_store));
 }
 
 // ---------------------------------------------------------------- bonfires and NPCs in a session
@@ -1255,6 +1312,52 @@ void __fastcall hk_multiplay_test(uint8_t* cond, void* edx, float dt, uint8_t* e
     cond[8] = static_cast<uint8_t>((cond[8] & 0xFE) | (pass ? 1 : 0));
 }
 
+// ---------------------------------------------------------------- a cutscene that leaves the map takes everyone
+// Play Cutscene and Warp Player (EMEVD 2002[04], case 0xBC0356) plays a cutscene for one player and moves them;
+// every use in PTDE names "the player" (10000) of the event, the one whose game ran it. When another player's game
+// ran the event first, the network hands it on (FrpgEmkEventIns, 0xBC4000) with "the player" set to that
+// player's character (10001 and up). The Undead Asylum's crow (event 11810000) then took the guest to Firelink
+// Shrine and left the host behind: the host saw the flight but not the arrival and was not moved, while the
+// event went on to mark the Asylum as left and to set the host's respawn in Firelink (2026-10-12 test). In a
+// seamless session a cutscene that moves to another map moves the player of every game that runs it; a warp
+// inside the same map (the Seath capture, Anor Londo) still moves only the player who set it off.
+constexpr uint32_t kCutWarpSite = 0x00BC0378;  // cmp eax,2710h ; jne +3 ; mov eax,[esi+44h]
+constexpr int kLocalPlayerEntity = 10000;
+
+int __stdcall cut_warp_target(int entity, int area, int block) {
+    if (!seamless_rules() || entity <= kLocalPlayerEntity || entity > kLocalPlayerEntity + 10) return entity;
+    const int dest = (area << 24) | (block << 16);
+    const int here = game::map_id();
+    if (here == -1 || (static_cast<uint32_t>(here) & 0xFFFF0000u) == static_cast<uint32_t>(dest)) return entity;
+    LOG_INFO("[coop] Cutscene into map %08X set off by another player (entity %d): it takes us along", dest, entity);
+    return kLocalPlayerEntity;
+}
+
+// eax = the instruction's player entity; the area and block bytes are at the caller's [esp+0Eh] / [esp+0Fh].
+__declspec(naked) void hk_cut_warp() {
+    __asm {
+        cmp eax, 0x2710
+        jne have
+        mov eax, [esi + 0x44]
+    have:
+        pushad
+        movzx ecx, byte ptr [esp + 36 + 0x0F]  // block (past pushad and our return address)
+        push ecx
+        movzx ecx, byte ptr [esp + 40 + 0x0E]  // area
+        push ecx
+        push eax
+        call cut_warp_target
+        mov [esp + 28], eax  // popad's eax
+        popad
+        ret
+    }
+}
+
+bool install_cut_warp() {
+    static const uint8_t k[10] = {0x3D, 0x10, 0x27, 0x00, 0x00, 0x75, 0x03, 0x8B, 0x46, 0x44};
+    return patch_call(kCutWarpSite, k, sizeof(k), reinterpret_cast<void*>(&hk_cut_warp));
+}
+
 // ---------------------------------------------------------------- Black Separation Crystal
 // Using it (goods 103) puts SpEffect 7 on the player; the player's update (0xE512A0) sees the effect's separation
 // flag and, for the local player, either runs the Lua OnLeaveMagic (a summoned player goes home: 0xE5136A, eax =
@@ -1311,9 +1414,10 @@ __declspec(naked) void hk_separation_host() {
 
 // ---------------------------------------------------------------- per-player treasure
 // A guest pickup ORs the item's event-flag bit in the item manager (0xDC76F0) and never calls the flag setter,
-// so the guest's own world is not updated and the host is not told. On the next load the other-world bits are
-// rebuilt from the host, and the item is back. Doors use the same object-flag class as chests, so this does
-// not hook those getters: only item-list flags are treated as treasure.
+// so the host is not told. Treasure flags are group 5, which the visited world's store does not have: the bit
+// went nowhere and the item was back on the next load. hk_flag_store now keeps a co-op guest's group 5 in their
+// own world, which makes the bookkeeping below a second line of defence. Doors use the same object-flag class
+// as chests, so this does not hook those getters: only item-list flags are treated as treasure.
 //
 // A flag seen on an item is remembered. While the guest's own-world copy of it is on, get_flag reports it on
 // (events leave the treasure alone) and the spawned item is disabled locally. The host's copy is untouched.
@@ -1534,6 +1638,65 @@ void note_hosted_session() {
     if (g_state.host && !g_state.invader && game::own_world() && game::session_state() == 3) g_seamless_hosted = true;
 }
 
+// ---------------------------------------------------------------- the host's world, every map of it
+// A summoned player is given the host's flags once, on joining (0xD30A20 -> 0xD37F30): the general block and
+// the join map's own blocks (groups 1 and 6 of that map). A phantom never leaves that map. A co-op guest does:
+// walking on, riding a cutscene (the Asylum's crow to Firelink Shrine) or following a bonfire warp, they met the
+// other maps' blocks of the visited world's store as the game had left them: empty, or from an earlier session
+// in someone else's world. When a guest arrives the host sends groups 1 and 6 of every map and the guest's
+// visited-world store takes them over; later changes come as flags. Group 0 stays the game's own (its 6000-8999
+// blocks are the guest's own world's, see personal_flag), and groups 5 and 7 are each player's own.
+constexpr int kSnapGroups[] = {1, 6};
+constexpr uint32_t kStoreOwn = 0x14;
+constexpr uint32_t kStoreVisited = 0x90;
+constexpr uint32_t kAreaStride = 0x54;
+constexpr int kSubBlocks = 10;
+constexpr uint32_t kBlockBytes = 0x80;
+constexpr size_t kSnapEntry = 3 + kBlockBytes;  // group, area, sub-block, bits
+
+// Guarded copies (the functions that hold containers cannot use __try themselves).
+bool copy_from_game(void* dst, uint32_t src, size_t n) {
+    __try {
+        std::memcpy(dst, reinterpret_cast<const void*>(static_cast<uintptr_t>(src)), n);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool copy_to_game(uint32_t dst, const void* src, size_t n) {
+    __try {
+        if (src) {
+            std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(dst)), src, n);
+        } else {
+            std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(dst)), 0, n);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+// Calls fn(group, area, sub-block, block address) for every block of the snapshot groups in a store.
+template <typename F>
+bool each_flag_block(uint32_t store, F&& fn) {
+    for (int g : kSnapGroups) {
+        uint32_t areas = 0, count = 0;
+        if (!read32(store + g * 0xC, &areas) || !read32(store + g * 0xC + 4, &count) || !areas || count > 64) {
+            return false;
+        }
+        for (uint32_t a = 0; a < count; ++a) {
+            for (int sb = 0; sb < kSubBlocks; ++sb) {
+                uint32_t block = 0, size = 0;
+                const uint32_t at = areas + a * kAreaStride + sb * 8;
+                if (!read32(at, &block) || !read32(at + 4, &size)) return false;
+                if (block && size == kBlockBytes) fn(g, static_cast<int>(a), sb, block);
+            }
+        }
+    }
+    return true;
+}
+
 int install_one(const char* what, bool ok) {
     if (!ok) LOG_ERROR("[coop] Hook not installed: %s (code does not match this build)", what);
     return ok ? 0 : 1;
@@ -1572,6 +1735,62 @@ void apply_remote_flag(int id, bool on) {
     g_applying_remote = true;
     game::set_flag(id, on);
     g_applying_remote = false;
+}
+
+std::vector<uint8_t> world_flag_snapshot() {
+    const uint32_t efm = game::event_flag_man();
+    if (!efm) return {};
+    std::vector<uint8_t> out(2, 0);
+    uint16_t n = 0;
+    bool read_all = true;
+    const bool ok = each_flag_block(efm + kStoreOwn, [&](int g, int a, int sb, uint32_t block) {
+        uint8_t bits[kBlockBytes];
+        if (!copy_from_game(bits, block, kBlockBytes)) {
+            read_all = false;
+            return;
+        }
+        bool any = false;
+        for (uint8_t b : bits) any |= b != 0;
+        if (!any) return;
+        const size_t at = out.size();
+        out.resize(at + kSnapEntry);
+        out[at] = static_cast<uint8_t>(g);
+        out[at + 1] = static_cast<uint8_t>(a);
+        out[at + 2] = static_cast<uint8_t>(sb);
+        std::memcpy(&out[at + 3], bits, kBlockBytes);
+        ++n;
+    });
+    if (!ok || !read_all) return {};
+    std::memcpy(out.data(), &n, 2);
+    return out;
+}
+
+int apply_world_flag_snapshot(const uint8_t* data, size_t size) {
+    const uint32_t efm = game::event_flag_man();
+    uint16_t n = 0;
+    if (!efm || !data || size < 2) return -1;
+    std::memcpy(&n, data, 2);
+    if (size < 2 + static_cast<size_t>(n) * kSnapEntry) return -1;
+    // Where each block of the visited world's store is.
+    std::map<uint32_t, uint32_t> blocks;  // group << 16 | area << 8 | sub-block -> address
+    if (!each_flag_block(efm + kStoreVisited, [&](int g, int a, int sb, uint32_t block) {
+            blocks[static_cast<uint32_t>(g << 16 | a << 8 | sb)] = block;
+        })) {
+        return -1;
+    }
+    for (uint16_t i = 0; i < n; ++i) {
+        const uint8_t* e = data + 2 + static_cast<size_t>(i) * kSnapEntry;
+        if (!blocks.count(static_cast<uint32_t>(e[0] << 16 | e[1] << 8 | e[2]))) return -1;
+    }
+    // The host's empty blocks are empty here too.
+    for (const auto& [key, block] : blocks) {
+        if (!copy_to_game(block, nullptr, kBlockBytes)) return -1;
+    }
+    for (uint16_t i = 0; i < n; ++i) {
+        const uint8_t* e = data + 2 + static_cast<size_t>(i) * kSnapEntry;
+        if (!copy_to_game(blocks[static_cast<uint32_t>(e[0] << 16 | e[1] << 8 | e[2])], e + 3, kBlockBytes)) return -1;
+    }
+    return n;
 }
 
 int install() {
@@ -1659,6 +1878,8 @@ int install() {
         failed += install_one("loot rules", bad == 0);
     }
     failed += install_one("guest's own items", install_items() == 0);
+    failed += install_one("guest's own item and conversation flags", install_flag_store());
+    failed += install_one("cutscenes into another map take every player", install_cut_warp());
     failed += install_one("bonfire party check", redirect_call(0x00D58AE4, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
     failed += install_one("bonfire foes check",
                           redirect_call(kBonfireFoesSite, kBonfireFoes, reinterpret_cast<void*>(&hk_bonfire_foes)));

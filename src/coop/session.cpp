@@ -26,7 +26,7 @@ namespace {
 
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
-constexpr uint32_t kProtocol = 4;
+constexpr uint32_t kProtocol = 5;
 
 enum MsgType : uint8_t {
     kHello = 1,        // guest/invader -> host: please let me in
@@ -46,6 +46,7 @@ enum MsgType : uint8_t {
     kLeft = 15,        // host -> guests: another player left
     kGait = 16,        // everyone -> everyone: our walk/run/sprint (on change and twice a second)
     kAnim = 17,        // everyone -> everyone: a bonfire event animation of ours started or stopped
+    kWorldFlags = 18,  // host -> a guest who arrived: the map flags of the host's world (rules::world_flag_snapshot)
 };
 
 enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4 };
@@ -248,6 +249,10 @@ bool g_close_forced = false;  // a guest was still in the game session when it w
 double now() { return GetTickCount64() / 1000.0; }
 // After a session ends, the party is put back to solo for a while (see settle_after_session).
 double g_settle_until = 0;
+// Guest: waiting for the host's map flags since this time (0 not waiting), and the flags we changed meanwhile,
+// which the snapshot (taken before the host heard of them) would otherwise undo here.
+double g_world_wait = 0;
+std::vector<std::pair<int, bool>> g_world_ours;
 
 void set_step(Step s) {
     g_step = s;
@@ -341,6 +346,8 @@ void finish(const std::wstring& why) {
     g_close_at = 0;
     g_close_left = false;
     g_close_forced = false;
+    g_world_wait = 0;
+    g_world_ours.clear();
     reset_rules();
     set_step(Step::Idle);
     g_settle_until = now() + 20.0;
@@ -548,7 +555,7 @@ void probe_state(bool force) {
         if (n < static_cast<int>(sizeof(text))) n += _snprintf_s(text + n, sizeof(text) - n, _TRUNCATE, fmt, args...);
     };
     const auto& st = rules::state();
-    put("sess %d mem %d", game::session_state(), game::member_count());
+    put("sess %d step %d mem %d", game::session_state(), game::join_step(), game::member_count());
     const uint32_t gm = game::game_man();
     const uint32_t party = gm ? peek32(gm + game::kGmParty) : 0;
     if (party > 0x10000) {
@@ -579,7 +586,8 @@ void probe_state(bool force) {
     const uint32_t me = game::player();
     if (me) {
         const uint32_t pgd = game::player_game_data();
-        put(" chr %d/%d hp %s", game::chr_type(), pgd ? static_cast<int>(peek32(pgd + 0x9C)) : -1,
+        put(" map %08X %s chr %d/%d hp %s", static_cast<uint32_t>(game::map_id()), game::own_world() ? "own" : "visit",
+            game::chr_type(), pgd ? static_cast<int>(peek32(pgd + 0x9C)) : -1,
             static_cast<int>(peek32(me + 0x2D4)) > 0 ? "up" : "down");
         const bool slot_open = !(peek32(me + 0xFC) == peek32(0x012E0C64) && peek32(me + 0x100) == peek32(0x012E0C68));
         const uint32_t request = peek32(me + 0x10);
@@ -866,6 +874,42 @@ void guest_arrived() {
     }
     PlayerEvent e = player_event(kArrived, steam::self(), g_invade, steam::persona(steam::self()));
     if (g_host) send_to(g_host, e);
+    if (!g_invade) {
+        g_world_wait = now();
+        g_world_ours.clear();
+    }
+}
+
+// Host: the world's map flags for a co-op guest who has just arrived (see rules::world_flag_snapshot).
+void send_world_flags(uint64_t to) {
+    const std::vector<uint8_t> snap = rules::world_flag_snapshot();
+    if (snap.empty()) {
+        LOG_ERROR("[coop] Could not read our world's map flags for %s", steam::persona(to).c_str());
+        return;
+    }
+    std::vector<uint8_t> msg(sizeof(Header) + snap.size());
+    Header h{kMagic, kWorldFlags};
+    std::memcpy(msg.data(), &h, sizeof(h));
+    std::memcpy(msg.data() + sizeof(h), snap.data(), snap.size());
+    const bool sent = steam::send(to, msg.data(), static_cast<uint32_t>(msg.size()), true);
+    uint16_t blocks = 0;
+    std::memcpy(&blocks, snap.data(), 2);
+    LOG_INFO("[coop] Sent our world's map flags to %s (%u blocks, %u bytes)%s", steam::persona(to).c_str(), blocks,
+             static_cast<unsigned>(msg.size()), sent ? "" : ": send failed");
+}
+
+// Guest: the host's map flags replace our copy of the host's world (every map, not only the one we joined in).
+void on_world_flags(const uint8_t* data, uint32_t size) {
+    const int written = rules::apply_world_flag_snapshot(data, size);
+    if (written < 0) {
+        LOG_ERROR("[coop] The host's map flags did not fit our copy of their world (%u bytes); kept ours", size);
+    } else {
+        for (const auto& [id, on] : g_world_ours) rules::apply_remote_flag(id, on);
+        LOG_INFO("[coop] Took the host's map flags (%d blocks; %zu flags of ours set again)", written,
+                 g_world_ours.size());
+    }
+    g_world_wait = 0;
+    g_world_ours.clear();
 }
 
 void guest_tick() {
@@ -913,6 +957,11 @@ void guest_tick() {
             }
             break;
         case Step::InWorld:
+            if (g_world_wait > 0 && now() - g_world_wait > 30.0) {
+                LOG_INFO("[coop] The host's map flags did not come; our copy of their world stays as it is");
+                g_world_wait = 0;
+                g_world_ours.clear();
+            }
             if (game::session_state() != 6 && !game::loading()) {
                 if (g_invade) {
                     // The game sends a finished invader home itself (its death or the host's); give it time.
@@ -1127,11 +1176,17 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (g_role == Role::Host) {
                 if (m.who != from) return;
                 broadcast(m, true, from);  // tell the other guests
+                if (!m.invader) send_world_flags(from);
             } else if (from != g_host) {
                 return;
             }
             if (m.who == steam::self()) return;
             say(fmt(m.invader ? kMsgInvaded : kMsgJoined, event_name(m)));
+            break;
+        }
+        case kWorldFlags: {
+            if (from != g_host || g_role != Role::Guest || g_invade || g_step != Step::InWorld) return;
+            on_world_flags(data + sizeof(Header), size - static_cast<uint32_t>(sizeof(Header)));
             break;
         }
         case kRest: {
@@ -1341,6 +1396,7 @@ void queue_flag(int id, bool on) {
     if (g_role == Role::None || !g_lobby) return;
     if (g_role == Role::Guest && (g_step != Step::InWorld || g_invade)) return;
     if (g_flag_queue.size() < 4096) g_flag_queue.push_back({id, on});
+    if (g_world_wait > 0 && g_world_ours.size() < 4096) g_world_ours.push_back({id, on});
     static int lines = 0;
     if (++lines <= 300) LOG_INFO("[coop] flag %d %s: sent", id, on ? "on" : "off");
 }

@@ -177,6 +177,20 @@ bool g_was_loading = true;
 double g_loaded_at = 0;
 double g_last_check = 0;
 std::set<uint32_t> g_removed;  // characters we asked the game to remove (they linger for a frame or two)
+// What each player slot's character was made with: a death since then, or a jump into our map (a respawn, a warp,
+// a cutscene: more than 40 m between two of their once-a-second reports), leaves it stale. The host died in the
+// Undead Asylum and came back in Firelink Shrine, where the guest already was; the guest's character of the host
+// had its health back from the network at once and was never rebuilt, so only its health bar showed (2026-10-13
+// test).
+struct Made {
+    uint32_t chr = 0;
+    int deaths = -1;
+    bool seen_dead = false;
+    bool jumped = false;
+    bool has_pos = false;
+    float pos[3] = {};
+};
+Made g_made[3];
 
 }  // namespace
 
@@ -210,6 +224,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
     if (loading) {
         g_was_loading = true;
         g_removed.clear();
+        for (Made& m : g_made) m = Made{};
         return;
     }
     if (g_was_loading) {
@@ -244,15 +259,41 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
             }
             continue;
         }
-        if (hp(r.chr) > 0) continue;
-        // Their character here is dead. Rebuild it once that player reports being alive again (they respawned);
-        // a character no player can be matched to stays as it is. The old character goes first; a later check
-        // finds the slot empty and asks for the new one, which then takes the same player slot.
+        Made& made = g_made[r.slot];
+        if (made.chr != r.chr) {
+            made = Made{};
+            made.chr = r.chr;
+            made.deaths = ps.deaths;
+        }
+        if (hp(r.chr) <= 0) made.seen_dead = true;
+        const bool died = made.seen_dead || (ps.known && made.deaths >= 0 && ps.deaths > made.deaths);
+        if (made.deaths < 0) made.deaths = ps.deaths;
+        if (ps.known && ps.has_pos) {
+            if (made.has_pos) {
+                const float dx = ps.pos[0] - made.pos[0], dy = ps.pos[1] - made.pos[1], dz = ps.pos[2] - made.pos[2];
+                const int here = game::map_id();
+                if (dx * dx + dy * dy + dz * dz > 40.0f * 40.0f && here != -1 && ps.map != -1 &&
+                    (static_cast<uint32_t>(ps.map) & 0xFFFF0000u) == (static_cast<uint32_t>(here) & 0xFFFF0000u)) {
+                    made.jumped = true;
+                }
+            }
+            made.has_pos = true;
+            made.pos[0] = ps.pos[0];
+            made.pos[1] = ps.pos[1];
+            made.pos[2] = ps.pos[2];
+        }
+        if (!died && !made.jumped) continue;
+        // Their character here died, or they jumped into our map. Rebuild it once that player
+        // reports being alive (they respawned); a character no player can be matched to stays as it is. The old
+        // character goes first; a later check finds the slot empty and asks for the new one, which then takes
+        // the same player slot.
         if (!ps.known || !ps.alive) continue;
         if (remove_character(r.chr)) {
             g_removed.insert(r.chr);
+            made = Made{};
             g_queued_at[r.slot] = now() - 4.0;  // ask for the new character on the next check
-            LOG_INFO("[coop] %s is back after dying: their character is created again", name);
+            LOG_INFO("[coop] %s is back after %s: their character is created again", name,
+                     died ? "dying" : "coming into this map");
         }
     }
 }

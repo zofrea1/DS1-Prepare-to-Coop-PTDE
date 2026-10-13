@@ -33,6 +33,8 @@ void set_guest_world_events(bool on);
 void tick();
 // Flags that change in a session's world while seamless rules apply (game thread, value really changed).
 void set_flag_listener(void (*fn)(int id, bool on));
+// A cutscene is about to move our player into another map (map id, the cutscene's point entity).
+void set_cutscene_listener(void (*fn)(int map, int point));
 // Sets a flag another player changed, without reporting it back.
 void apply_remote_flag(int id, bool on);
 // Host: the world's map flags (groups 1 and 6 of every map) for a co-op guest who arrived; empty if unreadable.

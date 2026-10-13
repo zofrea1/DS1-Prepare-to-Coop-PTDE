@@ -695,9 +695,30 @@ bool personal_flag(int id) {
 // a co-op guest keeps them in their own world (see hk_flag_store).
 bool player_flag_group(int id) { return (id >= 50000000 && id < 60000000) || (id >= 70000000 && id < 80000000); }
 
+// A flag the games keep setting against each other is not world progress either: each game works it out from
+// its own player. 11815396 ("the player is in the Asylum Demon's arena", set and cleared by the network-sync-off
+// events 11815394/11815395 from the local player's position) went back and forth about 130 times a second
+// between a guest inside the arena and a host outside it (2026-10-13 test), as 851 did before it. Eight changes
+// of one flag within two seconds take it out of the sharing for the rest of the session.
+std::map<int, std::pair<ULONGLONG, int>> g_flag_churn;
+std::set<int> g_contested;
+
+void note_flag_change(int id) {
+    const ULONGLONG t = GetTickCount64();
+    auto& c = g_flag_churn[id];
+    if (t - c.first > 2000) {
+        c.first = t;
+        c.second = 0;
+    }
+    if (++c.second >= 8 && g_contested.insert(id).second) {
+        LOG_INFO("[coop] Flag %d keeps flipping between the games: each game keeps its own from now on", id);
+    }
+}
+
 // Lua multiplayer state (4000-4999) is per player and never shared, nor are the personal flags above.
 bool shared_flag(int id) {
-    return id >= 0 && !(id >= 4000 && id <= 4999) && !personal_flag(id) && !player_flag_group(id);
+    return id >= 0 && !(id >= 4000 && id <= 4999) && !personal_flag(id) && !player_flag_group(id) &&
+           !g_contested.count(id);
 }
 
 void __stdcall before_set_flag(int id) {
@@ -714,7 +735,8 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     const bool on = (value & 0xFF) != 0;
     if (g_old_value >= 0 && g_old_value != (on ? 1 : 0) && GetCurrentThreadId() == g_main_thread) {
         g_old_value = -1;
-        g_flag_listener(id, on);
+        note_flag_change(id);
+        if (!g_contested.count(id)) g_flag_listener(id, on);
     }
     if (!g_state.guest) return;
     uint32_t active = 0;
@@ -1018,6 +1040,114 @@ int install_wander_ghost() {
     int ok = 0;
     for (uint32_t site : kWanderGhostSites) ok += patch_call(site, k, sizeof(k), reinterpret_cast<void*>(&hk_wander_ghost));
     return 2 - ok;
+}
+
+// ---------------------------------------------------------------- the souls of a kill
+// An enemy's souls (0xE78A40 -> 0xE4DE90: NpcParam getSoul x soul-rate effects, x1.2 for some enemies) are halved
+// when IsClient (0xD2A430: SessMan state 6, or summoned by an NPC) says the game is a summoned phantom's. A co-op
+// guest got half of the host's souls for every enemy (2026-10-13 test; boss souls come from the event scripts and
+// were the same). A co-op guest gets them in full, as the host does; invaders keep the vanilla rule.
+constexpr uint32_t kKillSoulsClientSite = 0x00E78AC9;
+constexpr uint32_t kIsClient = 0x00D2A430;
+
+bool __cdecl hk_kill_souls_client() {
+    if (g_state.active && g_state.guest && !g_state.invader) return false;
+    return reinterpret_cast<bool(__cdecl*)()>(kIsClient)();
+}
+
+// ---------------------------------------------------------------- a guest's events do not see a missing character as dead
+// EcTestChrHpRate (IF HP Ratio, 4[02]; vtable 0x11DD450 slot 1 = 0xBB8380, thiscall(cond, 2 args)): entity at
+// +0x18, comparison +0x1C, ratio +0x20, result in bit 0 of +8. The character comes from 0xD6C360 (eax = entity);
+// one that is not found counts as ratio 0.0, so "HP at most 0" passes. Vanilla never lets a summoned player rest.
+// A co-op guest's rest (and the host's, which resets the guest's world too) rebuilds the area's characters, and
+// 70 ms after the guest's first rest in the host's world Oscar's death event (11810520: HP ratio <= 0 -> 1060-1074
+// off, 1073 on) ran in the guest's game. The flags are shared, so he was dead in the host's world too, and the
+// event's next run dropped his Estus and key where he sat (2026-10-13 test). For a co-op guest an HP test does
+// not pass while its character is missing or has no maximum HP, nor during a world reset or the 3 s after one.
+// The host's game, where the character lives, still decides, and its flags reach the guest.
+constexpr uint32_t kHpRateVtable = 0x011DD450;
+constexpr uint32_t kHpRateTest = 0x00BB8380;
+constexpr uint32_t kChrByEntity = 0x00D6C360;  // eax = entity id -> character, or 0
+constexpr uint32_t kWorldChrManAddr = 0x0137D644;
+constexpr uint32_t kWorldResetField = 0x2CC;     // WorldChrMan: 0 idle, 1..5 a rest's world reset (0xE40D50)
+using CondTest = void(__thiscall*)(uint8_t*, int, int);
+uint32_t g_hp_rate_orig = 0;
+ULONGLONG g_world_reset_at = 0;
+int g_hp_holds = 0;
+
+uint32_t chr_by_entity(int entity) {
+    uint32_t chr = 0;
+    __try {
+        __asm {
+            mov eax, entity
+            mov edx, kChrByEntity
+            call edx
+            mov chr, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        chr = 0;
+    }
+    return chr;
+}
+
+// True during a world reset and for 3 s after it (called every frame from tick, and by the HP test).
+bool world_resetting() {
+    uint32_t wcm = 0, state = 0;
+    if (read32(kWorldChrManAddr, &wcm) && wcm && read32(wcm + kWorldResetField, &state) && state != 0) {
+        g_world_reset_at = GetTickCount64();
+        return true;
+    }
+    return g_world_reset_at && GetTickCount64() - g_world_reset_at < 3000;
+}
+
+void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
+    reinterpret_cast<CondTest>(g_hp_rate_orig)(cond, a, b);
+    if (!(cond[8] & 1) || !g_state.active || !g_state.guest || g_state.invader) return;
+    const int entity = *reinterpret_cast<int*>(cond + 0x18);
+    const uint32_t chr = chr_by_entity(entity);
+    uint32_t max_hp = 0;
+    const bool missing = !chr || !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0;
+    const bool resetting = world_resetting();
+    if (!missing && !resetting) return;
+    cond[8] &= 0xFE;
+    if (++g_hp_holds <= 30) {
+        LOG_INFO("[coop] HP test on character %d held back (%s)", entity,
+                 missing ? "the character is not here" : "the world is resetting");
+    }
+}
+
+// ---------------------------------------------------------------- a respawn point set by the world's events
+// Set Player Respawn Point (EMEVD 2003[23], case at 0xBC20B2) writes GameMan+0xB04. A co-op guest's respawn is
+// the mod's own (session::guest_respawn_bonfire, written back on every load), and it followed only the guest's
+// rests: after the crow's flight to Firelink Shrine (event 11810000 sets 1022960) a guest who died there came
+// back in the Undead Asylum (2026-10-13 test). The event's point becomes the guest's respawn.
+constexpr uint32_t kRespawnPointSite = 0x00BC20BB;  // mov ecx,[013784A0h] ; mov [ecx+0B04h],eax
+constexpr uint32_t kGameManAddr = 0x013784A0;
+
+void __stdcall note_event_respawn(int point) {
+    if (!seamless_rules() || !g_state.guest || point < 0) return;
+    if (point == session::guest_respawn_bonfire()) return;
+    session::note_guest_respawn(point);
+    LOG_INFO("[coop] The world's events set our respawn to %d", point);
+}
+
+// eax = the point. ecx ends as GameMan, as the original leaves it.
+__declspec(naked) void hk_respawn_point() {
+    __asm {
+        mov ecx, kGameManAddr
+        mov ecx, [ecx]
+        mov [ecx + 0xB04], eax
+        pushad
+        push eax
+        call note_event_respawn
+        popad
+        ret
+    }
+}
+
+bool install_respawn_point() {
+    static const uint8_t k[12] = {0x8B, 0x0D, 0xA0, 0x84, 0x37, 0x01, 0x89, 0x81, 0x04, 0x0B, 0x00, 0x00};
+    return patch_call(kRespawnPointSite, k, sizeof(k), reinterpret_cast<void*>(&hk_respawn_point));
 }
 
 // ---------------------------------------------------------------- a death is a death, not a phantom's
@@ -1359,24 +1489,38 @@ void __fastcall hk_multiplay_test(uint8_t* cond, void* edx, float dt, uint8_t* e
 // Play Cutscene and Warp Player (EMEVD 2002[04], case 0xBC0356) plays a cutscene for one player and moves them;
 // every use in PTDE names "the player" (10000) of the event, the one whose game ran it. When another player's game
 // ran the event first, the network hands it on (FrpgEmkEventIns, 0xBC4000) with "the player" set to that
-// player's character (10001 and up). The Undead Asylum's crow (event 11810000) then took the guest to Firelink
-// Shrine and left the host behind: the host saw the flight but not the arrival and was not moved, while the
-// event went on to mark the Asylum as left and to set the host's respawn in Firelink (2026-10-12 test). In a
-// seamless session a cutscene that moves to another map moves the player of every game that runs it; a warp
-// inside the same map (the Seath capture, Anor Londo) still moves only the player who set it off.
+// player's character (type 1: 10001 + its slot) or to whatever entity that game sent (type 2), and from the
+// instruction that game had reached. The Undead Asylum's crow (event 11810000) took the guest to Firelink Shrine
+// and left the host behind twice: the host's game marked the Asylum as left and moved its respawn, but never
+// warped (2026-10-12 and 2026-10-13 tests; the redirect below never ran on the host). So a cutscene that moves
+// our own player into another map is announced: once we are there, every other player is warped after us
+// (session, kCutFollow). One set off by another player's character is still turned onto ours. A warp inside the
+// same map (the Seath capture, Anor Londo) moves only the player who set it off.
 constexpr uint32_t kCutWarpSite = 0x00BC0378;  // cmp eax,2710h ; jne +3 ; mov eax,[esi+44h]
 constexpr int kLocalPlayerEntity = 10000;
+void (*g_cutscene_fn)(int map, int point) = nullptr;
 
-int __stdcall cut_warp_target(int entity, int area, int block) {
-    if (!seamless_rules() || entity <= kLocalPlayerEntity || entity > kLocalPlayerEntity + 10) return entity;
+int __stdcall cut_warp_target(int entity, int area, int block, int point) {
+    if (!seamless_rules()) return entity;
     const int dest = (area << 24) | (block << 16);
     const int here = game::map_id();
     if (here == -1 || (static_cast<uint32_t>(here) & 0xFFFF0000u) == static_cast<uint32_t>(dest)) return entity;
+    if (entity == kLocalPlayerEntity) {
+        LOG_INFO("[coop] Cutscene takes us to map %08X (point %d): the others follow once we are there", dest, point);
+        if (g_cutscene_fn) g_cutscene_fn(dest, point);
+        return entity;
+    }
+    if (entity < kLocalPlayerEntity || entity > kLocalPlayerEntity + 10) {
+        LOG_INFO("[coop] Cutscene into map %08X for entity %d is left to the game", dest, entity);
+        return entity;
+    }
     LOG_INFO("[coop] Cutscene into map %08X set off by another player (entity %d): it takes us along", dest, entity);
+    if (g_cutscene_fn) g_cutscene_fn(dest, point);
     return kLocalPlayerEntity;
 }
 
-// eax = the instruction's player entity; the area and block bytes are at the caller's [esp+0Eh] / [esp+0Fh].
+// eax = the instruction's player entity, edx = its point entity; the area and block bytes are at the caller's
+// [esp+0Eh] / [esp+0Fh].
 __declspec(naked) void hk_cut_warp() {
     __asm {
         cmp eax, 0x2710
@@ -1384,9 +1528,10 @@ __declspec(naked) void hk_cut_warp() {
         mov eax, [esi + 0x44]
     have:
         pushad
-        movzx ecx, byte ptr [esp + 36 + 0x0F]  // block (past pushad and our return address)
+        push edx                               // point
+        movzx ecx, byte ptr [esp + 40 + 0x0F]  // block (past pushad, our return address and the point)
         push ecx
-        movzx ecx, byte ptr [esp + 40 + 0x0E]  // area
+        movzx ecx, byte ptr [esp + 44 + 0x0E]  // area
         push ecx
         push eax
         call cut_warp_target
@@ -1752,6 +1897,7 @@ bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
 State& state() { return g_state; }
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
+void set_cutscene_listener(void (*fn)(int map, int point)) { g_cutscene_fn = fn; }
 
 void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
 void set_separation_listener(void (*fn)(bool host)) { g_separation_fn = fn; }
@@ -1775,6 +1921,8 @@ void remote_bonfire_lit(int bonfire) {
 
 void apply_remote_flag(int id, bool on) {
     if (!shared_flag(id)) return;
+    if (game::flag(id) != on) note_flag_change(id);
+    if (g_contested.count(id)) return;
     g_applying_remote = true;
     game::set_flag(id, on);
     g_applying_remote = false;
@@ -1937,6 +2085,12 @@ int install() {
     }
     failed += install_one("talk party check", redirect_call(0x00D4ABFB, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
     failed += install_one("NPCs are people for a co-op guest", install_wander_ghost() == 0);
+    failed += install_one("a guest's kills give full souls",
+                          redirect_call(kKillSoulsClientSite, kIsClient, reinterpret_cast<void*>(&hk_kill_souls_client)));
+    failed += install_one("a guest's HP tests skip missing characters",
+                          swap_pointer(kHpRateVtable + 4, kHpRateTest, reinterpret_cast<void*>(&hk_hp_rate_test),
+                                       &g_hp_rate_orig));
+    failed += install_one("respawn points set by events", install_respawn_point());
     {
         // mov ecx,[0137D790h] ; jmp 00D69B10h
         static const uint8_t k[11] = {0x8B, 0x0D, 0x90, 0xD7, 0x37, 0x01, 0xE9, 0xC5, 0xBE, 0x00, 0x00};
@@ -2024,6 +2178,11 @@ void tick() {
     // A co-op guest's loot and items follow the host's (single player) rules for as long as it is a guest, also
     // while it leaves (the area unload on the way home must clean up the same way the items were made).
     g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;
+    world_resetting();
+    if (!g_state.active && !g_flag_churn.empty()) {
+        g_flag_churn.clear();
+        g_contested.clear();
+    }
     if (g_npc_people != g_npc_people_logged && !game::loading()) {
         LOG_INFO("[coop] %u NPC(s) in the host's world are people, not wandering ghosts",
                  g_npc_people - g_npc_people_logged);

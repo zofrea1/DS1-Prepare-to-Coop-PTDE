@@ -221,12 +221,46 @@ int max_hp(uint32_t chr) {
 }
 
 // ---------------------------------------------------------------- rests
+// A guest's rest in the host's world and the host's NPCs. A rest's world reset gives the human NPCs it does not
+// rebuild (NpcParam+0x148 bit 1) SpEffect 110, a full heal (0xE64070), and the rest restarts events such as the
+// Undead Asylum's 11815010, which puts Oscar back into his dying state with SpEffect 5492 (99.9 % of his HP: 400
+// -> 1). In vanilla only a player alone in their world can rest, and the heal comes first. In a guest's game the
+// event came first: 1 HP minus 99.9 % left him at 0 (2026-10-13 test: "HP 0/400" 58 ms after the guest's rest), a
+// body without collision with his drop lying in it, though he could still be talked to. So right before a guest
+// rests, the host's NPCs (teams 8 Ally and 9 Hostile Ally) that are alive in the guest's game get their health
+// back first, as the reset would give them.
+void heal_host_npcs() {
+    uint32_t wcm = 0, sets_info = 0, nsets = 0;
+    if (!read32(kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x10, &sets_info) || !sets_info ||
+        !read32(sets_info + 0xC, &nsets)) {
+        return;
+    }
+    int healed = 0;
+    for (uint32_t k = 0; k < nsets + 2 && k < 64; ++k) {
+        uint32_t set = 0, n = 0, entries = 0;
+        if (!read32(wcm + 0x240 + k * 4, &set) || !set || !read32(set, &n) || !read32(set + 4, &entries)) continue;
+        for (uint32_t i = 0; i < n && i < 4096; ++i) {
+            uint32_t chr = 0, team = 0, hp = 0, max = 0;
+            if (!read32(entries + i * 0x20, &chr) || !chr || !read32(chr + 0x74, &team) || (team != 8 && team != 9) ||
+                !read32(chr + 0x2D4, &hp) || !read32(chr + 0x2D8, &max)) {
+                continue;
+            }
+            if (static_cast<int>(hp) <= 0 || static_cast<int>(max) <= 0 || hp >= max) continue;
+            *ptr<uint32_t>(chr + 0x2D4) = max;
+            ++healed;
+        }
+    }
+    if (healed) LOG_INFO("[coop] %d of the host's NPCs healed before our rest, as the rest would heal them", healed);
+}
+
 // Util_RequestRegene (the rest that respawns the world). As in Remastered Seamless Co-op the co-op items the
 // player lacks are given and every Crimson Blossom withers before the game's own rest; afterwards the other
 // players are told (their worlds reset too).
 void __stdcall before_rest(int object_id) {
     LOG_INFO("[coop] Rested at a bonfire (object %d)", object_id);
     rules::note_world_reset();
+    const auto& st = rules::state();
+    if (st.active && st.guest && !st.invader && !st.leaving && !game::own_world()) heal_host_npcs();
     // The guest's sit timer never writes GameMan+0xB04, so a death kept using the bonfire from the join
     // (Firelink, in the test). The respawn id is the object id plus 1000.
     session::note_guest_rest(object_id);

@@ -1304,7 +1304,10 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             g_cut_follow_map = m.map;
             g_cut_follow_point = m.point;
             g_cut_follow_bonfire = m.bonfire;
-            g_cut_follow_at = now() + 1.0;
+            // Our own copy of the cutscene may still bring us (the host's game ran the crow's warp on itself once,
+            // a second behind the guest): give it a few seconds. The next time it only played the guest's flight
+            // and never moved the host (2026-10-13 13:42), so it does not get the last word.
+            g_cut_follow_at = now() + (g_cut_map == m.map ? 5.0 : 1.0);
             break;
         }
         case kBye: {
@@ -1714,8 +1717,8 @@ void cutscene_tick() {
         return;
     }
     if (g_cut_map == map) {
-        LOG_INFO("[coop] Our own cutscene is taking us to map %08X already", map);
-        return;
+        LOG_INFO("[coop] Our own cutscene into map %08X did not bring us there: following instead", map);
+        g_cut_map = -1;
     }
     if (bonfire >= 0 && game::bonfire_map(bonfire) == map) {
         LOG_INFO("[coop] Following the cutscene to bonfire %d (map %08X)", bonfire, map);

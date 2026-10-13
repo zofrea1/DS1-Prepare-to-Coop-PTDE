@@ -30,13 +30,13 @@ bool install();
 
 // Inventory (the local player's).
 int count(int32_t goods_id);
-// Straight into the inventory, without the "items obtained" box (the death debuff's Crimson Blossom).
+// Straight into the inventory, without the "items obtained" box (see kInventoryAdd).
 void give(int32_t goods_id, int n);
 void remove_all(int32_t goods_id);
-// A bonfire rest: every co-op item except the Crimson Blossom that is not in the inventory (one each), given
-// with the "items obtained" box once the player is back in control (see tick).
+// A bonfire rest: every co-op item except the Crimson Blossom that is not in the inventory (one each). Checked
+// at every rest, so a character brought over from an earlier save gets them too.
 void grant_missing();
-// Per frame, game thread: gives the rest's co-op items when the player stands in the world again.
+// Per frame, game thread: once the player stands in the world again, says in the action box that items came.
 void tick();
 
 // Decides use for the local player: -1 the game's own rules, 0 refused, 1 allowed, 2 allowed if the game's

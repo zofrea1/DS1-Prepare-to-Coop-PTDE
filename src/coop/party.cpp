@@ -177,19 +177,47 @@ bool g_was_loading = true;
 double g_loaded_at = 0;
 double g_last_check = 0;
 std::set<uint32_t> g_removed;  // characters we asked the game to remove (they linger for a frame or two)
-// What each player slot's character was made with: a death since then, or a jump into our map (a respawn, a warp,
-// a cutscene: more than 40 m between two of their once-a-second reports), leaves it stale. The host died in the
+// What each player slot's character was made with: a death since then leaves it stale. The host died in the
 // Undead Asylum and came back in Firelink Shrine, where the guest already was; the guest's character of the host
 // had its health back from the network at once and was never rebuilt, so only its health bar showed (2026-10-13
-// test).
+// test). A rebuild after a jump into our map (respawn, warp) was tried as well and crashed the host: see
+// party_reads_character.
 struct Made {
     uint32_t chr = 0;
     int deaths = -1;
     bool seen_dead = false;
-    bool jumped = false;
-    bool has_pos = false;
-    float pos[3] = {};
 };
+
+// PartyMemberInfo ([GameMan+0xBEC]) keeps four members from +0x18, 0x14 bytes each: +0 character handle (-1 none),
+// +4 kind, +8 state. Its update (0xEA2FD0) reads the member's character with no null check in states 1, 3 (alive
+// in the world) and 4 (dying); 2, 5 (dead), 6 and 7 do not, or check. Only the character goes in a rebuild (see
+// remove_character), so a member in state 1, 3 or 4 must keep it: the host took out a living guest's character
+// right after the crow's flight and crashed at 0xEA3107 reading its HP (2026-10-13 test).
+constexpr uint32_t kGmParty = 0xBEC;
+
+uint32_t chr_of_handle(uint32_t handle) {
+    const uint32_t wcm = world_chr_man();
+    if (!wcm || handle == 0xFFFFFFFF) return 0;
+    uint32_t table = 0, count = 0, entries = 0, chr = 0;
+    const uint32_t index = (handle >> 14) & 0x3F, slot = handle & 0x3FFF;
+    if (!read32(wcm + 0x240 + index * 4, &table) || !table || !read32(table, &count) || slot >= count ||
+        !read32(table + 4, &entries) || !read32(entries + slot * 0x20, &chr)) {
+        return 0;
+    }
+    return chr;
+}
+
+bool party_reads_character(uint32_t chr) {
+    uint32_t gm = 0, pmi = 0;
+    if (!read32(game::kGameManVar, &gm) || !gm || !read32(gm + kGmParty, &pmi) || !pmi) return true;
+    for (int i = 0; i < 4; ++i) {
+        uint32_t handle = 0, state = 0;
+        if (!read32(pmi + 0x18 + i * 0x14, &handle) || !read32(pmi + 0x20 + i * 0x14, &state)) return true;
+        if (handle == 0xFFFFFFFF || chr_of_handle(handle) != chr) continue;
+        if (state == 1 || state == 3 || state == 4) return true;
+    }
+    return false;
+}
 Made g_made[3];
 
 }  // namespace
@@ -268,32 +296,21 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
         if (hp(r.chr) <= 0) made.seen_dead = true;
         const bool died = made.seen_dead || (ps.known && made.deaths >= 0 && ps.deaths > made.deaths);
         if (made.deaths < 0) made.deaths = ps.deaths;
-        if (ps.known && ps.has_pos) {
-            if (made.has_pos) {
-                const float dx = ps.pos[0] - made.pos[0], dy = ps.pos[1] - made.pos[1], dz = ps.pos[2] - made.pos[2];
-                const int here = game::map_id();
-                if (dx * dx + dy * dy + dz * dz > 40.0f * 40.0f && here != -1 && ps.map != -1 &&
-                    (static_cast<uint32_t>(ps.map) & 0xFFFF0000u) == (static_cast<uint32_t>(here) & 0xFFFF0000u)) {
-                    made.jumped = true;
-                }
-            }
-            made.has_pos = true;
-            made.pos[0] = ps.pos[0];
-            made.pos[1] = ps.pos[1];
-            made.pos[2] = ps.pos[2];
-        }
-        if (!died && !made.jumped) continue;
-        // Their character here died, or they jumped into our map. Rebuild it once that player
-        // reports being alive (they respawned); a character no player can be matched to stays as it is. The old
-        // character goes first; a later check finds the slot empty and asks for the new one, which then takes
-        // the same player slot.
+        if (!died) continue;
+        // Their character here died. Rebuild it once that player reports being alive (they respawned) and the
+        // party is done with it; a character no player can be matched to stays as it is. The old character goes
+        // first; a later check finds the slot empty and asks for the new one, which then takes the same slot.
         if (!ps.known || !ps.alive) continue;
+        if (party_reads_character(r.chr)) {
+            static int told = 0;
+            if (++told <= 10) LOG_INFO("[coop] %s's character is still in use by the party: not rebuilt", name);
+            continue;
+        }
         if (remove_character(r.chr)) {
             g_removed.insert(r.chr);
             made = Made{};
             g_queued_at[r.slot] = now() - 4.0;  // ask for the new character on the next check
-            LOG_INFO("[coop] %s is back after %s: their character is created again", name,
-                     died ? "dying" : "coming into this map");
+            LOG_INFO("[coop] %s is back after dying: their character is created again", name);
         }
     }
 }

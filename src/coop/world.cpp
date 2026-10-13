@@ -226,6 +226,7 @@ int max_hp(uint32_t chr) {
 // players are told (their worlds reset too).
 void __stdcall before_rest(int object_id) {
     LOG_INFO("[coop] Rested at a bonfire (object %d)", object_id);
+    rules::note_world_reset();
     // The guest's sit timer never writes GameMan+0xB04, so a death kept using the bonfire from the join
     // (Firelink, in the test). The respawn id is the object id plus 1000.
     session::note_guest_rest(object_id);
@@ -352,11 +353,53 @@ void each_enemy(F&& fn) {
     }
 }
 
+// Diagnostic for the 2026-10-13 report (an enemy the guest hit died with health left on the guest's bar): every
+// 0.1 s the hurt enemies' health is sampled, and a death that came while this game last showed more than 10 % is
+// logged with both numbers, in both games. Each game's scaling level is logged when it changes.
+std::map<uint32_t, std::pair<int, int>> g_enemy_hp;  // EnemyIns -> last HP, max HP while hurt
+int g_logged_level = -1;
+int g_hp_left_logs = 0;
+
+void enemy_hp_tick() {
+    static double last = 0;
+    if (!g_active || now() - last < 0.1) return;
+    last = now();
+    std::set<uint32_t> seen;
+    each_enemy([&](uint32_t chr) {
+        const int h = hp(chr), m = max_hp(chr);
+        auto it = g_enemy_hp.find(chr);
+        if (h <= 0) {
+            if (it != g_enemy_hp.end() && it->second.second > 0 && it->second.first * 10 > it->second.second &&
+                ++g_hp_left_logs <= 40) {
+                LOG_INFO("[coop] An enemy died here with %d/%d HP still shown 0.1 s before (scaling level %d)",
+                         it->second.first, it->second.second, g_logged_level);
+            }
+            if (it != g_enemy_hp.end()) g_enemy_hp.erase(it);
+            return;
+        }
+        if (h >= m) {
+            if (it != g_enemy_hp.end()) g_enemy_hp.erase(it);
+            return;
+        }
+        seen.insert(chr);
+        g_enemy_hp[chr] = {h, m};
+    });
+    for (auto it = g_enemy_hp.begin(); it != g_enemy_hp.end();) {
+        it = seen.count(it->first) ? std::next(it) : g_enemy_hp.erase(it);
+    }
+}
+
 void scale_tick() {
+    enemy_hp_tick();
     if (now() - g_last_scale < 0.5) return;
     g_last_scale = now();
     int level = g_active ? g_players - 1 : 0;
     level = std::max(0, std::min(5, level));
+    if (level != g_logged_level) {
+        LOG_INFO("[coop] Enemy scaling level %d (%d co-op player(s)): health x%.2f, bosses x%.2f", level, level + 1,
+                 level * (g_cfg.enemy_health / 100.0f) + 1.0f, level * (g_cfg.boss_health / 100.0f) + 1.0f);
+        g_logged_level = level;
+    }
     std::set<uint32_t> seen;
     each_enemy([&](uint32_t chr) {
         seen.insert(chr);
@@ -620,6 +663,7 @@ void clear_death_debuff() {
 void remote_rest() {
     uint32_t wcm = 0, state = 0;
     if (read32(kWorldChrManVar, &wcm) && wcm && read32(wcm + kWorldReset, &state) && state == 0) {
+        rules::note_world_reset();
         *ptr<uint32_t>(wcm + kWorldReset) = 1;
         LOG_INFO("[coop] Another player rested: the world resets");
     }

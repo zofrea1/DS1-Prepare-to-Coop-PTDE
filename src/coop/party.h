@@ -32,8 +32,6 @@ struct PeerState {
     bool alive = false;     // reports being alive and has done so for a moment
     int deaths = -1;        // their death count as they report it (-1 unknown)
     int map = -1;           // the map they report being in (-1 unknown)
-    float pos[3] = {};      // where they report standing (once a second)
-    bool has_pos = false;
 };
 
 // Every frame on the game thread while a seamless session is established. `peer` answers for a character (and

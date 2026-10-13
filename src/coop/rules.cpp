@@ -1065,6 +1065,12 @@ bool __cdecl hk_kill_souls_client() {
 // event's next run dropped his Estus and key where he sat (2026-10-13 test). For a co-op guest an HP test does
 // not pass while its character is missing or has no maximum HP, nor during a world reset or the 3 s after one.
 // The host's game, where the character lives, still decides, and its flags reach the guest.
+// The next test (12:51) killed him the same way with the character there and a maximum HP: his HP itself read 0
+// in the guest's game 70 ms after the guest's rest, which also reset the host's world (the host owns him). Vanilla
+// never resets a world during a session (bonfires are off with phantoms in it). So the death of the host's NPCs
+// (team 8 Ally, 9 Hostile Ally) is the host's to see: a guest's "HP equal to / at most 0" test on one of them never
+// passes. The host's own event sees a kill the guest makes (the damage reaches the host's character) and its flags
+// come back; the guest's hostility tests (HP at most 90 % and hit by the guest) still pass.
 constexpr uint32_t kHpRateVtable = 0x011DD450;
 constexpr uint32_t kHpRateTest = 0x00BB8380;
 constexpr uint32_t kChrByEntity = 0x00D6C360;  // eax = entity id -> character, or 0
@@ -1105,14 +1111,26 @@ void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
     if (!(cond[8] & 1) || !g_state.active || !g_state.guest || g_state.invader) return;
     const int entity = *reinterpret_cast<int*>(cond + 0x18);
     const uint32_t chr = chr_by_entity(entity);
-    uint32_t max_hp = 0;
+    uint32_t hp = 0, max_hp = 0, team = 0;
     const bool missing = !chr || !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0;
+    if (chr) {
+        read32(chr + 0x2D4, &hp);
+        read32(chr + 0x74, &team);  // the team (see kTeamOffset)
+    }
+    const uint8_t cmp = cond[0x1C];
+    const float ratio = *reinterpret_cast<float*>(cond + 0x20);
+    const bool death_test = ratio <= 0.0f && (cmp == 0 || cmp == 5);
+    const bool npc = !missing && (team == 8 || team == 9);
     const bool resetting = world_resetting();
-    if (!missing && !resetting) return;
+    const char* why = missing ? "the character is not here"
+                      : npc && death_test ? "the host's game decides its NPCs' deaths"
+                      : resetting ? "the world is resetting"
+                                  : nullptr;
+    if (!why) return;
     cond[8] &= 0xFE;
     if (++g_hp_holds <= 30) {
-        LOG_INFO("[coop] HP test on character %d held back (%s)", entity,
-                 missing ? "the character is not here" : "the world is resetting");
+        LOG_INFO("[coop] HP test on character %d held back: %s (HP %d/%d, team %u)", entity, why,
+                 static_cast<int>(hp), static_cast<int>(max_hp), team);
     }
 }
 
@@ -1898,6 +1916,7 @@ State& state() { return g_state; }
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
 void set_cutscene_listener(void (*fn)(int map, int point)) { g_cutscene_fn = fn; }
+void note_world_reset() { g_world_reset_at = GetTickCount64(); }
 
 void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
 void set_separation_listener(void (*fn)(bool host)) { g_separation_fn = fn; }

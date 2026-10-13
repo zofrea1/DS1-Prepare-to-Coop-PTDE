@@ -1493,10 +1493,6 @@ party::PeerState peer_state(uint32_t chr, const std::wstring& name) {
     s.alive = !p->dead && p->alive_since > 0 && now() - p->alive_since >= 2.0 && now() - p->last_seen <= 5.0;
     s.deaths = p->deaths;
     s.map = p->map;
-    s.pos[0] = p->pos[0];
-    s.pos[1] = p->pos[1];
-    s.pos[2] = p->pos[2];
-    s.has_pos = p->last_seen > 0;
     return s;
 }
 

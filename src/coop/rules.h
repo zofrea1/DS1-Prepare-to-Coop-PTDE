@@ -37,9 +37,16 @@ void set_flag_listener(void (*fn)(int id, bool on));
 void note_world_reset();
 // A cutscene is about to move our player into another map (map id, the cutscene's point entity).
 void set_cutscene_listener(void (*fn)(int map, int point));
-// Our copy of such a cutscene could not find its arrival point (that map's data is not loaded here), so the game
-// will not take us there: the map and point, once.
+// Our copy of such a cutscene could not take us there, not even after loading its map here: the map and point,
+// once. The session then takes us there itself.
 bool take_failed_cutscene(int* map, int* point);
+// Our copy of such a cutscene is loading its map to play once the map is there, or is waiting to move us.
+bool cutscene_loading();
+// The game's cutscene manager has a cutscene queued or playing.
+bool cutscene_playing();
+// The map the world has us in (FieldArea's WorldRes +0x7E8), -1 unknown. A cutscene's in-place move into another
+// map sets it at once; the player's own map id (game::map_id) follows a few seconds later.
+int world_map();
 // Sets a flag another player changed, without reporting it back.
 void apply_remote_flag(int id, bool on);
 // Host: the world's map flags (groups 1 and 6 of every map) for a co-op guest who arrived; empty if unreadable.

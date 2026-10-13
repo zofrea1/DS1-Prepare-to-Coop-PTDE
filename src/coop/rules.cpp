@@ -1134,6 +1134,79 @@ void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
     }
 }
 
+// ---------------------------------------------------------------- the host's NPCs live through a guest's rest
+// Every HP change goes through 0xE688E0 (stdcall(chr, hp)): clamped to 0..max into +0x2D4, then at 0 the
+// character's own "cannot die" rules (+0x1FF bit 1, its param, SpEffect state 0x8F) keep 1. The SpEffects' per
+// second change (0xE72E20) dies there too when it reaches 0. Oscar sits with SpEffect 5492 (99.9 % of his HP
+// taken, from event 11815010, which restarts on every rest). In the 15:42 test (2026-10-13) the guest healed him
+// before its rest as before (heal_host_npcs), yet his HP read 0 78 ms after it, 40 ms after the host's world reset
+// that the guest's rest set off, and he stayed pushable and talkable with 0 HP held by the HP test until the
+// rest's own heal: a second 5492 (or the host's) landed after the heal. A death in the guest's game during that
+// window is never a death the host sees. So while a guest's world resets and for 5 s after, a host NPC (team 8
+// or 9) that is alive keeps 1 HP instead of reaching 0 in the guest's game. The rest's heal then fills it up.
+constexpr uint32_t kSetHp = 0x00E688E0;
+void* g_set_hp_orig = nullptr;
+int g_hp_saves = 0;
+
+bool reset_window(ULONGLONG ms) {
+    uint32_t wcm = 0, state = 0;
+    if (read32(kWorldChrManAddr, &wcm) && wcm && read32(wcm + kWorldResetField, &state) && state != 0) return true;
+    return g_world_reset_at && GetTickCount64() - g_world_reset_at < ms;
+}
+
+int __stdcall set_hp_value(uint32_t chr, int hp) {
+    if (hp > 0 || !chr || !g_state.active || !g_state.guest || g_state.invader) return hp;
+    uint32_t cur = 0, team = 0, max_hp = 0;
+    if (!read32(chr + 0x2D4, &cur) || static_cast<int>(cur) <= 0 || !read32(chr + 0x74, &team) ||
+        (team != 8 && team != 9) || !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0) {
+        return hp;
+    }
+    if (!reset_window(5000)) return hp;
+    if (++g_hp_saves <= 20) {
+        LOG_INFO("[coop] The host's NPC %08X (HP %d/%d, team %u) is kept alive during our world reset (the host's "
+                 "game decides its NPCs' deaths)", chr, static_cast<int>(cur), static_cast<int>(max_hp), team);
+    }
+    return 1;
+}
+
+// The direct kill (0xE6B4E0, stdcall(chr): HP 0, death flags, the death event 0xDA0770) that Force Death, a kill
+// for treasure and the "host's dead characters" list (0xE44150) use skips SetHP; the same window holds it back.
+constexpr uint32_t kKillChr = 0x00E6B4E0;
+void* g_kill_orig = nullptr;
+
+bool __stdcall kill_allowed(uint32_t chr) { return set_hp_value(chr, 0) == 0; }
+
+__declspec(naked) void hk_kill_chr() {
+    __asm {
+        push ecx
+        push edx
+        push dword ptr [esp + 0xC]  // chr
+        call kill_allowed
+        pop edx
+        pop ecx
+        test al, al
+        jz held
+        jmp dword ptr [g_kill_orig]
+    held:
+        ret 4
+    }
+}
+
+// Our stack: [esp] = return address, [esp+4] = chr, [esp+8] = hp. ecx and edx are kept for the original.
+__declspec(naked) void hk_set_hp() {
+    __asm {
+        push ecx
+        push edx
+        push dword ptr [esp + 0x10]  // hp
+        push dword ptr [esp + 0x10]  // chr (one push later)
+        call set_hp_value
+        mov [esp + 0x10], eax        // the hp argument
+        pop edx
+        pop ecx
+        jmp dword ptr [g_set_hp_orig]
+    }
+}
+
 // ---------------------------------------------------------------- a respawn point set by the world's events
 // Set Player Respawn Point (EMEVD 2003[23], case at 0xBC20B2) writes GameMan+0xB04. A co-op guest's respawn is
 // the mod's own (session::guest_respawn_bonfire, written back on every load), and it followed only the guest's
@@ -1520,18 +1593,27 @@ void (*g_cutscene_fn)(int map, int point) = nullptr;
 
 // The request itself (0xD75190, eax = player entity, stdcall(cutscene, method, map, point, 0, 0)) first looks the
 // arrival point up (0xD6C490: eax = point, edi = position out, stdcall(rotation out) -> al): a point of a map whose
-// data is not loaded is not found, and then neither the cutscene nor the warp happens. The event loads it a few
-// instructions earlier (the crow's 11810000: Prefetch Request before the cutscenes). A game that runs the event
-// because another player's game set it off joins at that player's instruction, after the prefetch: the host saw
-// the crow carry the guest away and was left in the Asylum, three tests running (2026-10-13). The lookup is
-// watched for the cutscenes above; when it fails, the session warps our player there itself as soon as our copy
-// of the cutscene is over (see take_failed_cutscene).
+// data is not loaded is not found, and then neither the cutscene nor the warp happens. The crow's arrival map is
+// loaded next to the Undead Asylum only while the player stands on the Asylum's two floors that connect to it
+// (m18_01 ConnectCollision h0054B1 / h0099B1 -> m10_02: the roof and the demon's arena). The guest stood there,
+// so its game found the point; the host, a few steps back, did not, three tests running (2026-10-13). The
+// synced event reached the host's game at the same moment as the guest's own (event sync, 0xBC4000).
+// When the lookup fails for such a cutscene of our own player, the map is loaded the way a connecting floor
+// loads it (WorldBlockRes +0x61, see below) and the request is made again once its point is there. The crow's
+// flight (the event's first cutscene, 40 s) is still playing then, so the arrival cutscene follows it as in the
+// game that set it off, and its end moves us into the map in place (0xEE21F0 -> 0xDE36E0) with the event's
+// following instructions (the crow: respawn at Firelink's bonfire). If the map cannot be loaded the session
+// takes us there with a loading screen once our cutscene is over (take_failed_cutscene).
 constexpr uint32_t kPointLookupSite = 0x00D751D2;  // call 0xD6C490 in 0xD75190
 constexpr uint32_t kPointLookup = 0x00D6C490;
+constexpr uint32_t kCutsceneRequest = 0x00D75190;
 struct CutCheck {
     bool active = false;
+    bool retry = false;  // our own request, made again once the map was loaded
     int map = -1;
     int point = -1;
+    int cutscene = -1;
+    int method = 0;
 } g_cut_check;
 struct CutFailed {
     bool pending = false;
@@ -1539,20 +1621,241 @@ struct CutFailed {
     int point = -1;
 } g_cut_failed;
 
+// Maps load in blocks (one per map: m10_02 is area 10 block 2). FieldArea ([0x1378520], which the point lookup
+// needs too) +4 = WorldRes: +0x10 the block infos (0x3C each, map id at +4), +0x7E0 the number of blocks, +0x7E4
+// their WorldBlockRes (0x170 each, same order), +0x7E8 the map we are in, +0x7F0 the in-place switch target.
+// Every frame WorldRes's update (0xDD9E30) marks the wanted blocks (+0x62: ours, the previous one while we are
+// near it, the switch target, and the blocks whose +0x61 is set, which it clears again); 0xDDB350 adds the blocks
+// a connecting floor under the player names (their group masks) and the block loads (+0x68: 0 none .. 7 in use;
+// 0xDDE930), its area first. A block wanted by nobody is unloaded two frames later.
+constexpr uint32_t kFieldAreaVar = 0x01378520;
+constexpr uint32_t kFaWorldRes = 0x4;
+constexpr uint32_t kWrBlockInfos = 0x10;
+constexpr uint32_t kBlockInfoSize = 0x3C;
+constexpr uint32_t kWrBlockCount = 0x7E0;
+constexpr uint32_t kWrBlockRes = 0x7E4;
+constexpr uint32_t kWrCurrentMap = 0x7E8;
+constexpr uint32_t kBlockResSize = 0x170;
+constexpr uint32_t kBrWantOnce = 0x61;
+constexpr uint32_t kBrState = 0x68;
+constexpr uint32_t kBlockInUse = 7;
+
+constexpr uint32_t kFieldAreaVtable = 0x011910DC;  // set by its constructor 0xDE7950, which also fills 0x1378520
+uint32_t world_res() {
+    uint32_t fa = 0, vt = 0, wr = 0;
+    if (!read32(kFieldAreaVar, &fa) || !fa || !read32(fa, &vt) || vt != kFieldAreaVtable ||
+        !read32(fa + kFaWorldRes, &wr)) {
+        return 0;
+    }
+    return wr;
+}
+
+// The index of `map`'s block, -1 when this world has none.
+int map_block(uint32_t wr, int map) {
+    uint32_t n = 0, infos = 0;
+    if (!wr || !read32(wr + kWrBlockCount, &n) || n == 0 || n > 64 || !read32(wr + kWrBlockInfos, &infos) || !infos) {
+        return -1;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t id = 0;
+        if (read32(infos + i * kBlockInfoSize + 4, &id) && static_cast<int>(id) == map) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+uint32_t block_res(uint32_t wr, int index) {
+    uint32_t res = 0;
+    if (!wr || index < 0 || !read32(wr + kWrBlockRes, &res) || !res) return 0;
+    return res + static_cast<uint32_t>(index) * kBlockResSize;
+}
+
+// Asks for the block this frame, as a connecting floor would.
+void want_block(uint32_t wr, int index) {
+    const uint32_t res = block_res(wr, index);
+    if (!res) return;
+    __try {
+        *ptr<uint8_t>(res + kBrWantOnce) = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+int block_state(uint32_t wr, int index) {
+    uint32_t state = 0;
+    const uint32_t res = block_res(wr, index);
+    if (!res || !read32(res + kBrState, &state)) return -1;
+    return static_cast<int>(state);
+}
+
+// 0xD6C490 as the request calls it.
+bool point_found(int point) {
+    float pos[4] = {}, rot[4] = {};
+    uint8_t ok = 0;
+    __try {
+        __asm {
+            push edi
+            lea edi, pos
+            lea edx, rot
+            push edx
+            mov eax, point
+            mov edx, kPointLookup
+            call edx
+            mov ok, al
+            pop edi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = 0;
+    }
+    return ok != 0;
+}
+
+// 0xD75190 for our own player (the event's Play Cutscene and Warp Player).
+void request_cutscene(int cutscene, int method, int map, int point) {
+    __try {
+        __asm {
+            push 0
+            push 0
+            push point
+            push map
+            push method
+            push cutscene
+            mov eax, 0x2710
+            mov edx, kCutsceneRequest
+            call edx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("[coop] The cutscene request for map %08X failed", map);
+    }
+}
+
+// The cutscene manager ([0x1378490]) keeps up to four cutscenes from +0x28, 0x18 bytes each (0xEE1950): the first
+// word is the task while one is queued or playing.
+bool cutscenes_idle() {
+    uint32_t man = 0;
+    if (!read32(0x01378490, &man) || !man) return true;
+    for (int i = 0; i < 4; ++i) {
+        uint32_t task = 0;
+        if (!read32(man + 0x28 + i * 0x18, &task) || task) return false;
+    }
+    return true;
+}
+
+// A cutscene of ours whose map is being loaded.
+struct CutWait {
+    bool active = false;
+    bool issued = false;  // the request was made again with the map there
+    int cutscene = -1;
+    int method = 0;
+    int map = -1;
+    int point = -1;
+    int block = -1;
+    double since = 0;
+    double issued_at = 0;
+    double idle_since = 0;
+    int last_state = -2;
+} g_cut_wait;
+
+void give_up_cutscene(const char* why) {
+    LOG_INFO("[coop] Our cutscene into map %08X cannot take us (%s): the session takes us there instead", g_cut_wait.map,
+             why);
+    g_cut_failed.pending = true;
+    g_cut_failed.map = g_cut_wait.map;
+    g_cut_failed.point = g_cut_wait.point;
+    g_cut_wait.active = false;
+}
+
+void start_cut_wait(int map, int point, int cutscene, int method) {
+    const uint32_t wr = world_res();
+    const int block = map_block(wr, map);
+    g_cut_wait = CutWait{};
+    g_cut_wait.active = true;
+    g_cut_wait.cutscene = cutscene;
+    g_cut_wait.method = method;
+    g_cut_wait.map = map;
+    g_cut_wait.point = point;
+    g_cut_wait.block = block;
+    g_cut_wait.since = seconds();
+    if (block < 0) {
+        give_up_cutscene("its map is not one this world can load from here");
+        return;
+    }
+    LOG_INFO("[coop] The cutscene's arrival point %d is not loaded in our game: loading map %08X (block %d, state %d) "
+             "to play our cutscene %d there", point, map, block, block_state(wr, block), cutscene);
+}
+
+// Per frame, game thread.
+void cut_wait_tick() {
+    if (!g_cut_wait.active) return;
+    if (!g_state.active || g_state.invader || !game::in_game() || game::loading()) {
+        LOG_INFO("[coop] Waiting for map %08X stopped (the session or the map changed)", g_cut_wait.map);
+        g_cut_wait.active = false;
+        return;
+    }
+    const double now = seconds();
+    const uint32_t wr = world_res();
+    uint32_t current = 0;
+    if (wr && read32(wr + kWrCurrentMap, &current) && static_cast<int>(current) == g_cut_wait.map) {
+        LOG_INFO("[coop] Our cutscene took us into map %08X (%.1f s after it started)", g_cut_wait.map,
+                 now - g_cut_wait.since);
+        g_cut_wait.active = false;
+        return;
+    }
+    const uint32_t me = game::player();
+    uint32_t hp = 0;
+    if (!me || !read32(me + 0x2D4, &hp) || static_cast<int>(hp) <= 0) {
+        LOG_INFO("[coop] Waiting for map %08X stopped: we died", g_cut_wait.map);
+        g_cut_wait.active = false;
+        return;
+    }
+    const int block = map_block(wr, g_cut_wait.map);
+    if (block < 0) {
+        give_up_cutscene("its map left this world's list");
+        return;
+    }
+    want_block(wr, block);
+    const int state = block_state(wr, block);
+    if (state != g_cut_wait.last_state) {
+        LOG_INFO("[coop] Map %08X: block state %d (%.1f s)", g_cut_wait.map, state, now - g_cut_wait.since);
+        g_cut_wait.last_state = state;
+    }
+    if (!g_cut_wait.issued) {
+        if (state == static_cast<int>(kBlockInUse) && point_found(g_cut_wait.point)) {
+            g_cut_check = CutCheck{true, true, g_cut_wait.map, g_cut_wait.point, g_cut_wait.cutscene, g_cut_wait.method};
+            request_cutscene(g_cut_wait.cutscene, g_cut_wait.method, g_cut_wait.map, g_cut_wait.point);
+            g_cut_check.active = false;
+            g_cut_wait.issued = true;
+            g_cut_wait.issued_at = now;
+        } else if (now - g_cut_wait.since > 90.0) {
+            give_up_cutscene("its map did not load in 90 s");
+        }
+        return;
+    }
+    // Issued: the map stays wanted until the cutscene's end moves us there.
+    if (!cutscenes_idle()) {
+        g_cut_wait.idle_since = 0;
+        return;
+    }
+    if (g_cut_wait.idle_since == 0) g_cut_wait.idle_since = now;
+    if (now - g_cut_wait.issued_at > 2.0 && now - g_cut_wait.idle_since > 3.0) {
+        give_up_cutscene("the cutscene ended without moving us");
+    }
+}
+
 void __stdcall note_point_lookup(int point, int ok) {
     if (!g_cut_check.active) return;
     g_cut_check.active = false;
     if (point != g_cut_check.point) return;
+    if (g_cut_check.retry) {
+        LOG_INFO("[coop] Map %08X is loaded now (%.1f s): our cutscene %d into it %s", g_cut_check.map,
+                 seconds() - g_cut_wait.since, g_cut_check.cutscene, ok ? "is on" : "still found no arrival point");
+        if (!ok) give_up_cutscene("its arrival point is missing");
+        return;
+    }
     if (ok) {
         LOG_INFO("[coop] The cutscene's arrival point %d is loaded here: the game takes us to map %08X", point,
                  g_cut_check.map);
         return;
     }
-    LOG_INFO("[coop] The cutscene's arrival point %d is not loaded in our game (map %08X): we go there ourselves "
-             "when the cutscene is over", point, g_cut_check.map);
-    g_cut_failed.pending = true;
-    g_cut_failed.map = g_cut_check.map;
-    g_cut_failed.point = point;
+    start_cut_wait(g_cut_check.map, point, g_cut_check.cutscene, g_cut_check.method);
 }
 
 // eax = point, edi = position out, [esp+4] = rotation out; ret 4, al = found. edi, esi, ebx, ebp are kept.
@@ -1576,7 +1879,7 @@ __declspec(naked) void hk_point_lookup() {
     }
 }
 
-int __stdcall cut_warp_target(int entity, int area, int block, int point) {
+int __stdcall cut_warp_target(int entity, int area, int block, int point, int method, int cutscene) {
     if (!seamless_rules()) return entity;
     const int dest = (area << 24) | (block << 16);
     const int here = game::map_id();
@@ -1586,19 +1889,23 @@ int __stdcall cut_warp_target(int entity, int area, int block, int point) {
         return entity;
     }
     if (entity == kLocalPlayerEntity) {
-        LOG_INFO("[coop] Cutscene takes us to map %08X (point %d): the others follow once we are there", dest, point);
+        LOG_INFO("[coop] Cutscene %d takes us to map %08X (point %d): the others follow once we are there", cutscene,
+                 dest, point);
     } else {
-        LOG_INFO("[coop] Cutscene into map %08X set off by another player (entity %d): it takes us along", dest, entity);
+        LOG_INFO("[coop] Cutscene %d into map %08X set off by another player (entity %d): it takes us along", cutscene,
+                 dest, entity);
     }
-    g_cut_check.active = true;  // the request's point lookup comes next (hk_point_lookup)
-    g_cut_check.map = dest;
-    g_cut_check.point = point;
+    if (g_cut_wait.active && g_cut_wait.map == dest) {
+        // The same cutscene again (an event instance per player): the one we wait with stays.
+        return kLocalPlayerEntity;
+    }
+    g_cut_check = CutCheck{true, false, dest, point, cutscene, method};  // its point lookup comes next
     if (g_cutscene_fn) g_cutscene_fn(dest, point);
     return kLocalPlayerEntity;
 }
 
-// eax = the instruction's player entity, edx = its point entity; the area and block bytes are at the caller's
-// [esp+0Eh] / [esp+0Fh].
+// eax = the instruction's player entity, edx = its point entity, edi = the cutscene, ebp = the playback method;
+// the area and block bytes are at the caller's [esp+0Eh] / [esp+0Fh].
 __declspec(naked) void hk_cut_warp() {
     __asm {
         cmp eax, 0x2710
@@ -1606,10 +1913,12 @@ __declspec(naked) void hk_cut_warp() {
         mov eax, [esi + 0x44]
     have:
         pushad
+        push edi                               // cutscene
+        push ebp                               // method
         push edx                               // point
-        movzx ecx, byte ptr [esp + 40 + 0x0F]  // block (past pushad, our return address and the point)
+        movzx ecx, byte ptr [esp + 48 + 0x0F]  // block (past pushad, our return address and three arguments)
         push ecx
-        movzx ecx, byte ptr [esp + 44 + 0x0E]  // area
+        movzx ecx, byte ptr [esp + 52 + 0x0E]  // area
         push ecx
         push eax
         call cut_warp_target
@@ -1983,6 +2292,14 @@ bool take_failed_cutscene(int* map, int* point) {
     *point = g_cut_failed.point;
     return true;
 }
+bool cutscene_loading() { return g_cut_wait.active; }
+int world_map() {
+    uint32_t map = 0;
+    const uint32_t wr = world_res();
+    if (!wr || !read32(wr + kWrCurrentMap, &map)) return -1;
+    return static_cast<int>(map);
+}
+bool cutscene_playing() { return !cutscenes_idle(); }
 void note_world_reset() { g_world_reset_at = GetTickCount64(); }
 
 void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
@@ -2178,6 +2495,16 @@ int install() {
     failed += install_one("a guest's HP tests skip missing characters",
                           swap_pointer(kHpRateVtable + 4, kHpRateTest, reinterpret_cast<void*>(&hk_hp_rate_test),
                                        &g_hp_rate_orig));
+    {
+        static const uint8_t k[5] = {0x8B, 0x4C, 0x24, 0x08, 0x55};  // mov ecx,[esp+8] ; push ebp
+        g_set_hp_orig = detour(kSetHp, k, sizeof(k), reinterpret_cast<void*>(&hk_set_hp));
+        failed += install_one("the host's NPCs live through a guest's rest", g_set_hp_orig != nullptr);
+    }
+    {
+        static const uint8_t k[6] = {0x51, 0x55, 0x8B, 0x6C, 0x24, 0x0C};  // push ecx ; push ebp ; mov ebp,[esp+0Ch]
+        g_kill_orig = detour(kKillChr, k, sizeof(k), reinterpret_cast<void*>(&hk_kill_chr));
+        failed += install_one("the host's NPCs live through a guest's rest (kills)", g_kill_orig != nullptr);
+    }
     failed += install_one("respawn points set by events", install_respawn_point());
     {
         // mov ecx,[0137D790h] ; jmp 00D69B10h
@@ -2267,6 +2594,7 @@ void tick() {
     // while it leaves (the area unload on the way home must clean up the same way the items were made).
     g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;
     world_resetting();
+    cut_wait_tick();
     if (!g_state.active && !g_flag_churn.empty()) {
         g_flag_churn.clear();
         g_contested.clear();

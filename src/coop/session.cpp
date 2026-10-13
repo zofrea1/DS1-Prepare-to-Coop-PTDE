@@ -1694,29 +1694,26 @@ void on_cutscene(int map, int point) {
     g_cut_arrived_at = 0;
 }
 
-// The cutscene manager ([0x1378490]) keeps up to four cutscenes from +0x28, 0x18 bytes each (0xEE1950): the first
-// word is the task while one is queued or playing.
-bool cutscene_idle() {
-    uint32_t man = 0;
-    if (!read32(0x01378490, &man) || !man) return true;
-    for (int i = 0; i < 4; ++i) {
-        uint32_t task = 0;
-        if (!read32(man + 0x28 + i * 0x18, &task) || task) return false;
-    }
+// Warps our player to `map` by its bonfire `bonfire` (a respawn point there). Never by the cutscene's point: a warp
+// point is the map's player start part (MSB Player, 0xDE2690), and a region of that name is not one, so the game
+// put the host at its first block's default start, outside the loaded map, and the host fell through the world
+// (2026-10-13 15:45 test). Returns false when the bonfire is not in that map.
+bool cutscene_warp(int map, int bonfire, const char* why) {
+    if (bonfire < 0 || game::bonfire_map(bonfire) != map) return false;
+    LOG_INFO("[coop] %s: to bonfire %d (map %08X)", why, bonfire, map);
+    if (g_role == Role::Guest) note_guest_respawn(bonfire);
+    *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
+    world::warp_now(map, -1);
     return true;
 }
 
-// Warps our player to `map`: to `bonfire` when it is in that map, else to the cutscene's point.
-void cutscene_warp(int map, int point, int bonfire, const char* why) {
-    if (bonfire >= 0 && game::bonfire_map(bonfire) == map) {
-        LOG_INFO("[coop] %s: to bonfire %d (map %08X)", why, bonfire, map);
-        if (g_role == Role::Guest) note_guest_respawn(bonfire);
-        *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
-        world::warp_now(map, -1);
-    } else {
-        LOG_INFO("[coop] %s: to map %08X, point %d", why, map, point);
-        world::warp_now(map, point);
-    }
+// A bonfire of `map` to arrive at: our own respawn when the event put it there (the crow sets Firelink's), else
+// the one the other player reported on arriving (kCutFollow), else -1.
+int cutscene_bonfire(int map) {
+    const int own = game::last_bonfire();
+    if (game::bonfire_map(own) == map) return own;
+    if (g_cut_hint_map == map && game::bonfire_map(g_cut_hint_bonfire) == map) return g_cut_hint_bonfire;
+    return -1;
 }
 
 void cutscene_tick() {
@@ -1730,6 +1727,9 @@ void cutscene_tick() {
     }
     const bool settled = game::in_game() && !game::loading();
     const uint32_t here = static_cast<uint32_t>(game::map_id()) & 0xFFFF0000u;
+    const int world_map = rules::world_map();
+    // In `map` already: by our map id, or by the world's, which a cutscene's in-place move sets first.
+    auto in_map = [&](int map) { return here == static_cast<uint32_t>(map) || (world_map != -1 && world_map == map); };
     {
         int map = -1, point = -1;
         if (rules::take_failed_cutscene(&map, &point)) {
@@ -1739,24 +1739,29 @@ void cutscene_tick() {
             if (g_cut_map == map) g_cut_map = -1;  // it will not bring us: nothing to announce
         }
     }
-    if (g_cut_own_map != -1 && settled && now() - g_cut_own_at >= 1.0) {
-        // When our copy of the cutscene is over (its last word the arrival point it could not find), the event
-        // goes on and usually sets our respawn in the new map (the crow: Firelink's bonfire). Then we go.
-        const uint32_t me = game::player();
-        uint32_t hp = 0;
-        const bool alive = me && read32(me + 0x2D4, &hp) && static_cast<int>(hp) > 0;
-        const bool waited_long = now() - g_cut_own_at > 90.0;
-        if (here == static_cast<uint32_t>(g_cut_own_map)) {
+    const uint32_t me = game::player();
+    uint32_t hp = 0;
+    const bool alive = me && read32(me + 0x2D4, &hp) && static_cast<int>(hp) > 0;
+    const bool in_cutscene = rules::cutscene_loading() || rules::cutscene_playing();
+    if (g_cut_own_map != -1 && settled) {
+        // Our copy of the cutscene could not take us. Once it is over the event goes on and usually sets our respawn
+        // in the new map (the crow: Firelink's bonfire); give it 3 s, then go there, or to the bonfire the other
+        // player reports on arriving. Without either we stay: a warp without a bonfire lands outside the map.
+        if (in_map(g_cut_own_map)) {
             g_cut_own_map = -1;
-        } else if (alive && (cutscene_idle() || waited_long)) {
+        } else if (alive && !in_cutscene && now() - g_cut_own_at >= 3.0) {
             const int map = g_cut_own_map;
-            const int point = g_cut_own_point;
-            g_cut_own_map = -1;
-            int bonfire = game::last_bonfire();
-            if (game::bonfire_map(bonfire) != map && g_cut_hint_map == map) bonfire = g_cut_hint_bonfire;
-            if (g_cut_follow_map == map) g_cut_follow_map = -1;
-            cutscene_warp(map, point, bonfire, "Our cutscene could not take us, we go ourselves");
-            return;
+            const int bonfire = cutscene_bonfire(map);
+            if (bonfire >= 0) {
+                g_cut_own_map = -1;
+                if (g_cut_follow_map == map) g_cut_follow_map = -1;
+                cutscene_warp(map, bonfire, "Our cutscene could not take us, we go ourselves");
+                return;
+            }
+            if (now() - g_cut_own_at > 120.0) {
+                LOG_INFO("[coop] No bonfire of map %08X is known here: we stay where we are", map);
+                g_cut_own_map = -1;
+            }
         }
     }
     if (g_cut_map != -1) {
@@ -1781,29 +1786,36 @@ void cutscene_tick() {
         }
     }
     if (g_cut_follow_map == -1 || now() < g_cut_follow_at || !settled) return;
-    const uint32_t me = game::player();
-    uint32_t hp = 0;
-    if (!me || !read32(me + 0x2D4, &hp) || static_cast<int>(hp) <= 0) {
+    if (!alive) {
         if (now() - g_cut_follow_at > 60.0) g_cut_follow_map = -1;
         return;
     }
     const int map = g_cut_follow_map;
-    const int point = g_cut_follow_point;
-    const int bonfire = g_cut_follow_bonfire;
-    g_cut_follow_map = -1;
-    if (here == static_cast<uint32_t>(map)) {
+    if (in_map(map)) {
         LOG_INFO("[coop] Already in map %08X: no need to follow", map);
+        g_cut_follow_map = -1;
         return;
     }
+    if (g_cut_own_map == map) {
+        LOG_INFO("[coop] We go to map %08X ourselves once our cutscene is over", map);
+        g_cut_follow_map = -1;
+        return;
+    }
+    if (in_cutscene) {
+        // Our own copy is loading the map or playing (the crow's flight, then its arrival): it takes us itself.
+        if (now() - g_cut_follow_at < 120.0) return;
+        LOG_INFO("[coop] Our cutscene into map %08X is still not over after 2 minutes: following anyway", map);
+    }
+    g_cut_follow_map = -1;
     if (g_cut_map == map) {
         LOG_INFO("[coop] Our own cutscene into map %08X did not bring us there: following instead", map);
         g_cut_map = -1;
     }
-    if (g_cut_own_map == map) {
-        LOG_INFO("[coop] We go to map %08X ourselves once our cutscene is over", map);
-        return;
+    const int bonfire = game::bonfire_map(g_cut_follow_bonfire) == map ? g_cut_follow_bonfire : cutscene_bonfire(map);
+    if (!cutscene_warp(map, bonfire, "Following the cutscene")) {
+        LOG_INFO("[coop] No bonfire of map %08X is known here (the other player's is %d): we stay where we are", map,
+                 g_cut_follow_bonfire);
     }
-    cutscene_warp(map, point, bonfire, "Following the cutscene");
 }
 
 void set_callbacks() {

@@ -578,6 +578,11 @@ void probe_state(bool force) {
             put(" dialog %d res %d/%d", static_cast<int>(peek32(dlg)), static_cast<int>(peek32(dlg + 0x18)),
                 static_cast<int>(peek32(dlg + 0x1C)));
         }
+        // The dialog slots (MenuMan+0x9EC: index at +4, five slots of 0x34 from +8, +0x24 = requested), where
+        // the "items obtained" box waits to be shown.
+        char slots[6] = {};
+        for (int i = 0; i < 5; ++i) slots[i] = peek8(mm + 0x9F4 + i * 0x34 + 0x24) ? '1' : '0';
+        put(" slots %d:%s", static_cast<int>(peek32(mm + 0x9F0)), slots);
     }
     put(" box %s/%d", peek32(0x01378548) ? "yes" : "no", static_cast<int>(peek8(0x01378543)));
     char filter[64];

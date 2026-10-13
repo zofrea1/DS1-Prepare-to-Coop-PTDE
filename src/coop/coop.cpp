@@ -225,6 +225,7 @@ void hotkeys() {
 void tick_body() {
     coop::session::tick();
     coop::world::tick();
+    if (g_items) coop::items::tick();
     if (g_cfg.hotkeys) hotkeys();
     static ULONGLONG last_beat = 0;
     if (GetTickCount64() - last_beat > 60000) {

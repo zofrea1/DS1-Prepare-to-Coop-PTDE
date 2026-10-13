@@ -9,7 +9,9 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace coop::items {
 
@@ -20,7 +22,17 @@ constexpr uint32_t kCanUse = 0x00EADCA0;        // cdecl(goods, chr, ?, chr type
 constexpr uint32_t kPlayerVtable = 0x0118A5D4;  // PlayerIns
 constexpr int kUseGoodsSlot = 128;              // UseGoods(goods id, ?) thiscall, ret 8
 constexpr uint32_t kUseGoodsOrig = 0x00E50C70;
-constexpr uint32_t kAddItem = 0x00D664C0;       // Lua AddInventoryItem(id, category, count), stdcall
+// Lua AddInventoryItem(id, category, count), stdcall: the inventory's add (0xC0B700, stdcall(inventory,
+// category, id, count, 1, 0) -> slot, or -1 when full) and the "items obtained" box (0xD4BFA0 opens it; the
+// next frame 0xD4BD80 queues it in the dialog slots at MenuMan+0x9EC). Given inside the rest (Util_RequestRegene),
+// the box was never drawn and never dismissed, and the action buttons and every later dialog (Quit Game)
+// waited behind it for good (both 2026-10-12/13 tests with new characters, whose first rest hands out every
+// co-op item). The rest's gifts now wait until the player is back in control (stood up, no menu or dialog) and
+// come with the box then, as an item picked up in the world does.
+constexpr uint32_t kAddItem = 0x00D664C0;
+constexpr uint32_t kInventoryAdd = 0x00C0B700;
+constexpr uint32_t kMenuManVar = 0x013786D0;
+constexpr uint32_t kNoEventAnim[2] = {0x012E0C64, 0x012E0C68};  // the "none" handle pair (PlayerIns+0xFC/+0x100)
 constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, count). count <= 0 removes one stack.
 constexpr uint32_t kGoodsCategory = 0x40000000;
 constexpr int kCount = kLast - kFirst + 1;
@@ -236,11 +248,82 @@ int count(int32_t goods_id) {
 
 void give(int32_t goods_id, int n) {
     if (!game::in_game() || n <= 0) return;
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return;
+    int slot = -1;
     __try {
-        using Fn = uint32_t(__stdcall*)(int32_t, uint32_t, int32_t);
-        reinterpret_cast<Fn>(kAddItem)(goods_id, kGoodsCategory, n);
+        using Fn = int(__stdcall*)(uint32_t, uint32_t, int32_t, int32_t, int32_t, int32_t);
+        slot = reinterpret_cast<Fn>(kInventoryAdd)(pgd + 0x1B8, kGoodsCategory, goods_id, n, 1, 0);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LOG_ERROR("[coop] Giving item %d failed", goods_id);
+        return;
+    }
+    if (slot == -1) LOG_INFO("[coop] Item %d did not fit in the inventory", goods_id);
+}
+
+namespace {
+
+std::vector<int32_t> g_owed;  // the rest's gifts, given once the player is back in control
+ULONGLONG g_owed_at = 0;
+ULONGLONG g_free_since = 0;
+
+bool add_with_box(int32_t goods_id) {
+    __try {
+        using Fn = uint32_t(__stdcall*)(int32_t, uint32_t, int32_t);
+        reinterpret_cast<Fn>(kAddItem)(goods_id, kGoodsCategory, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("[coop] Giving item %d failed", goods_id);
+        return false;
+    }
+}
+
+// Standing in the world: alive, no event animation (a bonfire's sit, rest and stand-up hold one), no menu, no
+// dialog requested or open.
+bool in_control() {
+    if (!game::in_game()) return false;
+    const uint32_t me = game::player();
+    uint32_t hp = 0, h0 = 0, h1 = 0, n0 = 0, n1 = 0;
+    if (!read32(me + 0x2D4, &hp) || static_cast<int>(hp) <= 0) return false;
+    if (!read32(me + 0xFC, &h0) || !read32(me + 0x100, &h1) || !read32(kNoEventAnim[0], &n0) ||
+        !read32(kNoEventAnim[1], &n1) || h0 != n0 || h1 != n1) {
+        return false;
+    }
+    uint32_t mm = 0, request = 0, dialog = 0;
+    if (!read32(kMenuManVar, &mm) || mm < 0x10000 || !read32(mm + 0x60, &request) || request != 0) return false;
+    static const uint32_t kOpen[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC};
+    for (uint32_t off : kOpen) {
+        uint8_t open = 1;
+        if (!read8(mm + off, &open) || open) return false;
+    }
+    if (read32(mm + 0x9E8, &dialog) && dialog > 0x10000) {
+        uint32_t text = 0;
+        if (read32(dialog, &text) && text != 0) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+void tick() {
+    if (g_owed.empty()) return;
+    if (!game::player_game_data()) {
+        g_owed.clear();  // back at the title: they were that character's
+        return;
+    }
+    const ULONGLONG t = GetTickCount64();
+    if (!in_control()) {
+        g_free_since = 0;
+        return;
+    }
+    if (!g_free_since) g_free_since = t;
+    if (t - g_free_since < 1000 || t - g_owed_at < 2000) return;
+    const std::vector<int32_t> owed = std::move(g_owed);
+    g_owed.clear();
+    // One box: each add after the first goes into the box the first one opened.
+    for (int32_t id : owed) {
+        if (count(id) > 0) continue;
+        if (add_with_box(id)) LOG_INFO("[coop] Gave co-op item %d", id);
     }
 }
 
@@ -345,10 +428,17 @@ void remove_all(int32_t goods_id) {
 
 void grant_missing() {
     if (!game::in_game()) return;
+    int queued = 0;
     for (int32_t id = kFirst; id <= kLast; ++id) {
         if (id == kBlossom || count(id) > 0) continue;
-        give(id, 1);
-        LOG_INFO("[coop] Gave co-op item %d", id);
+        if (std::find(g_owed.begin(), g_owed.end(), id) != g_owed.end()) continue;
+        g_owed.push_back(id);
+        ++queued;
+    }
+    if (queued) {
+        g_owed_at = GetTickCount64();
+        g_free_since = 0;
+        LOG_INFO("[coop] %d co-op item(s) to give once the rest is over", queued);
     }
 }
 

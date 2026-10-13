@@ -1754,6 +1754,28 @@ struct CutWait {
     int last_state = -2;
 } g_cut_wait;
 
+// The block is asked for right before each WorldRes update (0xDD9E30: eax = WorldRes, stdcall(float dt)), from
+// its two callers, the field update 0xDE85D0 and the map load's 0xDE8970: a block that misses one update while it
+// loads goes back to "not loaded" (0xDDE930 states 1, 2 and 6), and the co-op tick runs with Steam's callbacks,
+// not with the game's frames.
+constexpr uint32_t kWorldResUpdate = 0x00DD9E30;
+constexpr uint32_t kWorldResUpdateSites[2] = {0x00DE86C3, 0x00DE89A6};
+uint32_t g_world_res_update = kWorldResUpdate;
+
+void __stdcall before_world_res_update(uint32_t wr) {
+    if (g_cut_wait.active && g_cut_wait.block >= 0) want_block(wr, g_cut_wait.block);
+}
+
+__declspec(naked) void hk_world_res_update() {
+    __asm {
+        pushad
+        push eax  // WorldRes
+        call before_world_res_update
+        popad
+        jmp dword ptr [g_world_res_update]
+    }
+}
+
 void give_up_cutscene(const char* why) {
     LOG_INFO("[coop] Our cutscene into map %08X cannot take us (%s): the session takes us there instead", g_cut_wait.map,
              why);
@@ -1811,6 +1833,7 @@ void cut_wait_tick() {
         give_up_cutscene("its map left this world's list");
         return;
     }
+    g_cut_wait.block = block;
     want_block(wr, block);
     const int state = block_state(wr, block);
     if (state != g_cut_wait.last_state) {
@@ -2476,6 +2499,10 @@ int install() {
     failed += install_one("cutscenes into another map take every player", install_cut_warp());
     failed += install_one("cutscene arrival point lookup",
                           redirect_call(kPointLookupSite, kPointLookup, reinterpret_cast<void*>(&hk_point_lookup)));
+    for (uint32_t site : kWorldResUpdateSites) {
+        failed += install_one("a cutscene's map is loaded for it",
+                              redirect_call(site, kWorldResUpdate, reinterpret_cast<void*>(&hk_world_res_update)));
+    }
     failed += install_one("bonfire party check", redirect_call(0x00D58AE4, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
     failed += install_one("bonfire foes check",
                           redirect_call(kBonfireFoesSite, kBonfireFoes, reinterpret_cast<void*>(&hk_bonfire_foes)));

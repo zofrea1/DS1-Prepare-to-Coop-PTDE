@@ -1518,21 +1518,81 @@ constexpr uint32_t kCutWarpSite = 0x00BC0378;  // cmp eax,2710h ; jne +3 ; mov e
 constexpr int kLocalPlayerEntity = 10000;
 void (*g_cutscene_fn)(int map, int point) = nullptr;
 
+// The request itself (0xD75190, eax = player entity, stdcall(cutscene, method, map, point, 0, 0)) first looks the
+// arrival point up (0xD6C490: eax = point, edi = position out, stdcall(rotation out) -> al): a point of a map whose
+// data is not loaded is not found, and then neither the cutscene nor the warp happens. The event loads it a few
+// instructions earlier (the crow's 11810000: Prefetch Request before the cutscenes). A game that runs the event
+// because another player's game set it off joins at that player's instruction, after the prefetch: the host saw
+// the crow carry the guest away and was left in the Asylum, three tests running (2026-10-13). The lookup is
+// watched for the cutscenes above; when it fails, the session warps our player there itself as soon as our copy
+// of the cutscene is over (see take_failed_cutscene).
+constexpr uint32_t kPointLookupSite = 0x00D751D2;  // call 0xD6C490 in 0xD75190
+constexpr uint32_t kPointLookup = 0x00D6C490;
+struct CutCheck {
+    bool active = false;
+    int map = -1;
+    int point = -1;
+} g_cut_check;
+struct CutFailed {
+    bool pending = false;
+    int map = -1;
+    int point = -1;
+} g_cut_failed;
+
+void __stdcall note_point_lookup(int point, int ok) {
+    if (!g_cut_check.active) return;
+    g_cut_check.active = false;
+    if (point != g_cut_check.point) return;
+    if (ok) {
+        LOG_INFO("[coop] The cutscene's arrival point %d is loaded here: the game takes us to map %08X", point,
+                 g_cut_check.map);
+        return;
+    }
+    LOG_INFO("[coop] The cutscene's arrival point %d is not loaded in our game (map %08X): we go there ourselves "
+             "when the cutscene is over", point, g_cut_check.map);
+    g_cut_failed.pending = true;
+    g_cut_failed.map = g_cut_check.map;
+    g_cut_failed.point = point;
+}
+
+// eax = point, edi = position out, [esp+4] = rotation out; ret 4, al = found. edi, esi, ebx, ebp are kept.
+__declspec(naked) void hk_point_lookup() {
+    __asm {
+        push eax                  // the point
+        push dword ptr [esp + 8]  // the rotation out pointer (the caller's argument)
+        mov eax, [esp + 4]
+        mov edx, kPointLookup
+        call edx                  // ret 4 drops the pushed argument
+        pop edx                   // the point
+        push eax                  // the result
+        push ecx
+        movzx ecx, al
+        push ecx
+        push edx
+        call note_point_lookup
+        pop ecx
+        pop eax
+        ret 4
+    }
+}
+
 int __stdcall cut_warp_target(int entity, int area, int block, int point) {
     if (!seamless_rules()) return entity;
     const int dest = (area << 24) | (block << 16);
     const int here = game::map_id();
     if (here == -1 || (static_cast<uint32_t>(here) & 0xFFFF0000u) == static_cast<uint32_t>(dest)) return entity;
-    if (entity == kLocalPlayerEntity) {
-        LOG_INFO("[coop] Cutscene takes us to map %08X (point %d): the others follow once we are there", dest, point);
-        if (g_cutscene_fn) g_cutscene_fn(dest, point);
-        return entity;
-    }
     if (entity < kLocalPlayerEntity || entity > kLocalPlayerEntity + 10) {
         LOG_INFO("[coop] Cutscene into map %08X for entity %d is left to the game", dest, entity);
         return entity;
     }
-    LOG_INFO("[coop] Cutscene into map %08X set off by another player (entity %d): it takes us along", dest, entity);
+    if (entity == kLocalPlayerEntity) {
+        LOG_INFO("[coop] Cutscene takes us to map %08X (point %d): the others follow once we are there", dest, point);
+    } else {
+        LOG_INFO("[coop] Cutscene into map %08X set off by another player (entity %d): it takes us along", dest, entity);
+    }
+    g_cut_check.active = true;  // the request's point lookup comes next (hk_point_lookup)
+    g_cut_check.map = dest;
+    g_cut_check.point = point;
     if (g_cutscene_fn) g_cutscene_fn(dest, point);
     return kLocalPlayerEntity;
 }
@@ -1916,6 +1976,13 @@ State& state() { return g_state; }
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
 void set_cutscene_listener(void (*fn)(int map, int point)) { g_cutscene_fn = fn; }
+bool take_failed_cutscene(int* map, int* point) {
+    if (!g_cut_failed.pending) return false;
+    g_cut_failed.pending = false;
+    *map = g_cut_failed.map;
+    *point = g_cut_failed.point;
+    return true;
+}
 void note_world_reset() { g_world_reset_at = GetTickCount64(); }
 
 void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
@@ -2090,6 +2157,8 @@ int install() {
     failed += install_one("guest's own items", install_items() == 0);
     failed += install_one("guest's own item and conversation flags", install_flag_store());
     failed += install_one("cutscenes into another map take every player", install_cut_warp());
+    failed += install_one("cutscene arrival point lookup",
+                          redirect_call(kPointLookupSite, kPointLookup, reinterpret_cast<void*>(&hk_point_lookup)));
     failed += install_one("bonfire party check", redirect_call(0x00D58AE4, kHasParty, reinterpret_cast<void*>(&hk_has_party)));
     failed += install_one("bonfire foes check",
                           redirect_call(kBonfireFoesSite, kBonfireFoes, reinterpret_cast<void*>(&hk_bonfire_foes)));

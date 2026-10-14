@@ -1,2 +1,5 @@
 build/
 __pycache__/
+# Reference images from the game itself, kept locally only (the title movie tool reads Title-original-PTDE.png)
+assets/Title-original-PTDE.png
+assets/Title-guide.png

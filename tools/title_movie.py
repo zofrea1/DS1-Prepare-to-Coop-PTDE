@@ -216,6 +216,9 @@ def main():
     ffmpeg = find_ffmpeg(args.ffmpeg)
     work = args.keep or tempfile.mkdtemp(prefix='ptc-title-')
     try:
+        if not os.path.exists(args.old):
+            sys.exit('%s is missing: save the game\'s own 512 x 512 "Title" texture (menu/english/menu_local.tpf) '
+                     'there as a PNG, or pass --old. It is not in the repository.' % args.old)
         frames = decode(ffmpeg, args.movie, os.path.join(work, 'original'))
         old_tex = load(args.old)
         new_tex = load(args.new)

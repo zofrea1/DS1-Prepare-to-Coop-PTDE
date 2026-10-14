@@ -54,8 +54,11 @@ such features (Remastered's online play needs FromSoftware's servers, which that
 PREPARE TO DIE EDITION. The logo is the game's 512 x 512 `Title` texture (`menu/english/menu_local.tpf`) with new
 edition lines, built into the mod from `assets/PrepareToCoop-Title.png` and swapped in as the game creates the
 texture (`D3DXCreateTextureFromFileInMemory(Ex)`). To try other art, save it as `PrepareToCoop-Title.png` (or
-`.dds`) next to `DARKSOULS.exe`; `assets/Title-guide.png` shows which parts of the texture the game uses.
-After changing the built-in PNG, run `tools/embed_title.py` and rebuild.
+`.dds`) next to `DARKSOULS.exe`: a 512 x 512 RGBA PNG on solid black. The game cuts "DARK SOULS" from three
+pieces of it, (0,0)-(512,170), (0,170)-(512,340) and (0,340)-(155,510); leave those as they are. The edition
+text lives in (155,340)-(512,510), and the original's lines fill (178,343)-(505,433), the safest fit. The
+original text is about RGB 222, 203, 189. After changing the built-in PNG, run
+`tools/embed_title.py` and rebuild.
 
 Before the logo, the title screen plays `movWW/frpg_title.wmv`, which zooms the logo in and fades the edition line
 in under it, ending on the texture's picture. The mod plays `PrepareToCoop-Title.wmv` in its place: the same movie

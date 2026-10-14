@@ -30,8 +30,8 @@ works.
 - **DXVK** 3.1.1 (`dxvk_d3d9.dll` in a release, unmodified): zlib/libpng License, Copyright (c) 2017 Philip
   Rebohle, (c) 2019 Joshua Ashton, (c) 2019 Robin Kertels. See `fps-unlock/third_party/dxvk/LICENSE` (in a
   release, `DXVK-LICENSE.txt`).
-- **Title logo and movie** (`assets/PrepareToCoop-Title.png`, `assets/PrepareToCoop-Title.wmv`,
-  `assets/Title-guide.png`, `assets/Title-original-PTDE.png`, and `src/title_art.inc` made from the logo):
+- **Title logo and movie** (`assets/PrepareToCoop-Title.png`, `assets/PrepareToCoop-Title.wmv`, and
+  `src/title_art.inc` made from the logo):
   derived from Dark Souls: Prepare to Die Edition's own title screen, © Bandai Namco Entertainment Inc. and
   FromSoftware, Inc. They are not covered by the GNU GPL or the MIT License and are included only so the mod
   can show its title screen in the game.

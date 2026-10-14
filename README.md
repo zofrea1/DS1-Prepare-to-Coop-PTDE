@@ -85,7 +85,7 @@ build.bat
 
 `build.bat` compiles the FPS Unlock's sources (`fps-unlock\src\ptde\sources.txt`) together with this repository's (`src\sources.txt`) into `build\xinput1_3.dll`, writes `build\PTDE-FPS-Unlock.ini` (`PrepareToCoop.ini` followed by the FPS Unlock's INI) and fetches DXVK through the FPS Unlock's script. The co-op plugs into the FPS Unlock's start-up through `fps-unlock\src\ptde\extension.h`; `src\extension.cpp` replaces its `extension_none.cpp`. `package_release.bat` makes the release zip. To move to a newer FPS Unlock, check out its release in `fps-unlock`, rebuild and commit the submodule.
 
-`tools\build_title_movie.bat` remakes the title movie from the game's own and `assets\PrepareToCoop-Title.png`; `tools\embed_title.py` remakes `src\title_art.inc` from the PNG.
+`tools\build_title_movie.bat` remakes the title movie from the game's own and `assets\PrepareToCoop-Title.png`. It also needs the game's original title texture (the 512 x 512 `Title` texture in `menu/english/menu_local.tpf`, saved as a PNG) as `assets\Title-original-PTDE.png`; that file is the game's own and is not in the repository. `tools\embed_title.py` remakes `src\title_art.inc` from the PNG.
 
 ## Credits
 

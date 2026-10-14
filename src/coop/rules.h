@@ -81,6 +81,7 @@ struct RemotePlayer {
     bool known = false;    // matched to a session player
     bool invader = false;  // that player invades
     bool host = false;     // that player hosts (we are a guest)
+    int map = -1;          // the map that player last reported standing in (-1 unknown)
 };
 void set_remote_players(const std::vector<RemotePlayer>& players);
 

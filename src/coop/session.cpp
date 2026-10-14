@@ -1613,6 +1613,7 @@ void update_remote_players() {
             rp.known = true;
             rp.invader = m.peer->invader;
             rp.host = m.peer->id == g_host && g_role == Role::Guest;
+            rp.map = m.peer->map;
             matched[m.chr] = m.peer->id;
         }
         out.push_back(rp);

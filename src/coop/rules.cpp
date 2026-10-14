@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <set>
@@ -721,11 +722,48 @@ bool shared_flag(int id) {
            !g_contested.count(id);
 }
 
+// The map event whose instruction is running: the EMEVD dispatcher (0xBC3AB0, called from the event update
+// 0xBBF3B0) takes the event in eax. 0 outside map events (Lua, talk, the engine).
+constexpr uint32_t kEventStep = 0x00BC3AB0;
+void* g_event_step_orig = nullptr;
+uint32_t g_cur_event = 0;
+
+__declspec(naked) void hk_event_step() {
+    __asm {
+        push dword ptr [g_cur_event]
+        mov dword ptr [g_cur_event], eax
+        call dword ptr [g_event_step_orig]
+        pop dword ptr [g_cur_event]
+        ret
+    }
+}
+
+// The 5000 block of a map's flags (xxxx5xxx) is its working state: timers, who stands where, which attack
+// comes next. An event can switch its network sync off (2000[02] Set Network Sync State: FrpgEmkEventIns+0x50
+// = 0, checked by the sender 0xBC42D0); the game then never tells the other players about that run, and what
+// it sets stays in the game that ran it. The Hellkite's 20 s and 60 s timers are such flags (11015305 from
+// event 11015304, 11015315 from 11010852). Sent across, the timer of the host's game, far away at Firelink,
+// started the guest's dragon on the bridge (2026-10-13 test). Such flags stay in their game here too. Flags
+// outside the 5000 block are kept shared even from those events: boss kills (9, 10, 11) and arrivals
+// (11020001) are set that way, and a player whose game never saw the kill still needs them.
+bool local_working_flag(int id) {
+    if (!g_cur_event || id < 10000000 || (id / 1000) % 10 != 5) return false;
+    uint32_t sync = 1, event_id = 0;
+    if (!read32(g_cur_event + 0x50, &sync) || (sync & 0xFF) != 0) return false;
+    static std::set<int> logged;
+    if (logged.size() < 40 && logged.insert(id).second) {
+        read32(g_cur_event + 0x28, &event_id);
+        LOG_INFO("[coop] Flag %d stays in this game (event %d does not sync its runs)", id,
+                 static_cast<int>(event_id));
+    }
+    return true;
+}
+
 void __stdcall before_set_flag(int id) {
     g_old_value = -1;
     if (g_flag_quiet) return;
     if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return;
-    if (!seamless_rules() || !shared_flag(id)) return;
+    if (!seamless_rules() || !shared_flag(id) || local_working_flag(id)) return;
     g_old_value = game::flag(id) ? 1 : 0;
 }
 
@@ -1574,6 +1612,104 @@ void __fastcall hk_multiplay_test(uint8_t* cond, void* edx, float dt, uint8_t* e
         }
     }
     cond[8] = static_cast<uint8_t>((cond[8] & 0xFE) | (pass ? 1 : 0));
+}
+
+// A run of a map event that another player's game started reaches this game as an event sync (FrpgEmkEventIns
+// slot 4, 0xBC4000: thiscall(event, connection, type, data, size), ret 0x10). Types 1 and 2 move the event's
+// program counter (+0x20 points at it) past the condition that passed there, and set its player (+0x44 = 10001 +
+// that player's slot, so "the player" 10000 of the run is them) and +0x38. In the game's co-op only the host's
+// game runs most map events, so what arrives is the world's own state. In seamless co-op every game runs them,
+// also for maps its player is not in: the host standing at Firelink still ran the Undead Burg's Hellkite events,
+// judged their "every player outside the bridge" tests from there, and those runs reached the guest on the
+// bridge, whose dragon then played the host's moves on top of its own (2026-10-13 test, 19:24-19:27). A run
+// counts for the other games only if the player whose game ran it stands in that event's map; any other run is
+// put back here and this game's copy of the event goes on from where it was. Common events (ids below
+// 10000000) belong to no map and always count, as does a run whose player's map is not known.
+constexpr uint32_t kEmkEventVtable = 0x011DCDA8;
+constexpr uint32_t kEventSync = 0x00BC4000;
+using EventSyncFn = void(__fastcall*)(uint8_t*, void*, uint32_t, uint32_t, uint32_t, uint32_t);
+uint32_t g_event_sync_orig = 0;
+
+// The map of a map event: ids 1AABxxxx are area AA, block B (11015302: m10_01, 0A010000). -1 for common events.
+int event_map(int id) {
+    if (id < 10000000 || id >= 20000000) return -1;
+    return ((id / 100000) % 100) << 24 | ((id / 10000) % 10) << 16;
+}
+
+// The map last reported by the player whose character is "the player" entity of a run (10001 + slot), -1 unknown.
+int remote_player_map(int entity) {
+    const int slot = entity - 10001;
+    for (const RemotePlayer& r : g_remote) {
+        uint32_t s = 0;
+        if (r.known && r.chr && read32(r.chr + 0x410, &s) && static_cast<int>(s) == slot) return r.map;
+    }
+    return -1;
+}
+
+void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t type, uint32_t data, uint32_t size) {
+    const uint32_t e = reinterpret_cast<uint32_t>(ev);
+    uint32_t pc = 0, who = 0, seq = 0;
+    const bool saved = ev && read32(e + 0x20, &pc) && pc && read32(e + 0x44, &who) && read32(e + 0x38, &seq);
+    const uint16_t at = saved ? *ptr<uint16_t>(pc) : 0;
+    reinterpret_cast<EventSyncFn>(g_event_sync_orig)(ev, edx, conn, type, data, size);
+    if (!saved || !g_world_events || !seamless_rules()) return;
+    const int by = *ptr<int>(e + 0x44);
+    if (by < 10001 || by > 10010) return;
+    if (static_cast<uint32_t>(by) == who && *ptr<uint16_t>(pc) == at) return;  // the packet changed nothing
+    const int id = *ptr<int>(e + 0x28);
+    const int map = event_map(id);
+    if (map == -1) return;
+    const int theirs = remote_player_map(by);
+    if (theirs == -1 || (static_cast<uint32_t>(theirs) & 0xFFFF0000) == static_cast<uint32_t>(map)) return;
+    *ptr<uint16_t>(pc) = at;
+    *ptr<uint32_t>(e + 0x44) = who;
+    *ptr<uint32_t>(e + 0x38) = seq;
+    static std::map<int, int> counts;
+    const int n = ++counts[id];
+    if (counts.size() <= 40 && (n == 1 || n == 10 || n == 100)) {
+        LOG_INFO("[coop] Event %d: a run from a player in map %08X is not taken here (the event is map %08X's; %d so far)",
+                 id, theirs, map, n);
+    }
+}
+
+// Randomly Set Event Flag In Range (2003[17]: 0xD6C9C0 called from 0xBC1FA6, stdcall(proxy, on), eax = last
+// flag, edi = first, esi = the event). In the game's co-op it runs on the host only (a "SKIP IF client" before
+// it), so one game picks and the pick reaches the others with the run's other flags. In seamless co-op the run
+// that one game started ran again in the other game (event sync) and picked again: the guest's game picked
+// 11015322 for the Hellkite, the host's copy of the same run picked 11015333, both flags reached both games and
+// two attack events fired at once (2026-10-13, 19:27:00). A run that another player's game started (its player
+// is that player, not 10000) leaves the pick to that game, whose flag arrives here.
+constexpr uint32_t kRandomFlagSite = 0x00BC1FA6;
+constexpr uint32_t kRandomFlag = 0x00D6C9C0;
+uint32_t g_random_flag = kRandomFlag;
+
+bool __stdcall random_pick_here(uint32_t ev, int first, int last) {
+    if (!g_world_events || !seamless_rules() || !ev) return true;
+    uint32_t by = 10000, id = 0;
+    if (!read32(ev + 0x44, &by) || static_cast<int>(by) < 10001 || by > 10010) return true;
+    read32(ev + 0x28, &id);
+    static int lines = 0;
+    if (++lines <= 30) {
+        LOG_INFO("[coop] Event %d: the random pick among flags %d-%d is left to the game that started this run",
+                 static_cast<int>(id), first, last);
+    }
+    return false;
+}
+
+__declspec(naked) void hk_random_flag() {
+    __asm {
+        pushad
+        push eax  // last flag
+        push edi  // first flag
+        push esi  // the event
+        call random_pick_here
+        test al, al
+        popad
+        jz skip
+        jmp dword ptr [g_random_flag]
+    skip:
+        ret 8
+    }
 }
 
 // ---------------------------------------------------------------- a cutscene that leaves the map takes everyone
@@ -2565,6 +2701,17 @@ int install() {
             detour(kMultiplayTest, k, sizeof(k), reinterpret_cast<void*>(&hk_multiplay_test)));
         failed += install_one("world events (multiplayer state test)", g_multiplay_orig != nullptr);
     }
+    {
+        // push ecx ; mov ecx,[eax+78h] ; mov ecx,[ecx]
+        static const uint8_t k[6] = {0x51, 0x8B, 0x48, 0x78, 0x8B, 0x09};
+        g_event_step_orig = detour(kEventStep, k, sizeof(k), reinterpret_cast<void*>(&hk_event_step));
+        failed += install_one("map event working flags stay local", g_event_step_orig != nullptr);
+    }
+    failed += install_one("map event runs from another map",
+                          swap_pointer(kEmkEventVtable + 4 * 4, kEventSync, reinterpret_cast<void*>(&hk_event_sync),
+                                       &g_event_sync_orig));
+    failed += install_one("random picks of another game's runs",
+                          redirect_call(kRandomFlagSite, kRandomFlag, reinterpret_cast<void*>(&hk_random_flag)));
     failed += install_one("Black Separation Crystal (guest)",
                           redirect_call(kSepGuestSite, kSepGuestOrig, reinterpret_cast<void*>(&hk_separation_guest)));
     failed += install_one("Black Separation Crystal (host)",
@@ -2596,6 +2743,136 @@ void track_safe_position() {
     g_spots[g_spot_next] = SafeSpot{t, pos, game::map_id()};
     g_spot_next = (g_spot_next + 1) % 32;
     if (g_spot_count < 32) ++g_spot_count;
+}
+
+// What happens to our bloodstain, for the report of 2026-10-13 ("the bloodstain, at least for the guest, is not
+// working properly"; both of the guest's stains had been written where the game puts them). Logged when it
+// changes: where we died; the record (GameDataMan+0x18 exists, [+0x1C]: +0 position, +0x34 humanity, +0x38
+// souls, +0x3C map), which the game takes from where our replay record starts, up to about 9 s before the death
+// (28 samples of 1/3 s); its marker (BloodStainMan = [LuaEvents+0xC]: +0x60 position object, +0x68 effect),
+// which every load puts back (0xEE2E90 -> 0xDB6010); standing within the 1.2 m the game offers it from; taking it.
+constexpr uint32_t kLuaEventsVar = 0x0137D790;
+constexpr float kStainReach = 1.2f;  // FrpgEventConditionSelfBlood (0xD5B330): radius DAT_01160784
+
+bool read_vec(uint32_t addr, game::Vec3* out) {
+    uint32_t v[3] = {};
+    if (!read32(addr, &v[0]) || !read32(addr + 4, &v[1]) || !read32(addr + 8, &v[2])) return false;
+    std::memcpy(out, v, sizeof(v));
+    return true;
+}
+
+float distance(const game::Vec3& a, const game::Vec3& b) {
+    const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+void track_bloodstain() {
+    static double last = 0;
+    static int lines = 0;
+    const double t = seconds();
+    if (t - last < 0.25 || lines > 150 || !game::in_game()) return;
+    last = t;
+    auto log_line = [&](const char* fmt, auto... args) {
+        ++lines;
+        LOG_INFO(fmt, args...);
+    };
+    const uint32_t me = game::player();
+    game::Vec3 here{};
+    const bool placed = me && !game::loading() && game::position(&here, nullptr);
+    // Our death.
+    static bool dead = false;
+    static game::Vec3 died_at{};
+    static bool died_known = false;
+    uint32_t hp = 1;
+    if (placed && read32(me + 0x2D4, &hp)) {
+        if (static_cast<int>(hp) <= 0 && !dead) {
+            dead = true;
+            died_at = here;
+            died_known = true;
+            log_line("[coop] We died at (%.1f, %.1f, %.1f) map %08X", here.x, here.y, here.z, game::map_id());
+        } else if (static_cast<int>(hp) > 0) {
+            dead = false;
+        }
+    }
+    // The record.
+    const uint32_t gdm = game::game_data_man();
+    uint32_t flags = 0, rec = 0, map = 0, souls = 0, humanity = 0;
+    game::Vec3 at{};
+    if (!gdm || !read32(gdm + 0x18, &flags) || !read32(gdm + 0x1C, &rec) || !rec || !read_vec(rec, &at) ||
+        !read32(rec + 0x3C, &map) || !read32(rec + 0x38, &souls) || !read32(rec + 0x34, &humanity)) {
+        return;
+    }
+    const bool exists = (flags & 0xFF) != 0;
+    static bool seen_exists = false;
+    static game::Vec3 seen_at{};
+    static uint32_t seen_map = 0;
+    static int seen_souls = 0;
+    static bool seen_once = false;
+    static bool standing = false;
+    const int player_souls = game::souls();
+    static int souls_at_stain = -1;
+    if (!seen_once || exists != seen_exists || (exists && (distance(at, seen_at) > 0.05f || map != seen_map ||
+                                                           static_cast<int>(souls) != seen_souls))) {
+        if (exists) {
+            char from_death[64] = "";
+            if (died_known) std::snprintf(from_death, sizeof(from_death), ", %.1f m from where we died", distance(at, died_at));
+            log_line("[coop] Bloodstain: at (%.1f, %.1f, %.1f) map %08X with %d souls and %d humanity%s", at.x, at.y,
+                     at.z, map, static_cast<int>(souls), static_cast<int>(humanity), from_death);
+        } else if (seen_once && seen_exists) {
+            if (standing && souls_at_stain >= 0) {
+                log_line("[coop] Bloodstain taken: souls %d -> %d", souls_at_stain, player_souls);
+            } else {
+                log_line("[coop] Bloodstain: gone (we were not standing at it)");
+            }
+        } else if (!seen_once) {
+            log_line("[coop] Bloodstain: none");
+        }
+        seen_exists = exists;
+        seen_at = at;
+        seen_map = map;
+        seen_souls = static_cast<int>(souls);
+        seen_once = true;
+        died_known = died_known && exists;
+    }
+    if (!placed) return;
+    // The marker, once the map is in.
+    uint32_t lua = 0, man = 0, pos_obj = 0, effect = 0;
+    read32(kLuaEventsVar, &lua);
+    if (lua) read32(lua + 0xC, &man);
+    if (man) {
+        read32(man + 0x60, &pos_obj);
+        read32(man + 0x68, &effect);
+    }
+    const int marker = (man ? 1 : 0) + (pos_obj ? 2 : 0) + (effect ? 4 : 0);
+    static int seen_marker = -1;
+    static game::Vec3 seen_marker_at{};
+    game::Vec3 marker_at{};
+    const bool marker_placed = pos_obj && read_vec(pos_obj, &marker_at);
+    if (marker != seen_marker || (marker_placed && distance(marker_at, seen_marker_at) > 0.05f)) {
+        if (marker_placed) {
+            log_line("[coop] Bloodstain marker at (%.1f, %.1f, %.1f), effect %s; we are %.1f m from it", marker_at.x,
+                     marker_at.y, marker_at.z, effect ? "on" : "off", distance(marker_at, here));
+        } else {
+            log_line("[coop] Bloodstain marker: none (manager %s, record %s)", man ? "present" : "missing",
+                     exists ? "exists" : "empty");
+        }
+        seen_marker = marker;
+        seen_marker_at = marker_at;
+    }
+    // Standing at it.
+    if (exists && marker_placed) {
+        const float d = distance(marker_at, here);
+        if (d <= kStainReach && !standing) {
+            standing = true;
+            souls_at_stain = player_souls;
+            log_line("[coop] At our bloodstain (%.1f m; the game offers it within %.1f m)", d, kStainReach);
+        } else if (d > kStainReach + 1.0f && standing) {
+            standing = false;
+            log_line("[coop] Left our bloodstain without taking it (%.1f m)", d);
+        }
+    } else if (!exists) {
+        standing = false;
+    }
 }
 
 // A guest keeps the chr type they joined with (own_chr_type): every arrival in the host's world puts it back
@@ -2642,6 +2919,7 @@ void tick() {
         if (g_state.active && !g_state.invader) track_safe_position();
         track_own_chr_type();
     }
+    track_bloodstain();
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();
 }

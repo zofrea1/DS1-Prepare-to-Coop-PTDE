@@ -1,5 +1,6 @@
 #include "title.h"
 
+#include "coop/hook.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -130,13 +132,23 @@ bool read_file(const std::wstring& path, std::vector<uint8_t>* out) {
     return true;
 }
 
-// PrepareToCoop-Title.png or .dds next to the game, for trying new art without a rebuild.
-bool load_art_file() {
+std::wstring game_dir() {
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring dir(exe);
     const size_t slash = dir.find_last_of(L"\\/");
-    dir = slash == std::wstring::npos ? L"" : dir.substr(0, slash + 1);
+    return slash == std::wstring::npos ? L"" : dir.substr(0, slash + 1);
+}
+
+std::string narrow(const std::wstring& w) {
+    char out[MAX_PATH * 3] = {};
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out, sizeof(out), nullptr, nullptr);
+    return out;
+}
+
+// PrepareToCoop-Title.png or .dds next to the game, for trying new art without a rebuild.
+bool load_art_file() {
+    const std::wstring dir = game_dir();
     for (const wchar_t* name : {L"PrepareToCoop-Title.png", L"PrepareToCoop-Title.dds"}) {
         std::vector<uint8_t> data;
         if (!read_file(dir + name, &data)) continue;
@@ -154,6 +166,122 @@ bool load_art_file() {
     return false;
 }
 
+// The title movie. Before the menu draws the logo texture, the title screen plays movWW/frpg_title.wmv, which
+// zooms the logo in and fades "PREPARE TO DIE(tm) EDITION" in under it; its last frame is the texture's picture.
+// The movie player (0xF7EF80) builds "movww:/<name>.wmv", resolves it to a file path and hands that to
+// 0xF7E6F0 (from its only call, at 0xF7F10C), which queues it for the movie thread; that thread passes the path to
+// IGraphBuilder::AddSourceFilter next to the game's RGB24 "TEXTURERENDERER" filter (0x7A7610). The path is swapped
+// in that call for PrepareToCoop-Title.wmv, the same movie with PREPARE TO CO-OP EDITION (made by
+// tools/build_title_movie.bat): the copy next to the game if there is one, otherwise the one built into the DLL,
+// written once to the temp folder. 0xF7E6F0 takes edi (the player) and xmm1 (a float argument) besides its five
+// stack arguments, so the hook keeps every register.
+constexpr uint32_t kMovieOpenCall = 0x00F7F10C;
+constexpr uint32_t kMovieOpen = 0x00F7E6F0;
+constexpr int kMovieResource = 101;  // RCDATA in ptde.rc
+uint32_t g_movie_open = kMovieOpen;
+std::wstring g_movie_path;
+std::string g_movie_from;
+LONG g_movie_swaps = 0;
+
+bool is_title_movie_guarded(const wchar_t* path) {
+    __try {
+        const wchar_t* name = path;
+        for (const wchar_t* p = path; *p; ++p) {
+            if (*p == L'\\' || *p == L'/') name = p + 1;
+        }
+        return _wcsicmp(name, L"frpg_title.wmv") == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+const wchar_t* __cdecl title_movie_path(const wchar_t* path) {
+    if (!path || g_movie_path.empty() || !is_title_movie_guarded(path)) return path;
+    if (GetFileAttributesW(g_movie_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        LOG_ERROR("Title: %s is gone; the game's own title movie plays", narrow(g_movie_path).c_str());
+        return path;
+    }
+    if (InterlockedIncrement(&g_movie_swaps) <= 4) {
+        LOG_INFO("Title: the title movie plays PREPARE TO CO-OP EDITION (%s)", g_movie_from.c_str());
+    }
+    return g_movie_path.c_str();
+}
+
+__declspec(naked) void hk_movie_open() {
+    __asm {
+        sub esp, 16
+        movups [esp], xmm1          // a float argument of 0xF7E6F0
+        pushad
+        pushfd
+        push dword ptr [esp + 56]   // the path: the first stack argument, above the return address
+        call title_movie_path
+        add esp, 4
+        mov [esp + 56], eax
+        popfd
+        popad
+        movups xmm1, [esp]
+        add esp, 16
+        jmp dword ptr [g_movie_open]
+    }
+}
+
+bool same_file_contents(const std::wstring& path, const uint8_t* data, size_t size) {
+    std::vector<uint8_t> have;
+    return read_file(path, &have) && have.size() == size && std::memcmp(have.data(), data, size) == 0;
+}
+
+// The built-in movie, written to %TEMP%\PrepareToCoop-Title-<hash>.wmv unless an identical copy is already there.
+bool write_builtin_movie() {
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&write_builtin_movie), &self)) {
+        return false;
+    }
+    HRSRC res = FindResourceW(self, MAKEINTRESOURCEW(kMovieResource), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
+    HGLOBAL mem = res ? LoadResource(self, res) : nullptr;
+    const auto* data = mem ? static_cast<const uint8_t*>(LockResource(mem)) : nullptr;
+    const DWORD size = res ? SizeofResource(self, res) : 0;
+    if (!data || size < 16) {
+        LOG_ERROR("Title: the built-in title movie is missing from the DLL");
+        return false;
+    }
+    wchar_t tmp[MAX_PATH + 1] = {};
+    if (!GetTempPathW(MAX_PATH, tmp)) return false;
+    wchar_t name[64];
+    swprintf_s(name, L"PrepareToCoop-Title-%08X.wmv", fnv1a(data, size));
+    const std::wstring path = std::wstring(tmp) + name;
+    if (!same_file_contents(path, data, size)) {
+        // Written beside the final name, then moved over it, so a half-written movie never has that name.
+        wchar_t part[64];
+        swprintf_s(part, L".%lu.part", GetCurrentProcessId());
+        const std::wstring staging = path + part;
+        HANDLE f = CreateFileW(staging.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD wrote = 0;
+        const bool ok = f != INVALID_HANDLE_VALUE && WriteFile(f, data, size, &wrote, nullptr) && wrote == size;
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+        if (!ok || !MoveFileExW(staging.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            DeleteFileW(staging.c_str());
+            if (!same_file_contents(path, data, size)) {  // another game may have written it just now
+                LOG_ERROR("Title: the title movie could not be written to %s (error %lu)", narrow(path).c_str(), GetLastError());
+                return false;
+            }
+        }
+    }
+    g_movie_path = path;
+    g_movie_from = "built in, " + narrow(path);
+    return true;
+}
+
+bool prepare_movie() {
+    const std::wstring own = game_dir() + L"PrepareToCoop-Title.wmv";
+    if (GetFileAttributesW(own.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        g_movie_path = own;
+        g_movie_from = "PrepareToCoop-Title.wmv from the game folder";
+        return true;
+    }
+    return write_builtin_movie();
+}
+
 }  // namespace
 
 bool title_install(bool coop) {
@@ -161,7 +289,8 @@ bool title_install(bool coop) {
         LOG_INFO("Title: the game's own logo (Prepare to Co-op is off)");
         return true;
     }
-    if (!load_art_file()) {
+    const bool own_art = load_art_file();
+    if (!own_art) {
         g_art.assign(kTitleArt, kTitleArt + sizeof(kTitleArt));
         g_art_from = "built in";
     }
@@ -169,10 +298,28 @@ bool title_install(bool coop) {
                                  reinterpret_cast<void*>(&hk_from_memory_ex), reinterpret_cast<void**>(&g_from_memory_ex));
     const bool plain = patch_import("d3dx9_43.dll", "D3DXCreateTextureFromFileInMemory",
                                     reinterpret_cast<void*>(&hk_from_memory), reinterpret_cast<void**>(&g_from_memory));
-    if (!ex && !plain) {
+    const bool logo = ex || plain;
+    if (logo) {
+        LOG_INFO("Title: \"PREPARE TO CO-OP EDITION\" logo ready (%s, %zu bytes)", g_art_from.c_str(), g_art.size());
+    } else {
         LOG_ERROR("Title: the game's texture loader import was not found; the game's own logo is shown");
-        return false;
     }
-    LOG_INFO("Title: \"PREPARE TO CO-OP EDITION\" logo ready (%s, %zu bytes)", g_art_from.c_str(), g_art.size());
-    return true;
+
+    bool movie = false;
+    if (prepare_movie()) {
+        movie = coop::redirect_call(kMovieOpenCall, kMovieOpen, reinterpret_cast<const void*>(&hk_movie_open));
+        if (movie) {
+            LOG_INFO("Title: \"PREPARE TO CO-OP EDITION\" title movie ready (%s)", g_movie_from.c_str());
+            if (own_art && g_movie_from.rfind("built in", 0) == 0) {
+                LOG_INFO("Title: the title movie is the built-in one; for one that ends on your own logo, make "
+                         "PrepareToCoop-Title.wmv with tools/build_title_movie.bat and put it next to the game");
+            }
+        } else {
+            LOG_ERROR("Title: the movie player's call at 0x%08X did not match this build; the game's own title movie "
+                      "plays", kMovieOpenCall);
+        }
+    } else {
+        LOG_ERROR("Title: the game's own title movie plays");
+    }
+    return logo || movie;
 }

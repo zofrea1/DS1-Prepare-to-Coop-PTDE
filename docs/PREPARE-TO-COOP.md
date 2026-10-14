@@ -57,6 +57,15 @@ texture (`D3DXCreateTextureFromFileInMemory(Ex)`). To try other art, save it as 
 `.dds`) next to `DARKSOULS.exe`; `assets/ptde/Title-guide.png` shows which parts of the texture the game uses.
 After changing the built-in PNG, run `tools/embed_title.py` and rebuild.
 
+Before the logo, the title screen plays `movWW/frpg_title.wmv`, which zooms the logo in and fades the edition line
+in under it, ending on the texture's picture. The mod plays `PrepareToCoop-Title.wmv` in its place: the same movie
+with the new edition line. Only the second line is repainted, moved, blurred and faded frame by frame the way the
+original line is, and the movie ends on exactly the picture the menu then draws. The built-in copy
+(`assets/ptde/PrepareToCoop-Title.wmv`) is written to the temp folder at start-up; a `PrepareToCoop-Title.wmv`
+next to `DARKSOULS.exe` is used instead if there is one. `tools/build_title_movie.bat "<game>\DATA\movWW\frpg_title.wmv"`
+makes it again from `assets/ptde/PrepareToCoop-Title.png` (Python with numpy, scipy, Pillow and imageio-ffmpeg);
+it is encoded as WMV9 with Windows' own encoder, like the original, then built in by `build_ptde.bat`.
+
 ## What changes in a session
 
 | Rule | Prepare to Co-op (as in ds1sc) |

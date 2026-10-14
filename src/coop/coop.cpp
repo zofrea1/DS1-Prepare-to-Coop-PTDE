@@ -272,6 +272,12 @@ void coop_install(const Settings& settings) {
     LOG_INFO("[coop] Guests run the world's events in their own game: %s", g_cfg.guest_world_events ? "yes" : "no (host only)");
     const bool texts = coop::text::install();
     const bool world = coop::world::install();
+    // Before the items and the rest handler that hands them out: with those in, a session could still start.
+    if (failed || !world) {
+        LOG_ERROR("[coop] %d co-op hook(s) could not be installed; Prepare to Co-op is off to keep the game safe.",
+                  failed + (world ? 0 : 1));
+        return;
+    }
     if (!coop::session::install_nameplate()) LOG_ERROR("[coop] Companion nameplates were not changed");
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
@@ -296,11 +302,6 @@ void coop_install(const Settings& settings) {
     cfg.allow_invaders = g_cfg.allow_invaders;
     cfg.death_debuffs = g_cfg.death_debuffs;
     coop::session::configure(cfg);
-    if (failed || !world) {
-        LOG_ERROR("[coop] %d co-op hook(s) could not be installed; Prepare to Co-op is off to keep the game safe.",
-                  failed + (world ? 0 : 1));
-        return;
-    }
     g_installed = true;
     LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade%s.",
              g_items ? "given at every bonfire rest" : "UNAVAILABLE", texts ? "" : "(On-screen texts unavailable.) ",

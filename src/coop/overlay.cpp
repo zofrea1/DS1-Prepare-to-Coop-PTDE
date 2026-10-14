@@ -47,14 +47,6 @@ void* patch_slot(void* object, int slot, void* replacement) {
     return original;
 }
 
-void release() {
-    if (g_tex) g_tex->Release();
-    if (g_state) g_state->Release();
-    g_tex = nullptr;
-    g_state = nullptr;
-    g_tex_w = g_tex_h = 0;
-}
-
 // Renders the lines with GDI and uploads them as white text on a translucent dark box.
 void rebuild(IDirect3DDevice9* dev, const std::vector<std::wstring>& lines, int screen_h) {
     g_visible = !lines.empty();
@@ -81,6 +73,15 @@ void rebuild(IDirect3DDevice9* dev, const std::vector<std::wstring>& lines, int 
     bi.bmiHeader.biBitCount = 32;
     void* bits = nullptr;
     HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits) {
+        // out of GDI memory: no panel until the next change
+        if (bmp) DeleteObject(bmp);
+        SelectObject(dc, old_font);
+        DeleteObject(font);
+        DeleteDC(dc);
+        g_visible = false;
+        return;
+    }
     HGDIOBJ old_bmp = SelectObject(dc, bmp);
     std::memset(bits, 0, static_cast<size_t>(g_text_w) * g_text_h * 4);
     SetBkMode(dc, TRANSPARENT);

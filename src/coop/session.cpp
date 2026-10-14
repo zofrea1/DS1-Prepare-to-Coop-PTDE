@@ -223,6 +223,9 @@ int g_search_waves = 0;
 int g_search_gen = 0;
 std::vector<Pending> g_pending;
 std::vector<PeerInfo> g_peers;
+// Host: the players it let in (a Welcome with kOk). Steam passes on packets from anyone in the lobby, so the host
+// takes world changes only from these. Kept apart from g_peers, which a P2P failure clears while the guest stays.
+std::vector<uint64_t> g_admitted;
 int g_ping_ms = -1;
 int64_t g_ping_qpc = 0;  // guest: counter when the last ping was sent (0 none)
 std::vector<std::pair<int, bool>> g_flag_queue;
@@ -344,6 +347,13 @@ PeerInfo* peer(uint64_t id) {
     return &g_peers.back();
 }
 
+bool admitted(uint64_t id) { return std::find(g_admitted.begin(), g_admitted.end(), id) != g_admitted.end(); }
+
+void set_admitted(uint64_t id, bool on) {
+    g_admitted.erase(std::remove(g_admitted.begin(), g_admitted.end(), id), g_admitted.end());
+    if (on) g_admitted.push_back(id);
+}
+
 bool peer_is_invader(uint64_t id) {
     for (const auto& p : g_peers) {
         if (p.id == id) return p.invader;
@@ -366,6 +376,7 @@ void finish(const std::wstring& why) {
     g_invade = false;
     g_pending.clear();
     g_peers.clear();
+    g_admitted.clear();
     g_homeward_at = 0;
     g_follow_bonfire = -1;
     g_guest_bonfire = -1;
@@ -490,6 +501,7 @@ void host_answer(const Pending& p) {
         w.invitation_size = static_cast<uint32_t>(inv.size());
         std::memcpy(w.invitation, inv.data(), inv.size());
     }
+    set_admitted(p.from, w.status == kOk);
     send_to(p.from, w);
     LOG_INFO("[coop] Answered %s (%s): status %u", steam::persona(p.from).c_str(), p.invade ? "invader" : "guest",
              w.status);
@@ -1149,6 +1161,17 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         std::memcpy(out, data, sizeof(*out));
         return true;
     };
+    // The host takes a Hello, Bye or Ping from anyone in the lobby and the rest only from the players it let in:
+    // Steam passes on packets from every lobby member, also ones refused or not answered yet.
+    if (g_role == Role::Host && h.type != kHello && h.type != kBye && h.type != kPing && !admitted(from)) {
+        static int lines = 0;
+        // a joiner's status, gait and animations are sent before the answer comes
+        if (h.type != kInfo && h.type != kGait && h.type != kAnim && ++lines <= 50) {
+            LOG_INFO("[coop] Message %u from %s ignored: they were not let into the session", h.type,
+                     steam::persona(from).c_str());
+        }
+        return;
+    }
     switch (h.type) {
         case kHello: {
             Hello m;
@@ -1348,6 +1371,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 g_peers.erase(std::remove_if(g_peers.begin(), g_peers.end(),
                                              [from](const PeerInfo& q) { return q.id == from; }),
                               g_peers.end());
+                set_admitted(from, false);
             }
             break;
         }
@@ -1852,6 +1876,7 @@ void set_callbacks() {
             g_peers.erase(std::remove_if(g_peers.begin(), g_peers.end(),
                                          [user](const PeerInfo& q) { return q.id == user; }),
                           g_peers.end());
+            set_admitted(user, false);
         }
     });
     steam::on_p2p_failed([](uint64_t peer_id, int error) {

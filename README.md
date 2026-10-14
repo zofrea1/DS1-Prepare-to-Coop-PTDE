@@ -1,3 +1,5 @@
+## If my mod brought you some happiness, and you have the means, you're welcome to donate at [buymeacoffee.com/zofrea](https://buymeacoffee.com/zofrea). Thank you and enjoy the mod!
+
 # Prepare to Co-op Edition
 
 Play all of **Dark Souls: Prepare to Die Edition** together with up to three friends, from the Undead Asylum to the Kiln, without the limits of the game's own co-op. Guests keep their own body and progress, deaths respawn at a bonfire, boss kills and area changes no longer end the session, multiplayer fog walls are gone, a bonfire rest resets everyone's world, progress made together carries home, and enemies scale with the number of players. Evil spirits can invade a session too.
@@ -19,7 +21,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 ## Install
 
-1. Copy `xinput1_3.dll` and `PTDE-FPS-Unlock.ini` next to `DARKSOULS.exe` (`dxvk_d3d9.dll` too, only for the FPS Unlock's experimental DXVK). If the FPS Unlock is already installed, these replace its files; set your FPS Unlock settings again in the new INI, which has all of them.
+1. From the zip on the [Releases](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE/releases) page, copy `xinput1_3.dll` and `PTDE-FPS-Unlock.ini` next to `DARKSOULS.exe` (`dxvk_d3d9.dll` too, only for the FPS Unlock's experimental DXVK). If the FPS Unlock is already installed, these replace its files; set your FPS Unlock settings again in the new INI, which has all of them.
 2. In `PTDE-FPS-Unlock.ini`, set the same `Password` as your friends. `PrepareToCoop = true` is already set.
 3. Steam Deck and Linux: add the launch option `WINEDLLOVERRIDES="xinput1_3=n,b" %command%` so Proton loads the DLL (the same as for the FPS Unlock).
 4. Your save: with Prepare to Co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to `DRAKS0005.co2` before starting. Back up your saves.
@@ -79,7 +81,8 @@ Everything goes to the FPS Unlock's log, `PTDE-FPS-Unlock.log` next to the DLL; 
 Visual Studio 2022 (MSVC). The FPS Unlock is a git submodule (`fps-unlock`, pinned to the release it ships with):
 
 ```
-git clone --recursive <this repository>
+git clone --recursive https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE.git
+cd DS1-Prepare-to-Coop-PTDE
 build.bat
 ```
 

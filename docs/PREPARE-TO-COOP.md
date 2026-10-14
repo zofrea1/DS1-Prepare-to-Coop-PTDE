@@ -175,9 +175,16 @@ A player who drops off without leaving (a crash, a lost network, a Steam Deck pu
 silence: every player sends its status each second. With nothing heard for 10 s after Steam reports the link
 lost, or for 60 s in any case, the host shows "{name} lost the connection", tells the other players and stops
 sending to them; a guest or invader who stops hearing the host goes home ("Lost the connection to the host").
-The game itself takes the lost player's character out when Steam gives up on the link. A player who comes
-back from sleep still in the old session hears from the host that it was dropped and goes home. Time in which a
-game was not running at all is not counted as anyone's silence.
+The game itself takes the lost player's character out when Steam gives up on the link. A guest or invader who
+comes back from more than a minute of sleep goes home at once (measured by the wall clock: under Proton the
+game's tick count stops while a Steam Deck sleeps); after a shorter one, the host answers anything they send
+with "you were dropped" and they go home. The host answers pings only from players in the session, and a pong
+alone does not count as hearing from the host. Time in which a game was not running at all is not counted as
+anyone's silence.
+
+When a player leaves the lobby without a Bye (an invader the game sends home after their death), the host tells
+the guests as well. The Ominous Tome, Dried Fingers and Cursed Pendant say what they did, to the host and to the
+guests.
 
 ### A guest's bonfire menu
 

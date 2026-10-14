@@ -162,6 +162,11 @@ constexpr const wchar_t* kMsgInvaderLeft = L"Evil spirit {} has left";
 constexpr const wchar_t* kMsgLost = L"{} lost the connection";
 constexpr const wchar_t* kMsgInvaderLost = L"Evil spirit {} lost the connection";
 constexpr const wchar_t* kMsgHostLost = L"Lost the connection to the host. Returning to your world...";
+constexpr const wchar_t* kMsgRulesNone = L"World rules: allies cannot harm each other";
+constexpr const wchar_t* kMsgRulesHostile = L"World rules: allies can harm each other";
+constexpr const wchar_t* kMsgRulesTeams = L"World rules: the host against the guests";
+constexpr const wchar_t* kMsgTaunt = L"Invaders are taunted into this world";
+constexpr const wchar_t* kMsgCursed = L"This world is cursed";
 constexpr const wchar_t* kMsgDied = L"{} has died";
 constexpr const wchar_t* kMsgInvaderDied = L"Evil spirit {} has died";
 constexpr const wchar_t* kMsgGuestStart = L"Joining another world as a guest...";
@@ -237,8 +242,8 @@ std::vector<uint64_t> g_admitted;
 constexpr double kLostQuiet = 10.0;
 constexpr double kLostSilent = 60.0;
 std::map<uint64_t, double> g_p2p_failed;  // when Steam last reported the link to a player lost
-std::vector<uint64_t> g_lost;             // host: dropped players still in the lobby (no broadcasts, kDropped)
-double g_host_heard = 0;                  // guest: the last message from the host
+std::vector<uint64_t> g_lost;             // host: dropped players, until they ask to join again (kDropped)
+double g_host_heard = 0;                  // guest: the last message from the host (not counting kPong)
 double g_quiet_grace_until = 0;           // no drops before this (we were not running)
 int g_ping_ms = -1;
 int64_t g_ping_qpc = 0;  // guest: counter when the last ping was sent (0 none)
@@ -275,6 +280,10 @@ bool g_home_warp_sent = true;  // GoingHome: the warp home was requested (or the
 int g_home_map = -1;
 int g_host_map = -1;
 int g_host_bonfire = -1;
+// Guest: the host's world rules as last seen in the world (-1 not yet), to tell the player when they change.
+int g_seen_rules = -1;
+int g_seen_infection = -1;
+int g_seen_taunt = -1;
 bool g_callbacks_set = false;
 // A Black Separation Crystal was used (1 guest, 2 host); handled on the next tick, outside the player's update.
 int g_separation = 0;
@@ -398,6 +407,7 @@ void finish(const std::wstring& why) {
     g_lost.clear();
     g_p2p_failed.clear();
     g_host_heard = 0;
+    g_seen_rules = g_seen_infection = g_seen_taunt = -1;
     g_homeward_at = 0;
     g_follow_bonfire = -1;
     g_guest_bonfire = -1;
@@ -494,6 +504,7 @@ void drop_quiet_players() {
         e.lost = 1;
         broadcast(e, true, id);
         steam::close(id);
+        steam::accept(id);  // still take their packets, to tell them (kDropped) if they come back
         g_peers.erase(it);
         set_admitted(id, false);
         g_p2p_failed.erase(id);
@@ -871,11 +882,23 @@ void guest_search() {
     issue_search();
 }
 
+const wchar_t* rules_text(int world_rules) {
+    return world_rules == 1 ? kMsgRulesHostile : world_rules == 2 ? kMsgRulesTeams : kMsgRulesNone;
+}
+
 void apply_host_rules(int world_rules, bool infection, bool taunt) {
     auto& st = rules::state();
     st.world_rules = world_rules;
     st.infection = infection;
     st.taunt = taunt;
+    // Changes the host makes while we are there (Ominous Tome, Dried Fingers, Cursed Pendant) are shown to guests.
+    if (g_step != Step::InWorld || g_invade) return;
+    if (g_seen_rules >= 0 && world_rules != g_seen_rules) say(rules_text(world_rules));
+    if (g_seen_taunt == 0 && taunt) say(kMsgTaunt);
+    if (g_seen_infection == 0 && infection) say(kMsgCursed);
+    g_seen_rules = world_rules;
+    g_seen_taunt = taunt ? 1 : 0;
+    g_seen_infection = infection ? 1 : 0;
 }
 
 void guest_on_welcome(const Welcome& w) {
@@ -1223,7 +1246,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         std::memcpy(out, data, sizeof(*out));
         return true;
     };
-    if (g_role == Role::Guest && from == g_host) g_host_heard = now();
+    // A kPong only shows the host's game is running, not that it still has us in its session.
+    if (g_role == Role::Guest && from == g_host && h.type != kPong) g_host_heard = now();
     // A player we dropped for silence is still playing in our world as far as they know (a machine woken from
     // sleep): tell them to go home.
     if (g_role == Role::Host && h.type != kHello && is_lost(from)) {
@@ -1321,6 +1345,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 return;
             }
             if (m.who == steam::self()) return;
+            unmark_lost(m.who);
             say(fmt(m.invader ? kMsgInvaded : kMsgJoined, event_name(m)));
             break;
         }
@@ -1464,6 +1489,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             g_peers.erase(std::remove_if(g_peers.begin(), g_peers.end(),
                                          [who](const PeerInfo& q) { return q.id == who; }),
                           g_peers.end());
+            // Steam keeps a lost player in the lobby for a while: stop sending to them as the host does.
+            if (m.lost && !is_lost(who)) g_lost.push_back(who);
             break;
         }
         case kGait: {
@@ -1497,7 +1524,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kPing: {
             Simple m;
-            if (!as(&m)) return;
+            // Only for players in the session: answering everyone kept a player woken from sleep in a world that had
+            // dropped them (2026-10-14).
+            if (!as(&m) || (g_role == Role::Host && !admitted(from))) return;
             m.h.type = kPong;
             send_to(from, m, false);
             break;
@@ -1596,7 +1625,7 @@ void flush_flags() {
         if (g_role == Role::Host) {
             const uint64_t me = steam::self();
             for (uint64_t member : steam::lobby_members(g_lobby)) {
-                if (member != me && !peer_is_invader(member)) steam::send(member, &m, bytes, true);
+                if (member != me && !peer_is_invader(member) && !is_lost(member)) steam::send(member, &m, bytes, true);
             }
         } else if (g_host) {
             steam::send(g_host, &m, bytes, true);
@@ -1957,16 +1986,27 @@ void set_callbacks() {
         if (g_role == Role::Guest && user == g_host) {
             guest_go_home(kMsgReturnHome, "the host left the lobby");
         } else if (g_role == Role::Host) {
-            steam::close(user);
+            const bool member = admitted(user);
             for (const auto& p : g_peers) {
-                if (p.id == user) say(fmt(p.invader ? kMsgInvaderLeft : kMsgLeft, text::widen(p.name)));
+                if (p.id != user) continue;
+                say(fmt(p.invader ? kMsgInvaderLeft : kMsgLeft, text::widen(p.name)));
+                if (member) {
+                    // The guests see it too (an invader sent home by the game leaves without a Bye).
+                    PlayerEvent e = player_event(kLeft, user, p.invader, p.name);
+                    broadcast(e, true, user);
+                }
             }
             g_peers.erase(std::remove_if(g_peers.begin(), g_peers.end(),
                                          [user](const PeerInfo& q) { return q.id == user; }),
                           g_peers.end());
             set_admitted(user, false);
-            unmark_lost(user);
             g_p2p_failed.erase(user);
+            // A dropped player stays marked: woken from sleep, they still talk to us as if in the session.
+            if (is_lost(user)) {
+                steam::accept(user);
+            } else {
+                steam::close(user);
+            }
         }
     });
     steam::on_p2p_failed([](uint64_t peer_id, int error) {
@@ -2008,16 +2048,29 @@ void tick() {
     if (!steam::ready()) return;
     {
         static double last_tick = 0;
+        static ULONGLONG last_wall = 0;
         const double t = now();
-        if (last_tick > 0 && t - last_tick > 3.0 && g_role != Role::None) {
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        const ULONGLONG wall = (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        double away = last_tick > 0 ? t - last_tick : 0;
+        if (last_wall && wall > last_wall) away = std::max(away, static_cast<double>(wall - last_wall) / 1e7);
+        if (away > 3.0 && g_role != Role::None) {
             g_quiet_grace_until = t + kLostQuiet + 5.0;
             static int lines = 0;
             if (++lines <= 20) {
-                LOG_INFO("[coop] This game did not run for %.0f s; no one is dropped for silence for %.0f s",
-                         t - last_tick, kLostQuiet + 5.0);
+                LOG_INFO("[coop] This game did not run for %.0f s; no one is dropped for silence for %.0f s", away,
+                         kLostQuiet + 5.0);
+            }
+            // Longer than the host waits for a quiet player: it has dropped us already.
+            if (g_role == Role::Guest && g_step == Step::InWorld && away >= kLostSilent + 5.0) {
+                char why[96];
+                std::snprintf(why, sizeof(why), "this game did not run for %.0f s (asleep)", away);
+                guest_go_home(kMsgHostLost, why);
             }
         }
         last_tick = t;
+        last_wall = wall;
     }
     set_callbacks();
     steam::poll(on_message);
@@ -2236,6 +2289,7 @@ void cycle_rules() {
     auto& st = rules::state();
     st.world_rules = (st.world_rules + 1) % 3;
     LOG_INFO("[coop] World rules now %d (0 none, 1 allies hostile, 2 teams)", st.world_rules);
+    say(rules_text(st.world_rules));
     g_last_state = 0;  // tell the guests now
 }
 
@@ -2244,6 +2298,7 @@ void taunt() {
     rules::state().taunt = true;
     steam::set_lobby_data(g_lobby, "ptdesc_taunt", "1");
     LOG_INFO("[coop] Invaders are taunted into this world");
+    say(kMsgTaunt);
     g_last_state = 0;
 }
 
@@ -2251,6 +2306,7 @@ void curse_world() {
     if (!hosting()) return;
     rules::state().infection = true;
     LOG_INFO("[coop] The world is cursed (pure black World Tendency)");
+    say(kMsgCursed);
     g_last_state = 0;
 }
 

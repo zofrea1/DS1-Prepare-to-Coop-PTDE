@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #pragma once
 
 // Prepare to Die Edition (DARKSOULS.exe 1.0.2.0, Steam) addresses and thin wrappers used by the seamless

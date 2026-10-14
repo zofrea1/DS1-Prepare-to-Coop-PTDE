@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Encodes numbered 1280x720 PNG frames into a .wmv laid out like the game's movWW/frpg_title.wmv: WMV9 (WMV3)
 // video at 30000/1001 fps and a silent 48 kHz stereo WMA2 track, written with Windows' own Media Foundation
 // encoders and ASF sink. The game plays the file through DirectShow (WM ASF Reader, WMVideo Decoder DMO), so a

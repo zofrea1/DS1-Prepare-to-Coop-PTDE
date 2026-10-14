@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "session.h"
 
 #include "game.h"
@@ -2404,17 +2406,24 @@ const wchar_t* __stdcall nameplate_for(const wchar_t* shown) {
         if (now() - p.last_seen > 10.0) continue;
         const int mine = slot++;
         if (!utf8_is(name, p.name) && (p.char_name.empty() || wcscmp(name, p.char_name.c_str()) != 0)) continue;
+        const int mode = g_cfg.overhead_display;
+        if (mode == 0) return nullptr;  // the game's own name
         int ping = p.ping_ms;
         // The host does not measure a round trip. A guest's own measurement is the host's ping.
         if (g_role == Role::Guest && p.id == g_host) ping = g_ping_ms;
+        wchar_t ms[16] = L"--ms";
+        if (ping > 0) swprintf_s(ms, L"%dms", ping);
         const int side = g_nameplate_n[mine] % 3;
         g_nameplate_n[mine] = side + 1;
-        if (ping <= 0) {
-            swprintf_s(g_nameplate[mine][side], L"(%ls, SL: %d, --ms)", name, p.soul_level);
-        } else {
-            swprintf_s(g_nameplate[mine][side], L"(%ls, SL: %d, %dms)", name, p.soul_level, ping);
+        wchar_t* out = g_nameplate[mine][side];
+        constexpr size_t kCap = sizeof(g_nameplate[0][0]) / sizeof(wchar_t);
+        switch (mode) {
+            case 1: swprintf_s(out, kCap, L"(%ls, %ls)", name, ms); break;
+            case 2: swprintf_s(out, kCap, L"(%ls, SL: %d)", name, p.soul_level); break;
+            case 3: swprintf_s(out, kCap, L"(%ls, deaths: %d)", name, p.deaths); break;
+            default: swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", name, p.soul_level, ms); break;
         }
-        return g_nameplate[mine][side];
+        return out;
     }
     return nullptr;
 }
@@ -2441,7 +2450,7 @@ bool install_nameplate() {
     const bool a = redirect_call(kFloatingNameA, kNameSet, reinterpret_cast<void*>(&hk_floating_name));
     const bool b = redirect_call(kFloatingNameB, kNameSet, reinterpret_cast<void*>(&hk_floating_name));
     if (!a || !b) return false;
-    LOG_INFO("[coop] Companion names on the floating health bar include soul level and ping");
+    LOG_INFO("[coop] Companion names on the floating health bar can show more (OverheadPlayerDisplay)");
     return true;
 }
 

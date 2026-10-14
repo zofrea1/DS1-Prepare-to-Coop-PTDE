@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #pragma once
 
 // The seamless co-op session: finding and joining players with the same password, hosting, the host's world
@@ -13,6 +15,8 @@ struct Config {
     std::string password;
     bool allow_invaders = true;
     bool death_debuffs = false;  // each death in a session adds a Crimson Blossom (up to five)
+    // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
+    int overhead_display = 4;
     int max_players = 4;  // PTDE keeps three remote players (GameDataMan+0xC holds 3 x 0x4C0)
 };
 

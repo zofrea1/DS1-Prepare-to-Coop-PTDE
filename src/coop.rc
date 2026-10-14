@@ -1,4 +1,4 @@
-// Resources of the PTDE xinput1_3.dll. build_ptde.bat compiles this from the repository root.
+// Resources of Prepare to Co-op's xinput1_3.dll. build.bat compiles this from the repository root.
 
-// The Prepare to Co-op title movie (src/ptde/title.cpp), made by tools/build_title_movie.bat.
-101 RCDATA "assets\\ptde\\PrepareToCoop-Title.wmv"
+// The Prepare to Co-op title movie (src/title.cpp), made by tools/build_title_movie.bat.
+101 RCDATA "assets\\PrepareToCoop-Title.wmv"

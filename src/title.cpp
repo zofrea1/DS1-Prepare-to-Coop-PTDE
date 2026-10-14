@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "title.h"
 
 #include "coop/hook.h"
@@ -25,7 +27,7 @@ namespace {
 // creates its textures from the DDS data in memory with d3dx9_43!D3DXCreateTextureFromFileInMemory(Ex) (imports
 // at 0x10CC3FC and 0x10CC40C; DSfix's texture override works on the same call). Both originals are recognized by
 // size and FNV-1a hash in that call and replaced by the Prepare to Co-op logo: PrepareToCoop-Title.png (or .dds)
-// next to the game if there is one, otherwise the logo built into the DLL (assets/ptde/PrepareToCoop-Title.png).
+// next to the game if there is one, otherwise the logo built into the DLL (assets/PrepareToCoop-Title.png).
 // D3DX reads PNG as well as DDS and converts it to whatever the game asks for.
 constexpr UINT kTitleSize = 349680;
 constexpr uint32_t kTitleHashes[] = {0x4646BCA4, 0xA77EED21};  // English menu_local, base menu_0

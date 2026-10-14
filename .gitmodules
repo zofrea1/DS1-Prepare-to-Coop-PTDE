@@ -1,0 +1,3 @@
+[submodule "fps-unlock"]
+	path = fps-unlock
+	url = https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered.git

@@ -1,19 +1,18 @@
 # Prepare to Co-op Edition
 
 Play all of Dark Souls together with up to three friends, from the Undead Asylum to the Kiln, without the
-limits of the game's own co-op. Built into the PTDE FPS Unlock mod behind `[PrepareToCoop] PrepareToCoop` in
-`PTDE-FPS-Unlock.ini` (off by default) and independent of the FPS unlock.
+limits of the game's own co-op. A mod for Dark Souls: Prepare to Die Edition built on the DS1 FPS Unlock,
+which it includes: its `xinput1_3.dll` is the FPS Unlock plus the co-op, switched on by
+`[PrepareToCoop] PrepareToCoop` in `PTDE-FPS-Unlock.ini`. The co-op works with the FPS unlock on or off.
 
-It is inspired by LukeYui's **Seamless Co-op** mod for Dark Souls Remastered (`ds1sc.dll`, called ds1sc
+It is inspired by Yui's **Seamless Co-op** mod for Dark Souls Remastered (`ds1sc.dll`, called ds1sc
 below), which only exists for Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and written again
 for PTDE's engine. The goal of this first stage is a faithful port: the same items, the same rules, the same
 session behaviour. Where PTDE's engine sets a hard limit (four players instead of six), the port keeps the
 engine's limit.
 
-**Status:** in two-player testing (round 13, 2026-10-08). Joining, playing, dying, resting and leaving work
-between two PCs. This round: a host is no longer sent to the title screen when a guest leaves, a guest's
-bloodstain stays where they fell, the Abyssal Eye Orb disbands through the game's own leave, and the bonfire
-animations are back.
+**Status:** release candidate for 1.0.0. Tested with up to three players on two PCs and a Steam Deck:
+joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, leaving and lost connections.
 
 ## How to play
 
@@ -37,8 +36,9 @@ animations are back.
    The items are used like any other item (quick slot, the item animation); when one cannot be used it is
    refused the way the game refuses any item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1**
    host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Each press is written to the log.
-3. A panel at the top right lists the players in the session, with ping, soul level or deaths
-   (`OverheadPlayerDisplay`), and the host's world rules.
+3. Another player's floating health bar shows their name with their soul level and ping, or ping, soul
+   level or deaths alone (`OverheadPlayerDisplay`). Joins, departures, deaths and changes to the world rules
+   are told at the bottom of the screen.
 
 **Your save.** With Prepare to Co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to
 `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to
@@ -52,19 +52,19 @@ such features (Remastered's online play needs FromSoftware's servers, which that
 
 **Title screen.** While Prepare to Co-op is on, the title screen reads PREPARE TO CO-OP EDITION instead of
 PREPARE TO DIE EDITION. The logo is the game's 512 x 512 `Title` texture (`menu/english/menu_local.tpf`) with new
-edition lines, built into the mod from `assets/ptde/PrepareToCoop-Title.png` and swapped in as the game creates the
+edition lines, built into the mod from `assets/PrepareToCoop-Title.png` and swapped in as the game creates the
 texture (`D3DXCreateTextureFromFileInMemory(Ex)`). To try other art, save it as `PrepareToCoop-Title.png` (or
-`.dds`) next to `DARKSOULS.exe`; `assets/ptde/Title-guide.png` shows which parts of the texture the game uses.
+`.dds`) next to `DARKSOULS.exe`; `assets/Title-guide.png` shows which parts of the texture the game uses.
 After changing the built-in PNG, run `tools/embed_title.py` and rebuild.
 
 Before the logo, the title screen plays `movWW/frpg_title.wmv`, which zooms the logo in and fades the edition line
 in under it, ending on the texture's picture. The mod plays `PrepareToCoop-Title.wmv` in its place: the same movie
 with the new edition line. Only the second line is repainted, moved, blurred and faded frame by frame the way the
 original line is, and the movie ends on exactly the picture the menu then draws. The built-in copy
-(`assets/ptde/PrepareToCoop-Title.wmv`) is written to the temp folder at start-up; a `PrepareToCoop-Title.wmv`
+(`assets/PrepareToCoop-Title.wmv`) is written to the temp folder at start-up; a `PrepareToCoop-Title.wmv`
 next to `DARKSOULS.exe` is used instead if there is one. `tools/build_title_movie.bat "<game>\DATA\movWW\frpg_title.wmv"`
-makes it again from `assets/ptde/PrepareToCoop-Title.png` (Python with numpy, scipy, Pillow and imageio-ffmpeg);
-it is encoded as WMV9 with Windows' own encoder, like the original, then built in by `build_ptde.bat`.
+makes it again from `assets/PrepareToCoop-Title.png` (Python with numpy, scipy, Pillow and imageio-ffmpeg);
+it is encoded as WMV9 with Windows' own encoder, like the original, then built in by `build.bat`.
 
 ## What changes in a session
 
@@ -306,7 +306,6 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 - **Party HP across areas** (ds1sc shows the HP of players in other areas) and the
   **covenant reward** for a winning invader are not implemented yet.
 - **Item descriptions** are written for the port; names, one-line infos and icons are the original's.
-- The player panel is a list at the top right rather than text above each player.
 - Ghosts, messages and bloodstains of players with the same password still appear (ds1sc has none).
 - The Remastered mod's GitHub ban list is not used.
 - **Teams** ("allies in teams") put the host against the guests; the Remastered mod's exact team split could

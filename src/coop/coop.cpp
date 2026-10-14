@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "coop.h"
 
 #include "game.h"
@@ -20,7 +22,7 @@
 
 namespace {
 
-Settings::Coop g_cfg;
+CoopConfig g_cfg;
 bool g_enabled = false;
 bool g_installed = false;
 bool g_items = false;
@@ -246,8 +248,8 @@ void tick() {
 
 }  // namespace
 
-void coop_install_early(const Settings& settings) {
-    g_cfg = settings.coop;
+void coop_install_early(const CoopConfig& config) {
+    g_cfg = config;
     g_enabled = g_cfg.enabled;
     if (!g_enabled) return;
     patch_save_extension(g_cfg.save_extension);
@@ -255,8 +257,8 @@ void coop_install_early(const Settings& settings) {
                                                 coop::session::game_tag(g_cfg.password));
 }
 
-void coop_install(const Settings& settings) {
-    if (!settings.coop.enabled) {
+void coop_install(const CoopConfig& config) {
+    if (!config.enabled) {
         LOG_INFO("[coop] Prepare to Co-op: off");
         return;
     }
@@ -301,7 +303,12 @@ void coop_install(const Settings& settings) {
     cfg.password = g_cfg.password;
     cfg.allow_invaders = g_cfg.allow_invaders;
     cfg.death_debuffs = g_cfg.death_debuffs;
+    cfg.overhead_display = g_cfg.overhead_display;
     coop::session::configure(cfg);
+    static const char* const kOverhead[] = {"name only", "name and ping", "name and soul level", "name and deaths",
+                                            "name, soul level and ping"};
+    const int overhead = g_cfg.overhead_display >= 0 && g_cfg.overhead_display <= 4 ? g_cfg.overhead_display : 4;
+    LOG_INFO("[coop] Companion health bars show the %s", kOverhead[overhead]);
     g_installed = true;
     LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade%s.",
              g_items ? "given at every bonfire rest" : "UNAVAILABLE", texts ? "" : "(On-screen texts unavailable.) ",

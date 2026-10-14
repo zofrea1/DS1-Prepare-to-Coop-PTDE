@@ -1,8 +1,9 @@
-"""Makes assets/ptde/PrepareToCoop-Title.wmv, the title movie with PREPARE TO CO-OP EDITION, from the game's
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Makes assets/PrepareToCoop-Title.wmv, the title movie with PREPARE TO CO-OP EDITION, from the game's
 movWW/frpg_title.wmv and the Prepare to Co-op logo texture. Run through tools/build_title_movie.bat.
 
 The title movie (1280x720, 335 frames at 29.97 fps) zooms the DARK SOULS logo in and then fades the edition line
-in under it; when it ends the menu draws the same picture from the logo texture "Title" (see src/ptde/title.cpp),
+in under it; when it ends the menu draws the same picture from the logo texture "Title" (see src/title.cpp),
 1:1 in 720p: the texture's first edition line "PREPARE TO" lands at +129,+80 and the second, "DIE(tm) EDITION",
 at +477,+25. The edition line is absent before frame 151; from there it fades in (brightness 0 to 1 by frame
 ~211), sharpens (a blur of ~2.8 px down to none by ~210) and shrinks into place (3.2% larger and 3.5 px higher
@@ -31,7 +32,7 @@ from scipy import ndimage, optimize
 from scipy.signal import savgol_filter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ASSETS = os.path.join(ROOT, 'assets', 'ptde')
+ASSETS = os.path.join(ROOT, 'assets')
 FIT = os.path.join(ROOT, 'tools', 'title_movie_fit.json')
 
 FRAMES, WIDTH, HEIGHT = 335, 1280, 720

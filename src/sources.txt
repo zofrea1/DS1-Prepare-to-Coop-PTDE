@@ -1,0 +1,18 @@
+# Prepare to Co-op's sources, relative to the repository root. build.bat compiles these together with the FPS
+# Unlock's (fps-unlock\src\ptde\sources.txt) into one xinput1_3.dll. Object files share one folder, so no file
+# here may have the same name as one of the FPS Unlock's.
+src\extension.cpp
+src\config.cpp
+src\title.cpp
+src\coop\coop.cpp
+src\coop\hook.cpp
+src\coop\game.cpp
+src\coop\steam.cpp
+src\coop\session.cpp
+src\coop\rules.cpp
+src\coop\text.cpp
+src\coop\items.cpp
+src\coop\world.cpp
+src\coop\overlay.cpp
+src\coop\party.cpp
+src\coop\motion.cpp

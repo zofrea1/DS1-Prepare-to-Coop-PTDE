@@ -1,6 +1,7 @@
 @echo off
-rem Remakes assets\ptde\PrepareToCoop-Title.wmv (the title movie with PREPARE TO CO-OP EDITION) from the game's
-rem movie and assets\ptde\PrepareToCoop-Title.png. Run it after changing the PNG, then build_ptde.bat.
+rem SPDX-License-Identifier: GPL-3.0-or-later
+rem Remakes assets\PrepareToCoop-Title.wmv (the title movie with PREPARE TO CO-OP EDITION) from the game's
+rem movie and assets\PrepareToCoop-Title.png. Run it after changing the PNG, then build.bat.
 rem usage: tools\build_title_movie.bat "<game>\DATA\movWW\frpg_title.wmv" [--refit] [--keep <dir>]
 rem Needs Python 3 with numpy, scipy, Pillow and imageio-ffmpeg (or ffmpeg on PATH, or --ffmpeg <exe>).
 setlocal

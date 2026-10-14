@@ -316,6 +316,47 @@ bool install_blood_world() {
     return patch_call(kBloodWorldSite, k, sizeof(k), reinterpret_cast<void*>(&hk_blood_world));
 }
 
+// ParamInitialize (Lua, 0xD66360) runs on every map load and decides whether our bloodstain stays. A human keeps
+// it (0xD78B10 without a new record: the record stays and its marker is put back), and so does a hollow alone. A
+// hollow with anyone else in the party (PartyMemberInfo = [GameMan+0xBEC], +0x14 members > 1) loses it
+// (InvalidMyBloodMarkInfo, 0xD6D920): in the game's own multiplayer a hollow is never summoned, so that stain
+// would belong to another world. A hollow co-op guest, or a hollow host with a guest, is in such a party on every
+// load. The guest's stain from the host's world was erased half a second after each load (2026-10-13: "Bloodstain:
+// gone" 0.7 s after joining) and only came back at home, from the save. In seamless co-op the party does not
+// count here.
+constexpr uint32_t kParamInitParty = 0x00D66390;  // cmp dword ptr [eax+14h], 1 ; jg 00D663A4 (erase)
+constexpr uint32_t kParamInitErase = 0x00D663A4;
+
+bool __stdcall stain_party_erases(uint32_t party) {
+    if (seamless_rules()) {
+        static int lines = 0;
+        if (++lines <= 10) LOG_INFO("[coop] Our bloodstain stays on this load (hollow, in a co-op party)");
+        return false;
+    }
+    uint32_t members = 0;
+    return read32(party + 0x14, &members) && static_cast<int>(members) > 1;
+}
+
+// Replaces the compare and the jg: returns to the next instruction (keep) or to the erase call.
+__declspec(naked) void hk_param_party() {
+    __asm {
+        pushad
+        push eax  // PartyMemberInfo
+        call stain_party_erases
+        test al, al
+        popad
+        jz keep
+        mov dword ptr [esp], 0x00D663A4  // kParamInitErase
+    keep:
+        ret
+    }
+}
+
+bool install_param_party() {
+    static const uint8_t k[6] = {0x83, 0x78, 0x14, 0x01, 0x7F, 0x0E};
+    return patch_call(kParamInitParty, k, sizeof(k), reinterpret_cast<void*>(&hk_param_party));
+}
+
 // The party census (0xEA1A70) resolves each member handle and then reads the character's type at +0x70.
 // A failed lookup leaves esi at 0 and falls through to that read. Quit destroys the characters first, so
 // a handle that was not -1 crashes there. An empty result skips the slot, which is what a missing
@@ -2546,6 +2587,83 @@ int apply_world_flag_snapshot(const uint8_t* data, size_t size) {
     return n;
 }
 
+// ---------------------------------------------------------------- who moves an enemy
+// In the game's co-op every game bids for the enemies around (WorldChrMan's update 0xE40A20 -> 0xE6D250,
+// stdcall(chr) ret 4: the authority level chr+0x204, plus 256 per step of the enemy's engagement (chr+0xF4), plus
+// up to 255 for being near the local player: (1 - distance / 64) x 255). The session host's game hands each enemy
+// to the highest bid (0xE57850 -> 0xE558F0) and tells the others (a guest takes its share at 0xE57850). A game
+// runs an enemy's own AI (ComManipulator, chr+0x410) only if the enemy was handed to it (WorldChrMan+0x2B4 entry
+// >= 0, read by 0xE3E250 from 0xE5A940) or has SetNoNetSync (chr+0x428); otherwise it follows the network
+// (NetAIManipulator, chr+0x414). The engagement steps outweigh the distance, so a game far away can win: after the
+// guest rested at the Undead Burg bridge bonfire, the host's game at Firelink won the Hellkite (the event
+// "Set Network Update Authority" gives both games 4095), and the guest's dragon followed the host's copy, which
+// had landed with no floor loaded so far from the host and fell through the bridge (2026-10-13). A game whose
+// player is beyond the 64 m of the distance term does not bid while another player stands nearer the enemy.
+constexpr uint32_t kNetPrioritySite = 0x00E40C26;
+constexpr uint32_t kNetPriority = 0x00E6D250;
+constexpr float kBidReach = 64.0f;
+std::vector<PeerSpot> g_peer_spots;
+
+float dist3(const game::Vec3& a, const game::Vec3& b) {
+    const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+uint32_t __stdcall hk_net_priority(uint32_t chr) {
+    using Fn = uint32_t(__stdcall*)(uint32_t);
+    const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
+    if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
+    game::Vec3 at{}, me{};
+    if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return bid;
+    const float mine = dist3(me, at);
+    if (mine <= kBidReach) return bid;
+    for (const PeerSpot& p : g_peer_spots) {
+        const float theirs = dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at);
+        if (theirs < mine) {
+            static std::set<uint32_t> logged;
+            if (logged.size() < 30 && logged.insert(chr).second) {
+                LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): no bid from here (we are %.0f m away, a player in map "
+                         "%08X is %.0f m away)",
+                         chr, at.x, at.y, at.z, mine, p.map, theirs);
+            }
+            return 0;
+        }
+    }
+    return bid;
+}
+
+// Which game moves the Hellkite (1010300), with where it is: logged when that changes and every 10 s while it
+// exists here, for the 2026-10-13 report (the dragon fell through the bridge after a rest).
+constexpr int kWatchedEnemies[] = {1010300};
+
+void track_watched_enemies() {
+    static double last = 0;
+    static int lines = 0;
+    const double t = seconds();
+    if (t - last < 0.5 || lines > 200 || !g_state.active || game::loading()) return;
+    last = t;
+    static std::map<int, std::pair<int, double>> seen;  // entity -> (control, last line)
+    for (int entity : kWatchedEnemies) {
+        const uint32_t chr = chr_by_entity(entity);
+        uint32_t current = 0, own_ai = 0, net_ai = 0, no_sync = 0;
+        game::Vec3 at{}, me{};
+        if (!chr || !read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai) ||
+            !game::chr_position(chr, &at)) {
+            continue;
+        }
+        const int control = current == own_ai ? 1 : current == net_ai ? 2 : 0;
+        auto& s = seen[entity];
+        if (control == s.first && t - s.second < 10.0) continue;
+        s = {control, t};
+        game::position(&me, nullptr);
+        read32(chr + 0x428, &no_sync);  // SetNoNetSync (low byte)
+        ++lines;
+        LOG_INFO("[coop] Enemy %d: moved by %s, at (%.1f, %.1f, %.1f), %.0f m from us%s", entity,
+                 control == 1 ? "this game (own AI)" : control == 2 ? "another game (network)" : "neither (?)", at.x,
+                 at.y, at.z, dist3(me, at), (no_sync & 0xFF) ? ", no net sync" : "");
+    }
+}
+
 int install() {
     int failed = 0;
     {
@@ -2560,6 +2678,7 @@ int install() {
     }
     failed += install_one("member left (no return home for the master of the world)", install_master_left());
     failed += install_one("guest bloodstain position", install_blood_world());
+    failed += install_one("bloodstain kept in a co-op party", install_param_party());
     {
         // mov eax, [esi+70h] ; sub eax, edi. The following je stays in place.
         static const uint8_t k[5] = {0x8B, 0x46, 0x70, 0x2B, 0xC7};
@@ -2712,6 +2831,8 @@ int install() {
                                        &g_event_sync_orig));
     failed += install_one("random picks of another game's runs",
                           redirect_call(kRandomFlagSite, kRandomFlag, reinterpret_cast<void*>(&hk_random_flag)));
+    failed += install_one("enemies moved by a game whose player is near",
+                          redirect_call(kNetPrioritySite, kNetPriority, reinterpret_cast<void*>(&hk_net_priority)));
     failed += install_one("Black Separation Crystal (guest)",
                           redirect_call(kSepGuestSite, kSepGuestOrig, reinterpret_cast<void*>(&hk_separation_guest)));
     failed += install_one("Black Separation Crystal (host)",
@@ -2802,7 +2923,8 @@ void track_bloodstain() {
         !read32(rec + 0x3C, &map) || !read32(rec + 0x38, &souls) || !read32(rec + 0x34, &humanity)) {
         return;
     }
-    const bool exists = (flags & 0xFF) != 0;
+    // A record with no souls (-1, after a pick-up or before the first death) shows no marker.
+    const bool exists = (flags & 0xFF) != 0 && static_cast<int>(souls) >= 0;
     static bool seen_exists = false;
     static game::Vec3 seen_at{};
     static uint32_t seen_map = 0;
@@ -2891,6 +3013,7 @@ void track_own_chr_type() {
 }
 
 void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = players; }
+void set_peer_spots(const std::vector<PeerSpot>& spots) { g_peer_spots = spots; }
 
 void tick() {
     g_main_thread = GetCurrentThreadId();
@@ -2920,6 +3043,7 @@ void tick() {
         track_own_chr_type();
     }
     track_bloodstain();
+    track_watched_enemies();
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();
 }

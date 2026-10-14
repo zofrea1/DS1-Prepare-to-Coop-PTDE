@@ -85,4 +85,11 @@ struct RemotePlayer {
 };
 void set_remote_players(const std::vector<RemotePlayer>& players);
 
+// Where the other session players stand, as their own games last reported it (alive, heard from lately).
+struct PeerSpot {
+    float pos[3] = {};
+    int map = -1;
+};
+void set_peer_spots(const std::vector<PeerSpot>& spots);
+
 }  // namespace coop::rules

@@ -1903,6 +1903,19 @@ void tick() {
     party::tick(!g_invade && (g_step == Step::Hosting || g_step == Step::InWorld), &peer_state);
     if (g_step == Step::Hosting || g_step == Step::InWorld) cutscene_tick();
     update_remote_players();
+    {
+        std::vector<rules::PeerSpot> spots;
+        if (g_step == Step::Hosting || g_step == Step::InWorld) {
+            for (const auto& p : g_peers) {
+                if (p.dead || p.map == -1 || now() - p.last_seen > 3.0) continue;
+                rules::PeerSpot s;
+                std::memcpy(s.pos, p.pos, sizeof(s.pos));
+                s.map = p.map;
+                spots.push_back(s);
+            }
+        }
+        rules::set_peer_spots(spots);
+    }
     if (g_role != Role::None && g_anim_log) anim_sync_log();
     // Motion sync: our gait and event animations out; the others' gaits onto their characters here.
     {

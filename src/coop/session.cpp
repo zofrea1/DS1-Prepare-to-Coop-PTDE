@@ -411,7 +411,7 @@ void host_open_lobby() {
         st.active = true;
         st.host = true;
         set_step(Step::Hosting);
-        LOG_INFO("[coop] Hosting a seamless session (lobby %016llx)", static_cast<unsigned long long>(lobby));
+        LOG_INFO("[coop] Hosting a co-op session (lobby %016llx)", static_cast<unsigned long long>(lobby));
         say(kMsgWorldOpen);
     });
 }
@@ -2258,15 +2258,15 @@ std::vector<std::wstring> panel_lines(int mode) {
     if (g_role == Role::None) return out;
     std::wstring head;
     if (g_role == Role::Host) {
-        head = g_step == Step::Hosting   ? L"Seamless co-op: hosting"
-               : g_step == Step::Closing ? L"Seamless co-op: closing..."
-                                         : L"Seamless co-op: creating session...";
+        head = g_step == Step::Hosting   ? L"Prepare to Co-op: hosting"
+               : g_step == Step::Closing ? L"Prepare to Co-op: closing..."
+                                         : L"Prepare to Co-op: creating session...";
     } else if (g_step == Step::InWorld) {
         head = (g_invade ? L"Invading " : L"In ") + text::widen(steam::persona(g_host)) + L"'s world";
     } else if (g_step == Step::GoingHome) {
         head = L"Returning home...";
     } else {
-        head = g_invade ? L"Seamless co-op: invading..." : L"Seamless co-op: joining...";
+        head = g_invade ? L"Prepare to Co-op: invading..." : L"Prepare to Co-op: joining...";
     }
     if (world::in_limbo()) head += L"  (limbo)";
     out.push_back(head);

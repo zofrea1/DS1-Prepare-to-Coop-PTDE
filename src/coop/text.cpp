@@ -140,7 +140,7 @@ bool listed(const uint32_t (&list)[N], uint32_t id) {
 
 bool __stdcall hk_recall(int channel, uint32_t id) {
     if (filtering() && listed(kBlockedEventTexts, id)) {
-        if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (seamless session)", id);
+        if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (co-op session)", id);
         return false;
     }
     return g_recall_orig(channel, id);
@@ -176,12 +176,12 @@ void __cdecl hk_info_open(int type, int a, int b, int c, int d) {
 bool __stdcall info_line(uint32_t id) {
     if (g_member_left_box && listed(kBlockedNotices, id)) {
         g_member_left_box = false;
-        if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (seamless session)", id);
+        if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (co-op session)", id);
         return true;
     }
     if (g_open.pending && listed(kBlockedNotices, id)) {
         g_open.pending = false;
-        if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (seamless session)", id);
+        if (++g_dropped <= 50) LOG_INFO("[coop] Game notice %u not shown (co-op session)", id);
         return true;
     }
     open_pending();

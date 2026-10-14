@@ -1,11 +1,11 @@
-# Seamless Co-op for Prepare to Die Edition
+# Prepare to Co-op Edition
 
 Play all of Dark Souls together with up to three friends, from the Undead Asylum to the Kiln, without the
-limits of the game's own co-op. Built into the PTDE FPS Unlock mod behind `[SeamlessCoop] SeamlessCoop` in
+limits of the game's own co-op. Built into the PTDE FPS Unlock mod behind `[PrepareToCoop] PrepareToCoop` in
 `PTDE-FPS-Unlock.ini` (off by default) and independent of the FPS unlock.
 
-This is a port of LukeYui's **Dark Souls Remastered Seamless Co-op** (`ds1sc.dll`), which only exists for
-Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and written again
+It is inspired by LukeYui's **Seamless Co-op** mod for Dark Souls Remastered (`ds1sc.dll`, called ds1sc
+below), which only exists for Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and written again
 for PTDE's engine. The goal of this first stage is a faithful port: the same items, the same rules, the same
 session behaviour. Where PTDE's engine sets a hard limit (four players instead of six), the port keeps the
 engine's limit.
@@ -17,16 +17,16 @@ animations are back.
 
 ## How to play
 
-1. Everyone sets the same `Password` and `SeamlessCoop = true`. Keep the other settings the same too (the
+1. Everyone sets the same `Password` and `PrepareToCoop = true`. Keep the other settings the same too (the
    host's world rules apply, but enemy scaling is worked out on each PC).
-2. Rest at any bonfire. Each rest gives every co-op item you do not carry (as Remastered Seamless Co-op
+2. Rest at any bonfire. Each rest gives every co-op item you do not carry (as ds1sc
    does), so an existing character copied to the co-op save gets them at its first rest.
 
    | Item | Use | Usable |
    | --- | --- | --- |
-   | Blessed Eye Orb | Create a seamless co-operative session. Players with your password can join at any time, wherever you are. | outside a session |
+   | Blessed Eye Orb | Create a co-operative session. Players with your password can join at any time, wherever you are. | outside a session |
    | Crystal Eye Orb | Join the session of a player with your password. You arrive at the host's last bonfire. | outside a session |
-   | Chaos Eye Orb | Invade a seamless session that allows invaders, as an evil spirit. | outside a session |
+   | Chaos Eye Orb | Invade a co-operative session that allows invaders, as an evil spirit. | outside a session |
    | Abyssal Eye Orb | A guest returns home; the host disbands the session. | in a session, no invader present |
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
    | Dried Fingers | Host: taunt invaders; invaders searching for a world find yours first. | host |
@@ -40,19 +40,26 @@ animations are back.
 3. A panel at the top right lists the players in the session, with ping, soul level or deaths
    (`OverheadPlayerDisplay`), and the host's world rules.
 
-**Your save.** With seamless co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to
+**Your save.** With Prepare to Co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to
 `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to
 `DRAKS0005.co2` before starting. Vanilla play keeps using `.sl2`.
 
-**Steam.** The game runs as Steam's Spacewar (app 480) while seamless co-op is on. PTDE's own app (211420)
+**Steam.** The game runs as Steam's Spacewar (app 480) while Prepare to Co-op is on. PTDE's own app (211420)
 has had its Steam lobbies switched off since 2022, and Spacewar is the long-standing community route for PTDE
 multiplayer. The game's own online features (messages, bloodstains, signs, vanilla invasions, the ghosts of
-other players) still work, but only between players with the same password. Remastered Seamless Co-op has no
+other players) still work, but only between players with the same password. ds1sc has no
 such features (Remastered's online play needs FromSoftware's servers, which that mod replaces).
+
+**Title screen.** While Prepare to Co-op is on, the title screen reads PREPARE TO CO-OP EDITION instead of
+PREPARE TO DIE EDITION. The logo is the game's 512 x 512 `Title` texture (`menu/english/menu_local.tpf`) with new
+edition lines, built into the mod from `assets/ptde/PrepareToCoop-Title.png` and swapped in as the game creates the
+texture (`D3DXCreateTextureFromFileInMemory(Ex)`). To try other art, save it as `PrepareToCoop-Title.png` (or
+`.dds`) next to `DARKSOULS.exe`; `assets/ptde/Title-guide.png` shows which parts of the texture the game uses.
+After changing the built-in PNG, run `tools/embed_title.py` and rebuild.
 
 ## What changes in a session
 
-| Rule | Seamless co-op (as in Remastered Seamless Co-op) |
+| Rule | Prepare to Co-op (as in ds1sc) |
 | --- | --- |
 | Guests | Keep their own body (human or hollow), level, items and progress. They pick up items, get their own enemy drops and boss rewards, rest at bonfires, level up and talk to NPCs. |
 | Joining | A guest arrives at the host's last bonfire (where the host last rested). |
@@ -65,7 +72,7 @@ such features (Remastered's online play needs FromSoftware's servers, which that
 | Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. |
-| World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency; otherwise white tendency events never happen and black ones only in a cursed world (with seamless co-op on, world tendency is replaced in every world, as in Remastered Seamless Co-op). |
+| World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
 | Limbo | Dying during a boss fight or while an invader is present holds your respawn until the fight ends, everyone has fallen, or someone rests. |
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. When the host dies the invader wins; when the invader dies the invasion fails. |
 | Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |
@@ -73,9 +80,9 @@ such features (Remastered's online play needs FromSoftware's servers, which that
 
 ## How it works
 
-### The base: the game's own session (the same base as Remastered Seamless Co-op)
+### The base: the game's own session (the same base as ds1sc)
 
-Reverse engineering `ds1sc.dll` shows that Remastered Seamless Co-op does not replace the game's multiplayer
+Reverse engineering `ds1sc.dll` shows that ds1sc does not replace the game's multiplayer
 with its own: it builds the guest's presence out of Remastered's own session code. It creates the game's own
 connection objects for each peer and feeds the game's session manager with synthetic session events; the
 game's own netcode (player positions, enemies, objects, damage, event synchronisation) then runs as usual. It
@@ -88,13 +95,13 @@ and the event flags of that world are the host's.
 PTDE's sessions are pure Steam lobbies and Steam peer-to-peer, which still work under Spacewar, so the port
 needs no transport of its own for the game's traffic: the guest joins through the game's own session and
 summon code and the game's own netcode runs over the game's own Steam channels. The mod's own messages (the
-equivalent of Remastered Seamless Co-op's packets `0x0B`-`0x1F`) travel on a private channel.
+equivalent of ds1sc's packets `0x0B`-`0x1F`) travel on a private channel.
 
 So the base is the same in both: the game's session, the guest in the host's world, the host's game in charge
-of the world, and the mod's rules and synchronisation layered on top. Every system Remastered Seamless Co-op
+of the world, and the mod's rules and synchronisation layered on top. Every system ds1sc
 synchronises sits on this layer and can be ported:
 
-| Remastered Seamless Co-op feature | How it works there | PTDE port |
+| ds1sc feature | How it works there | PTDE port |
 | --- | --- | --- |
 | Enemy sync | the game's own session netcode | the game's own session netcode |
 | World state (objects, doors, levers) | the game's own netcode plus event flags | the same |
@@ -185,15 +192,14 @@ the trip home, keep the guest human.
 
 The death penalty (`0xD78B10`, the event script's `UpDateBloodMark`) records the stain at the start of the
 player's death replay (`PlayerIns+0x5E0`) in their own world, and at the place they were summoned from
-(`GameMan+0xAE0`) in someone else's. A co-op guest was never summoned from anywhere. As in Remastered Seamless
-Co-op, that test answers "own world" for a co-op guest, so the stain is where they fell. Creating the marker
+(`GameMan+0xAE0`) in someone else's. A co-op guest was never summoned from anywhere. As in ds1sc, that test answers "own world" for a co-op guest, so the stain is where they fell. Creating the marker
 (`0xDB6010`) and picking it up (`FrpgEventConditionSelfBlood`, `0xD5B330`) do not depend on whose world it is.
 
 ### Bonfire animations
 
 Sitting, the sitting loop, standing up, kindling and the bonfire menu's ceremonies are event animations
 (`0xE69590` starts one on a character, `0xE69470` stops it), which the player samples do not carry (they
-carry the character's state machine ids). Remastered Seamless Co-op watches the start function on the local
+carry the character's state machine ids). ds1sc watches the start function on the local
 player and, for nineteen bonfire animations, has every other game call it on that player's character. The
 port does the same and passes on the stops as well: PTDE's event script stops the sitting loop before it
 plays the standing up, and the bonfire menu stops and starts animations of its own. Each player also reports
@@ -204,7 +210,7 @@ was already sitting) is put right.
 
 The mod's lines go to the action box (`MenuMan+0xEC0`, two channels of three lines, queued by `0x515B80` and
 shown with `MenuMan+0xF4`, as Lua `RecallMenuEvent` does). `RecallMenuEvent`'s body (`0xD74950`, also used by
-the game's own summon notices in `0xEA2510`) drops Remastered Seamless Co-op's list of summon texts (140013,
+the game's own summon notices in `0xEA2510`) drops ds1sc's list of summon texts (140013,
 140014, 140023, 140024, 140030, 140031, 140033, 140034, 140153, 140154, 140192) during a session. The game's
 information box (`0xD4C090` opens it, `0xD4C190`/`0xD4C290` add a line) is a modal list; during a session (and
 for a minute after) it opens only when its first line arrives, and the notices about phantoms going home
@@ -226,7 +232,7 @@ characters.
 
 Map events test the session through `EcTestMultiplayState::Test` (`0xBB3130`; the SKIP/END IF instructions call
 it directly from `0xBB3200`). The game's co-op ends most events on clients, so only the host's game ran them.
-As in Remastered Seamless Co-op, during a session "host" passes and "client" fails for every event, so each
+As in ds1sc, during a session "host" passes and "client" fails for every event, so each
 game runs the world's events; events 11005844, 11015846, ... 11810150 (the Asylum crow) fail every
 multiplayer test, and 11020301, 11200005, 11200006, 11305000, 11510230, 11600200 act as in single player. The
 event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = false` restores the game's rule.
@@ -235,7 +241,7 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 
 | What | Where |
 | --- | --- |
-| Rows | extra `EquipParamGoods` rows 389000-389008 from the goods param getter (`0xD1E3A0`): Remastered Seamless Co-op's rows field for field (refId -100..-93, icons, the eye orb animation, the Parchment's yes/no dialog), with the flag bytes translated (Remastered inserted `enable_pvp` into the bit fields) |
+| Rows | extra `EquipParamGoods` rows 389000-389008 from the goods param getter (`0xD1E3A0`): ds1sc's rows field for field (refId -100..-93, icons, the eye orb animation, the Parchment's yes/no dialog), with the flag bytes translated (Remastered inserted `enable_pvp` into the bit fields) |
 | Can it be used? | the game's item check (`0xEADCA0`, cdecl) answered by the session rules for these ids, Homeward Bone, Black Eye Orb, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls |
 | Effect | `PlayerIns::UseGoods` (vtable slot 128) |
 | Names | the game's FMG lookup (`0xD175E0`); the Parchment dialog (event text 93129700) shows the soul cost |
@@ -247,7 +253,7 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 | --- | --- |
 | Enemy and object drops, scripted reward items | inlined guest checks in `0xDC80A0`, `0xDC8370`, `0xDC9170` |
 | Bonfires and NPC talk | `HasPartyMembers` (`0xD2A4B0`) at the bonfire object (`0xD58AE4`) and talk script function 0x34 (`0xD4ABFB`) |
-| Multiplayer walls | Lua `GetMultiWallNum` (`0xD5DC40`) answers 0 in every seamless role: `OnEvent_4034` (`OnSessionJustIn`) raises the walls on the host's side (`IsClient()` false), which every player then meets |
+| Multiplayer walls | Lua `GetMultiWallNum` (`0xD5DC40`) answers 0 in every co-op role: `OnEvent_4034` (`OnSessionJustIn`) raises the walls on the host's side (`IsClient()` false), which every player then meets |
 | Progress | the event-flag setter (`0xD38CB0`): changes are shared, and a guest's are also written to their own world's store |
 
 ### World rules
@@ -257,14 +263,14 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 - **Bonfires:** `WarpNextStage_Bonfire` (`0xD62CA0`) and `Util_RequestLevelUpFirst` (`0xD5D850`) are mirrored.
 - **Teams:** who may hit whom comes from the team relation table (`0x12DF268`, 19 x 19, row attacker,
   column target) and each character's team (`chr+0x74`), mostly read inline, so the mod writes the team on the
-  players' characters every frame (and answers the getter `0xE68C80` the same way). Remastered Seamless Co-op
+  players' characters every frame (and answers the getter `0xE68C80` the same way). ds1sc
   uses 0xF (allies hostile), 0x12 (teams) and 0x10 (invaders); Remastered has a second, more hostile relation
   table in which 0xF is hostile to every team. PTDE has only the first, where 0xF is friendly to players, so the
   port uses PTDE's team 13 (hostile to every team, itself included) for hostile allies and 16 for invaders
   (hostile to players only, as 0x10 is in Remastered). **World tendency:** `EcTestTendency` (vtable `0x11DE5F0`).
 - **Limbo:** `WarpNextStageKick` (`0xD62930`), which performs the respawn warp, waits while you are dead,
   others are alive and a boss gauge (`MenuMan+0xF64/+0xF78`) or an invader is present.
-- **Scaling and debuff:** Remastered Seamless Co-op's `SpEffectParam` rows and ids (enemy 2147418000+, boss
+- **Scaling and debuff:** ds1sc's `SpEffectParam` rows and ids (enemy 2147418000+, boss
   2147418005+, debuff 2147419000+; the param layout is identical in both games) served by the SpEffect param
   getter (`0xD1B650`) and applied with `ChrIns::ApplySpEffect` (vtable slot 125).
 - **Save file:** the save manager's extension (`0x733FC0`).
@@ -273,12 +279,11 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 
 - **Four players, not six:** PTDE's engine keeps three remote players in a world.
 - **Spectating in limbo** is not implemented yet: the camera stays where you fell.
-- **Party HP across areas** (Remastered Seamless Co-op shows the HP of players in other areas) and the
+- **Party HP across areas** (ds1sc shows the HP of players in other areas) and the
   **covenant reward** for a winning invader are not implemented yet.
 - **Item descriptions** are written for the port; names, one-line infos and icons are the original's.
 - The player panel is a list at the top right rather than text above each player.
-- Ghosts, messages and bloodstains of players with the same password still appear (Remastered Seamless
-  Co-op has none).
+- Ghosts, messages and bloodstains of players with the same password still appear (ds1sc has none).
 - The Remastered mod's GitHub ban list is not used.
 - **Teams** ("allies in teams") put the host against the guests; the Remastered mod's exact team split could
   not be reproduced with PTDE's team table.
@@ -288,5 +293,5 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 
 `PTDE-FPS-Unlock.log` has `[coop]` lines for every step (Steam ready, session state, joins, kept sessions,
 each item used, each hotkey press). A `Tick running` line every minute shows the co-op module is alive. If
-any hook does not match the executable (it expects the 2015 Steam build), seamless co-op turns itself off and
+any hook does not match the executable (it expects the 2015 Steam build), Prepare to Co-op turns itself off and
 says which.

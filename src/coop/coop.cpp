@@ -257,14 +257,14 @@ void coop_install_early(const Settings& settings) {
 
 void coop_install(const Settings& settings) {
     if (!settings.coop.enabled) {
-        LOG_INFO("[coop] Seamless co-op: off");
+        LOG_INFO("[coop] Prepare to Co-op: off");
         return;
     }
-    LOG_INFO("[coop] Seamless co-op: on (Steam app %d, password %s, invaders %s, max 4 players)", g_cfg.app_id,
+    LOG_INFO("[coop] Prepare to Co-op: on (Steam app %d, password %s, invaders %s, max 4 players)", g_cfg.app_id,
              g_cfg.password[0] ? "set" : "EMPTY", g_cfg.allow_invaders ? "allowed" : "off");
     LOG_INFO("[coop] %s", g_save_report.c_str());
     if (!g_steam_hooked) {
-        LOG_ERROR("[coop] Could not hook the game's Steam calls; seamless co-op is unavailable.");
+        LOG_ERROR("[coop] Could not hook the game's Steam calls; Prepare to Co-op is unavailable.");
         return;
     }
     const int failed = coop::rules::install();
@@ -297,7 +297,7 @@ void coop_install(const Settings& settings) {
     cfg.death_debuffs = g_cfg.death_debuffs;
     coop::session::configure(cfg);
     if (failed || !world) {
-        LOG_ERROR("[coop] %d co-op hook(s) could not be installed; seamless co-op is off to keep the game safe.",
+        LOG_ERROR("[coop] %d co-op hook(s) could not be installed; Prepare to Co-op is off to keep the game safe.",
                   failed + (world ? 0 : 1));
         return;
     }

@@ -58,16 +58,16 @@ struct Def {
 };
 
 const Def kDefs[kCount] = {
-    {-100, 40, 2008, L"Blessed Eye Orb", L"Create a seamless co-operative session",
-     L"A small, pale eye orb, warm in the hand.\n\nUse it to create a seamless co-operative session. Players\n"
+    {-100, 40, 2008, L"Blessed Eye Orb", L"Create a co-operative session",
+     L"A small, pale eye orb, warm in the hand.\n\nUse it to create a co-operative session. Players\n"
      L"who share your password may then join your world at any\ntime, wherever you are."},
-    {-99, 80, 2010, L"Crystal Eye Orb", L"Join a seamless co-operative session",
+    {-99, 80, 2010, L"Crystal Eye Orb", L"Join a co-operative session",
      L"A small blue eye orb of clouded crystal that hums faintly.\n\nUse it to join the world of a player who "
      L"shares your\npassword. You travel in your own body and keep all\nthat you gain."},
-    {-98, 81, 2002, L"Chaos Eye Orb", L"Invade a seamless co-operative session",
-     L"A small eye orb, red with heat and spite.\n\nUse it to invade, as an evil spirit, a seamless\n"
+    {-98, 81, 2002, L"Chaos Eye Orb", L"Invade a co-operative session",
+     L"A small eye orb, red with heat and spite.\n\nUse it to invade, as an evil spirit, a\n"
      L"co-operative session that welcomes invaders."},
-    {-97, 0, 2132, L"Abyssal Eye Orb", L"Disband a seamless session",
+    {-97, 0, 2132, L"Abyssal Eye Orb", L"Disband a co-operative session",
      L"A small black eye orb whose gaze never wavers.\n\nA guest uses it to return home. A host uses it to\n"
      L"disband the session."},
     {-96, 0, 2007, L"Ominous Tome", L"Change the world rules",
@@ -304,7 +304,7 @@ void tick() {
     if (!g_free_since) g_free_since = t;
     if (t - g_free_since < 1000) return;
     g_told = false;
-    text::show(L"Seamless co-op items added to your inventory");
+    text::show(L"Prepare to Co-op items added to your inventory");
 }
 
 // A key item (goodsType 1, the Crimson Blossom) sits in the key range and its slot byte at +0x10 is 0.

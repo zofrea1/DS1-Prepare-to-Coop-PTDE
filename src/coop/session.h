@@ -34,6 +34,7 @@ struct PeerInfo {
     double gait_at = 0;      // when they last reported it
     int ceremony = 0;        // the bonfire animation they report looping (their sit), 0 none
     double anim_at = 0;      // when one of their event animations last arrived
+    int death_events = 0;    // kDead messages about them this session
 };
 
 void configure(const Config& cfg);

@@ -182,9 +182,14 @@ std::set<uint32_t> g_removed;  // characters we asked the game to remove (they l
 // had its health back from the network at once and was never rebuilt, so only its health bar showed (2026-10-13
 // test). A rebuild after a jump into our map (respawn, warp) was tried as well and crashed the host: see
 // party_reads_character.
+// Kept per slot and per character, and for the player it was made for: a slot's next player can get a character
+// at the same address (2026-10-14: the guest's character took the one of a player who had left, the record kept
+// that player's death count, and the guest's death went unseen, so their dead copy stayed pushable on the host).
 struct Made {
     uint32_t chr = 0;
+    uint64_t peer = 0;  // the player's Steam id, 0 not known yet
     int deaths = -1;
+    int death_events = -1;
     bool seen_dead = false;
 };
 
@@ -288,14 +293,20 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
             continue;
         }
         Made& made = g_made[r.slot];
-        if (made.chr != r.chr) {
+        if (made.chr != r.chr || (ps.known && made.peer != ps.id)) {
             made = Made{};
             made.chr = r.chr;
+            made.peer = ps.known ? ps.id : 0;
             made.deaths = ps.deaths;
+            made.death_events = ps.death_events;
         }
         if (hp(r.chr) <= 0) made.seen_dead = true;
-        const bool died = made.seen_dead || (ps.known && made.deaths >= 0 && ps.deaths > made.deaths);
+        // A death shows as 0 HP here, a higher death count, or the player's own death message (the copy's HP is
+        // not always seen at 0 in the 1 s checks).
+        const bool died = made.seen_dead || (ps.known && made.deaths >= 0 && ps.deaths > made.deaths) ||
+                          (ps.known && made.death_events >= 0 && ps.death_events > made.death_events);
         if (made.deaths < 0) made.deaths = ps.deaths;
+        if (made.death_events < 0) made.death_events = ps.death_events;
         if (!died) continue;
         // Their character here died. Rebuild it once that player reports being alive (they respawned) and the
         // party is done with it; a character no player can be matched to stays as it is. The old character goes

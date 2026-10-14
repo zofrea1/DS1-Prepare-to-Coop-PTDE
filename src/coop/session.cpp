@@ -26,7 +26,7 @@ namespace {
 
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
-constexpr uint32_t kProtocol = 7;
+constexpr uint32_t kProtocol = 8;
 
 enum MsgType : uint8_t {
     kHello = 1,        // guest/invader -> host: please let me in
@@ -48,6 +48,7 @@ enum MsgType : uint8_t {
     kAnim = 17,        // everyone -> everyone: a bonfire event animation of ours started or stopped
     kWorldFlags = 18,  // host -> a guest who arrived: the map flags of the host's world (rules::world_flag_snapshot)
     kCutFollow = 19,   // anyone -> all (through the host): a cutscene took me into this map, follow me there
+    kDropped = 20,     // host -> a player it dropped for silence who is talking again: go home
 };
 
 enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4 };
@@ -117,6 +118,7 @@ struct PlayerEvent {
     uint64_t who;
     uint8_t invader;
     char name[64];
+    uint8_t lost;  // kLeft: the host dropped them after their connection went quiet
 };
 struct GaitMsg {
     Header h;
@@ -157,6 +159,9 @@ constexpr const wchar_t* kMsgJoined = L"{} has joined!";
 constexpr const wchar_t* kMsgInvaded = L"Evil spirit {} has invaded!";
 constexpr const wchar_t* kMsgLeft = L"{} has left";
 constexpr const wchar_t* kMsgInvaderLeft = L"Evil spirit {} has left";
+constexpr const wchar_t* kMsgLost = L"{} lost the connection";
+constexpr const wchar_t* kMsgInvaderLost = L"Evil spirit {} lost the connection";
+constexpr const wchar_t* kMsgHostLost = L"Lost the connection to the host. Returning to your world...";
 constexpr const wchar_t* kMsgDied = L"{} has died";
 constexpr const wchar_t* kMsgInvaderDied = L"Evil spirit {} has died";
 constexpr const wchar_t* kMsgGuestStart = L"Joining another world as a guest...";
@@ -224,8 +229,17 @@ int g_search_gen = 0;
 std::vector<Pending> g_pending;
 std::vector<PeerInfo> g_peers;
 // Host: the players it let in (a Welcome with kOk). Steam passes on packets from anyone in the lobby, so the host
-// takes world changes only from these. Kept apart from g_peers, which a P2P failure clears while the guest stays.
+// takes world changes only from these. Kept apart from g_peers, which also holds players not let in.
 std::vector<uint64_t> g_admitted;
+// A player whose connection went quiet is dropped (nothing heard for kLostQuiet s after Steam reported the link
+// lost, or for kLostSilent s in any case): the host tells the others and stops sending to them; a guest goes
+// home. Nothing is counted while this game itself was not running (a machine asleep, a long stall).
+constexpr double kLostQuiet = 10.0;
+constexpr double kLostSilent = 60.0;
+std::map<uint64_t, double> g_p2p_failed;  // when Steam last reported the link to a player lost
+std::vector<uint64_t> g_lost;             // host: dropped players still in the lobby (no broadcasts, kDropped)
+double g_host_heard = 0;                  // guest: the last message from the host
+double g_quiet_grace_until = 0;           // no drops before this (we were not running)
 int g_ping_ms = -1;
 int64_t g_ping_qpc = 0;  // guest: counter when the last ping was sent (0 none)
 std::vector<std::pair<int, bool>> g_flag_queue;
@@ -323,11 +337,15 @@ bool send_to(uint64_t to, T& msg, bool reliable = true) {
     return steam::send(to, &msg, sizeof(msg), reliable);
 }
 
+bool is_lost(uint64_t id) { return std::find(g_lost.begin(), g_lost.end(), id) != g_lost.end(); }
+
+void unmark_lost(uint64_t id) { g_lost.erase(std::remove(g_lost.begin(), g_lost.end(), id), g_lost.end()); }
+
 void broadcast_raw(const void* data, uint32_t size, bool reliable = true, uint64_t except = 0) {
     if (!g_lobby) return;
     const uint64_t me = steam::self();
     for (uint64_t m : steam::lobby_members(g_lobby)) {
-        if (m != me && m != except) steam::send(m, data, size, reliable);
+        if (m != me && m != except && !is_lost(m)) steam::send(m, data, size, reliable);
     }
 }
 
@@ -377,6 +395,9 @@ void finish(const std::wstring& why) {
     g_pending.clear();
     g_peers.clear();
     g_admitted.clear();
+    g_lost.clear();
+    g_p2p_failed.clear();
+    g_host_heard = 0;
     g_homeward_at = 0;
     g_follow_bonfire = -1;
     g_guest_bonfire = -1;
@@ -451,6 +472,33 @@ int coop_guest_count() {
         if (!p.invader && now() - p.last_seen <= 10.0) ++n;
     }
     return n;
+}
+
+// Host: players in the session we have not heard from (see kLostQuiet). The game's own session lets them go by
+// itself when Steam gives up on the link; this tells everyone and stops our messages to them.
+void drop_quiet_players() {
+    if (now() < g_quiet_grace_until) return;
+    const std::vector<uint64_t> ids = g_admitted;
+    for (uint64_t id : ids) {
+        auto it = std::find_if(g_peers.begin(), g_peers.end(), [id](const PeerInfo& q) { return q.id == id; });
+        if (it == g_peers.end()) continue;
+        const double quiet = now() - it->last_seen;
+        const auto f = g_p2p_failed.find(id);
+        const bool failed = f != g_p2p_failed.end() && f->second >= it->last_seen;
+        if (!(failed && quiet >= kLostQuiet) && quiet < kLostSilent) continue;
+        const PeerInfo p = *it;
+        LOG_INFO("[coop] %s: nothing heard for %.0f s%s; dropped from the session", p.name.c_str(), quiet,
+                 failed ? " and Steam reports the link lost" : "");
+        say(fmt(p.invader ? kMsgInvaderLost : kMsgLost, text::widen(p.name)));
+        PlayerEvent e = player_event(kLeft, id, p.invader, p.name);
+        e.lost = 1;
+        broadcast(e, true, id);
+        steam::close(id);
+        g_peers.erase(it);
+        set_admitted(id, false);
+        g_p2p_failed.erase(id);
+        if (!is_lost(id)) g_lost.push_back(id);
+    }
 }
 
 void host_answer(const Pending& p) {
@@ -703,6 +751,7 @@ void host_tick() {
     }
     if (g_step != Step::Hosting) return;
     host_ensure_game_session();
+    drop_quiet_players();
     const bool ready = game::session_state() == 3;
     for (size_t i = 0; i < g_pending.size();) {
         if (ready) {
@@ -808,6 +857,7 @@ void issue_search() {
             }
             g_lobby = lobby;
             g_host = steam::lobby_owner(lobby);
+            g_host_heard = now();
             LOG_INFO("[coop] Entered %s's lobby", steam::persona(g_host).c_str());
             g_hello_tries = 0;
             guest_send_hello();
@@ -1009,6 +1059,18 @@ void guest_tick() {
             }
             break;
         case Step::InWorld:
+            if (g_host_heard > 0 && now() >= g_quiet_grace_until) {
+                const double quiet = now() - g_host_heard;
+                const auto f = g_p2p_failed.find(g_host);
+                const bool failed = f != g_p2p_failed.end() && f->second >= g_host_heard;
+                if ((failed && quiet >= kLostQuiet) || quiet >= kLostSilent) {
+                    char why[96];
+                    std::snprintf(why, sizeof(why), "nothing heard from the host for %.0f s%s", quiet,
+                                  failed ? ", link lost" : "");
+                    guest_go_home(kMsgHostLost, why);
+                    break;
+                }
+            }
             if (g_world_wait > 0 && now() - g_world_wait > 30.0) {
                 LOG_INFO("[coop] The host's map flags did not come; our copy of their world stays as it is");
                 g_world_wait = 0;
@@ -1161,6 +1223,20 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         std::memcpy(out, data, sizeof(*out));
         return true;
     };
+    if (g_role == Role::Guest && from == g_host) g_host_heard = now();
+    // A player we dropped for silence is still playing in our world as far as they know (a machine woken from
+    // sleep): tell them to go home.
+    if (g_role == Role::Host && h.type != kHello && is_lost(from)) {
+        static std::map<uint64_t, double> told;
+        if (now() - told[from] >= 2.0) {
+            told[from] = now();
+            Simple d{};
+            fill_header(&d, kDropped);
+            send_to(from, d);
+            LOG_INFO("[coop] %s is talking again after being dropped: told them to go home", steam::persona(from).c_str());
+        }
+        return;
+    }
     // The host takes a Hello, Bye or Ping from anyone in the lobby and the rest only from the players it let in:
     // Steam passes on packets from every lobby member, also ones refused or not answered yet.
     if (g_role == Role::Host && h.type != kHello && h.type != kBye && h.type != kPing && !admitted(from)) {
@@ -1184,6 +1260,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 return;
             }
             steam::accept(from);
+            unmark_lost(from);  // asking again
             PeerInfo* p = peer(from);
             m.name[sizeof(m.name) - 1] = 0;
             p->name = m.name;
@@ -1293,7 +1370,10 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             } else if (from != g_host) {
                 return;
             }
-            if (PeerInfo* p = peer(m.who)) p->dead = true;
+            if (PeerInfo* p = peer(m.who)) {
+                p->dead = true;
+                ++p->death_events;  // their character here gets rebuilt (party::tick)
+            }
             say(fmt(m.invader ? kMsgInvaderDied : kMsgDied, event_name(m)));
             // The host fell while we invade: the game's own invader victory (HostDead) runs here.
             if (m.who == g_host && g_invade && g_step == Step::InWorld) {
@@ -1378,7 +1458,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         case kLeft: {
             PlayerEvent m;
             if (from != g_host || g_role != Role::Guest || !as(&m) || m.who == steam::self()) return;
-            say(fmt(m.invader ? kMsgInvaderLeft : kMsgLeft, event_name(m)));
+            say(fmt(m.lost ? (m.invader ? kMsgInvaderLost : kMsgLost) : (m.invader ? kMsgInvaderLeft : kMsgLeft),
+                    event_name(m)));
             const uint64_t who = m.who;
             g_peers.erase(std::remove_if(g_peers.begin(), g_peers.end(),
                                          [who](const PeerInfo& q) { return q.id == who; }),
@@ -1419,6 +1500,11 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!as(&m)) return;
             m.h.type = kPong;
             send_to(from, m, false);
+            break;
+        }
+        case kDropped: {
+            if (from != g_host || g_role != Role::Guest || (g_step != Step::InWorld && g_step != Step::Loading)) return;
+            guest_go_home(kMsgHostLost, "the host dropped us after our connection went quiet");
             break;
         }
         case kPong: {
@@ -1542,9 +1628,11 @@ party::PeerState peer_state(uint32_t chr, const std::wstring& name) {
     if (!p) p = peer_by_char_name(name);
     if (!p) return s;
     s.known = true;
+    s.id = p->id;
     s.invader = p->invader;
     s.alive = !p->dead && p->alive_since > 0 && now() - p->alive_since >= 2.0 && now() - p->last_seen <= 5.0;
     s.deaths = p->deaths;
+    s.death_events = p->death_events;
     s.map = p->map;
     return s;
 }
@@ -1877,12 +1965,16 @@ void set_callbacks() {
                                          [user](const PeerInfo& q) { return q.id == user; }),
                           g_peers.end());
             set_admitted(user, false);
+            unmark_lost(user);
+            g_p2p_failed.erase(user);
         }
     });
     steam::on_p2p_failed([](uint64_t peer_id, int error) {
         LOG_INFO("[coop] P2P with %016llx failed (%d)", static_cast<unsigned long long>(peer_id), error);
         steam::close(peer_id);
-        if (g_role != Role::Host) return;
+        g_p2p_failed[peer_id] = now();
+        // A player in the session stays until drop_quiet_players finds them quiet: the link often comes back.
+        if (g_role != Role::Host || admitted(peer_id)) return;
         const auto keep = std::remove_if(g_peers.begin(), g_peers.end(),
                                          [peer_id](const PeerInfo& q) { return q.id == peer_id; });
         if (keep != g_peers.end()) g_peers.erase(keep, g_peers.end());
@@ -1914,6 +2006,19 @@ void tick() {
         }
     }
     if (!steam::ready()) return;
+    {
+        static double last_tick = 0;
+        const double t = now();
+        if (last_tick > 0 && t - last_tick > 3.0 && g_role != Role::None) {
+            g_quiet_grace_until = t + kLostQuiet + 5.0;
+            static int lines = 0;
+            if (++lines <= 20) {
+                LOG_INFO("[coop] This game did not run for %.0f s; no one is dropped for silence for %.0f s",
+                         t - last_tick, kLostQuiet + 5.0);
+            }
+        }
+        last_tick = t;
+    }
     set_callbacks();
     steam::poll(on_message);
     if (g_separation) {

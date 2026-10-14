@@ -171,6 +171,14 @@ The host's Abyssal Eye Orb disbands the way the game ends a session after the Bl
 guests are told and leave, the game's own member-left code takes their characters out of the party, and when
 the host is the last member the game's own leave (`0xD2B460`) closes the session.
 
+A player who drops off without leaving (a crash, a lost network, a Steam Deck put to sleep) is noticed by the
+silence: every player sends its status each second. With nothing heard for 10 s after Steam reports the link
+lost, or for 60 s in any case, the host shows "{name} lost the connection", tells the other players and stops
+sending to them; a guest or invader who stops hearing the host goes home ("Lost the connection to the host").
+The game itself takes the lost player's character out when Steam gives up on the link. A player who comes
+back from sleep still in the old session hears from the host that it was dropped and goes home. Time in which a
+game was not running at all is not counted as anyone's silence.
+
 ### A guest's bonfire menu
 
 The bonfire talk (`t<map>0<nn>.esd`, the same script at every bonfire) builds its menu with

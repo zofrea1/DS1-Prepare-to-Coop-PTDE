@@ -546,20 +546,37 @@ void share_lights(const std::vector<RemoteLight>& peers) {
 // 0xA0000. The next instruction reads [table+0x180] and the process dies (both 2026-10-08 crashes, at
 // 0xE730D0). The same function already skips this lookup when the struct itself is missing (0xE730FB).
 // A missing or unreadable row takes that skip. eax is not live at the use-row instruction (0xE730E1).
+// PlayerIns+0x29C is the collision piece the character stands on (set by 0xE6E580, the map hit with its
+// group at +0x44). Once that piece's block is unloaded the pointer is left dangling: in the 2026-10-13 tests a
+// rest at the Undead Burg bonfire 1011962 left one with table 0, then 0xBF800000 (freed memory), read about
+// 20 times a second from then on (1000 faults in a minute) and by every other reader of the field too. Another
+// player's character in that state loses the dangling floor (0, which the game treats as standing on no
+// collision until it lands on new ground); for our own character the lookup is only skipped.
 constexpr uint32_t kParamLookup = 0x00E730C7;
 
-static uint32_t __stdcall param_row(uint32_t obj, int index) {
+static uint32_t __stdcall param_row(uint32_t obj, int index, uint32_t player) {
     uint32_t table = 0, count = 0, rows = 0, row = 0, inner = 0;
     uint8_t flag = 0;
-    const bool ok = index >= 0 && read32(obj + 8, &table) && table >= 0x10000 && read32(table + 0x180, &count) &&
-                    index < static_cast<int>(count) && read32(table + 0x188, &rows) && rows >= 0x10000 &&
+    static uint32_t bad_obj = 0, bad_table = 0;
+    if (index < 0 || !read32(obj + 8, &table)) return 0;
+    if (obj == bad_obj && table == bad_table) return 0;  // the same dangling floor: skip without touching it
+    const bool ok = table >= 0x10000 && read32(table + 0x180, &count) && index < static_cast<int>(count) &&
+                    read32(table + 0x188, &rows) && rows >= 0x10000 &&
                     read32(rows + static_cast<uint32_t>(index) * 4, &row) && row >= 0x10000 &&
                     read32(row + 0x5C, &inner) && inner >= 0x10000 && read8(inner + 0x27, &flag);
     if (ok) return row;
+    bad_obj = obj;
+    bad_table = table;
+    const bool ours = player == game::player();
+    uint32_t floor = 0;
+    if (!ours && player && read32(player + 0x29C, &floor) && floor == obj) {
+        *reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(player + 0x29C)) = 0;
+    }
     static int logged = 0;
-    if (logged < 8) {
+    if (logged < 12) {
         ++logged;
-        LOG_INFO("[coop] Player param row skipped (struct %08X index %d table %08X)", obj, index, table);
+        LOG_INFO("[coop] Player param row skipped (struct %08X index %d table %08X, %s character %08X%s)", obj, index,
+                 table, ours ? "our" : "another player's", player, ours ? "" : ": its dangling floor is cleared");
     }
     return 0;
 }
@@ -567,6 +584,7 @@ static uint32_t __stdcall param_row(uint32_t obj, int index) {
 static __declspec(naked) void hk_param_row() {
     __asm {
         pushad
+        push ebx  // PlayerIns
         push edx
         push eax
         call param_row

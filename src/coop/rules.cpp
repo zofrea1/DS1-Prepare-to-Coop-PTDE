@@ -780,22 +780,38 @@ __declspec(naked) void hk_event_step() {
 }
 
 // The 5000 block of a map's flags (xxxx5xxx) is its working state: timers, who stands where, which attack
-// comes next. An event can switch its network sync off (2000[02] Set Network Sync State: FrpgEmkEventIns+0x50
-// = 0, checked by the sender 0xBC42D0); the game then never tells the other players about that run, and what
-// it sets stays in the game that ran it. The Hellkite's 20 s and 60 s timers are such flags (11015305 from
-// event 11015304, 11015315 from 11010852). Sent across, the timer of the host's game, far away at Firelink,
-// started the guest's dragon on the bridge (2026-10-13 test). Such flags stay in their game here too. Flags
-// outside the 5000 block are kept shared even from those events: boss kills (9, 10, 11) and arrivals
-// (11020001) are set that way, and a player whose game never saw the kill still needs them.
+// comes next. Such a flag stays in the game that set it when
+//  * the event that set it switched its network sync off (2000[02] Set Network Sync State: FrpgEmkEventIns+0x50
+//    = 0, checked by the sender 0xBC42D0): the game then never tells the other players about that run. The
+//    Hellkite's 20 s and 60 s timers are such flags (11015305 from event 11015304, 11015315 from 11010852).
+//    Sent across, the timer of the host's game, far away at Firelink, started the guest's dragon on the bridge
+//    (2026-10-13 test);
+//  * or the event belongs to a map our player is not in: that game judged "who stands where" from afar.
+//    The host at Firelink and the guest on the bridge sent 11015306 and 11015309 (from 11015303 and 11015308)
+//    back and forth until they were taken out of the sharing (2026-10-13, both tests), and every change made the
+//    dragon's events re-plan its AI.
+// Flags outside the 5000 block are kept shared from all events: boss kills (9, 10, 11) and arrivals
+// (11020001) are set by sync-off events, and a player whose game never saw the kill still needs them.
+int event_map(int id);
+
 bool local_working_flag(int id) {
     if (!g_cur_event || id < 10000000 || (id / 1000) % 10 != 5) return false;
     uint32_t sync = 1, event_id = 0;
-    if (!read32(g_cur_event + 0x50, &sync) || (sync & 0xFF) != 0) return false;
+    if (!read32(g_cur_event + 0x50, &sync) || !read32(g_cur_event + 0x28, &event_id)) return false;
+    const char* why = nullptr;
+    if ((sync & 0xFF) == 0) {
+        why = "does not sync its runs";
+    } else {
+        const int map = event_map(static_cast<int>(event_id));
+        const int here = game::map_id();
+        if (map != -1 && here != -1 && (static_cast<uint32_t>(here) & 0xFFFF0000) != static_cast<uint32_t>(map)) {
+            why = "belongs to a map we are not in";
+        }
+    }
+    if (!why) return false;
     static std::set<int> logged;
     if (logged.size() < 40 && logged.insert(id).second) {
-        read32(g_cur_event + 0x28, &event_id);
-        LOG_INFO("[coop] Flag %d stays in this game (event %d does not sync its runs)", id,
-                 static_cast<int>(event_id));
+        LOG_INFO("[coop] Flag %d stays in this game (event %d %s)", id, static_cast<int>(event_id), why);
     }
     return true;
 }

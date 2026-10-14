@@ -828,6 +828,12 @@ void guest_on_welcome(const Welcome& w) {
         finish(w.status == kFull || w.status == kRefused ? kMsgNoOne : kMsgConnectTimeout);
         return;
     }
+    // The invitation's length comes from the host's packet: the game's reader would take it as the buffer's size.
+    if (w.invitation_size < 8 || w.invitation_size > sizeof(w.invitation)) {
+        LOG_ERROR("[coop] The host's invitation has a bad length (%u bytes); not joining", w.invitation_size);
+        finish(kMsgConnectTimeout);
+        return;
+    }
     if (!game::in_game() || !game::own_world() || game::loading()) {
         finish(kMsgConnectTimeout);
         return;

@@ -463,12 +463,13 @@ void scale_tick() {
     }
 }
 
-// The death debuff: the row for the number of Crimson Blossoms the player carries.
+// The death debuff: the row for the number of Crimson Blossoms the player carries. With DeathDebuffs off,
+// Blossoms still held from a session with it on do nothing (and an applied debuff comes off).
 void debuff_tick(uint32_t me) {
     static double last = 0;
     if (now() - last < 0.5) return;
     last = now();
-    const int blossoms = g_blossom_count_fn ? std::min(5, g_blossom_count_fn()) : 0;
+    const int blossoms = g_cfg.death_debuffs && g_blossom_count_fn ? std::min(5, g_blossom_count_fn()) : 0;
     const int want = blossoms > 0 ? kDebuff + blossoms - 1 : 0;
     if (want == g_debuff_applied && (!want || find_effect(me, want, nullptr))) return;
     if (g_debuff_applied) remove(me, g_debuff_applied);

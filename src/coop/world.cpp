@@ -31,7 +31,7 @@ constexpr uint32_t kWorldChrManVar = 0x0137D644;
 constexpr uint32_t kWorldReset = 0x2CC;            // WorldChrMan: 0 -> 1 respawns the world's enemies
 constexpr uint32_t kMenuManVar = 0x013786D0;       // boss gauges: handles at +0xF64 and +0xF78 (-1 none)
 constexpr uint32_t kEnemyVtable = 0x0118979C;      // EnemyIns
-constexpr int kApplySlot = 125;                     // ChrIns::ApplySpEffect(id, source, 0, 1,1,1, 0)
+constexpr int kApplySlot = 125;                     // ChrIns::ApplySpEffect(id, source, 0, 1,1,1, own)
 
 // ---------------------------------------------------------------- our SpEffect rows
 // Remastered Seamless Co-op's rows and ids: enemy and boss scaling for 1..5 extra players, and the death debuff
@@ -169,17 +169,25 @@ __declspec(naked) void hk_fx_row() {
 }
 
 // ---------------------------------------------------------------- effects on characters
-using ApplyFn = char(__fastcall*)(uint32_t chr, void*, int id, uint32_t src, int a, float f1, float f2, float f3, int b);
+// ChrIns::ApplySpEffect (0xE7E950, vtable slot 125): its last argument says the effect is this game's own. With
+// 0 a guest's game (session state 6) refuses an effect on an enemy whose AI another game runs at that moment
+// (0xE3E250 on its handle chr+0x78), and an applied effect is sent to the other players (0xE7E850) with its id
+// cut to 17 bits, which turns ours (2147418000 + n) into 66448 + n. The guest's copy of an enemy the host was
+// controlling kept its own max HP, while the host's HP sync (0xE40FE0: the host's HP every frame, SetHP on the
+// guest) carried the scaled HP: clamped to the unscaled max, the bar stayed full until the host's HP fell below
+// it, and a hit showed only until the next sync. Each game scales the enemies itself, so the scaling and the
+// death debuff are applied as this game's own (1): no refusal and nothing sent. The game's answer is returned,
+// so a refusal is tried again.
+using ApplyFn = char(__fastcall*)(uint32_t chr, void*, int id, uint32_t src, int a, float f1, float f2, float f3, int own);
 
-bool apply(uint32_t chr, int id) {
+bool apply(uint32_t chr, int id, bool own = true) {
     uint32_t vt = 0, fn = 0;
     if (!chr || !read32(chr, &vt) || !read32(vt + kApplySlot * 4, &fn)) return false;
     __try {
-        reinterpret_cast<ApplyFn>(fn)(chr, nullptr, id, chr, 0, 1.0f, 1.0f, 1.0f, 0);
+        return reinterpret_cast<ApplyFn>(fn)(chr, nullptr, id, chr, 0, 1.0f, 1.0f, 1.0f, own ? 1 : 0) != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    return true;
 }
 
 uint32_t find_effect(uint32_t chr, int id, uint32_t* ctrl_out) {
@@ -450,7 +458,9 @@ void scale_tick() {
             const int m = max_hp(chr);
             if (hp(chr) > 0 && m > 0) *ptr<int>(chr + 0x2D4) = m;
         }
-        if (want == have || hp(chr) <= 0) return;
+        if (hp(chr) <= 0) return;
+        // Applied once is not enough: an effect the game has since taken off the enemy is applied again.
+        if (want == have && (!want || find_effect(chr, want, nullptr))) return;
         if (have) remove(chr, have);
         const bool full = hp(chr) >= max_hp(chr) && hp(chr) > 0;
         if (want && apply(chr, want)) {
@@ -458,6 +468,13 @@ void scale_tick() {
             if (full) g_fill_hp.insert(chr);
         } else {
             g_scaled.erase(chr);
+            uint32_t handle = 0;
+            read32(chr + 0x78, &handle);
+            static int refused = 0;
+            if (want && ++refused <= 10) {
+                LOG_INFO("[coop] The game refused the scaling on an enemy (handle %d, HP %d/%d); trying again",
+                         static_cast<int>(handle), hp(chr), max_hp(chr));
+            }
         }
     });
     for (auto it = g_scaled.begin(); it != g_scaled.end();) {
@@ -534,7 +551,10 @@ void share_lights(const std::vector<RemoteLight>& peers) {
         const int had = g_light_applied.count(chr) ? g_light_applied[chr] : 0;
         for (int i = 0; i < 3; ++i) {
             const bool on = (mask >> i) & 1, was = (had >> i) & 1;
-            if (on && !find_effect(chr, kLights[i], nullptr)) apply(chr, kLights[i]);
+            // Not as this game's own, as before: ApplySpEffect then refuses it on another player's character
+            // (0xE7E950: a remote player takes an effect only from the local player, by request), so this does
+            // not show the light yet.
+            if (on && !find_effect(chr, kLights[i], nullptr)) apply(chr, kLights[i], false);
             if (!on && was) remove(chr, kLights[i]);
         }
         g_light_applied[chr] = mask;

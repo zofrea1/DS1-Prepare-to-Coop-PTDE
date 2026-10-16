@@ -180,11 +180,11 @@ __declspec(naked) void hk_fx_row() {
 // so a refusal is tried again.
 using ApplyFn = char(__fastcall*)(uint32_t chr, void*, int id, uint32_t src, int a, float f1, float f2, float f3, int own);
 
-bool apply(uint32_t chr, int id, bool own = true) {
+bool apply(uint32_t chr, int id) {
     uint32_t vt = 0, fn = 0;
     if (!chr || !read32(chr, &vt) || !read32(vt + kApplySlot * 4, &fn)) return false;
     __try {
-        return reinterpret_cast<ApplyFn>(fn)(chr, nullptr, id, chr, 0, 1.0f, 1.0f, 1.0f, own ? 1 : 0) != 0;
+        return reinterpret_cast<ApplyFn>(fn)(chr, nullptr, id, chr, 0, 1.0f, 1.0f, 1.0f, 1) != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -497,71 +497,96 @@ void debuff_tick(uint32_t me) {
 }
 
 // ---------------------------------------------------------------- shared light
-// Light sources show only on their owner's screen: Skull Lantern (point light, SpEffect 21), Cast Light (620)
-// and the Sunlight Maggot (6950). Each player reports which they carry; the others put the same effect on that
-// player's character in their own game.
-constexpr int kLights[3] = {21, 620, 6950};
-std::map<uint32_t, int> g_light_applied;  // remote PlayerIns -> mask we applied
-
-bool chr_pos(uint32_t chr, float out[3]) {
-    uint32_t ctrl = 0, phys = 0;
-    if (!read32(chr + 0x28, &ctrl) || !ctrl || !read32(ctrl + 0x1C, &phys) || !phys) return false;
-    for (int i = 0; i < 3; ++i) {
-        uint32_t v = 0;
-        if (!read32(phys + 0x10 + i * 4, &v)) return false;
-        std::memcpy(&out[i], &v, 4);
-    }
-    return true;
-}
+// A player's own light is a ChrLanternSlot (category 0, id 12) in the character's attachment system (ChrAttachSys
+// at chr+0x2B4, its slot list at +0x2B8). Every frame the character update calls 0xE79770 (stdcall(chr), from
+// 0xE836DA), which for the local player only (vt+0xA4) sets that slot through 0xE05760 (eax = chr+0x2B4,
+// stdcall(light, lantern)): +0x10 bit 0 = refreshed, bit 3 = an effect of state 147 (Cast Light 620, the Sunlight
+// Maggot 6950), bit 4 = the Skull Lantern (a weapon mode, not an effect; the game's own light check, event
+// 11210200, asks for 620, 6950 and "using Skull Lantern"). The attachment update right after (0x46B210 at
+// 0xE83718) runs the slot (0xDF9960: a point light at the character from the area's light parameter, for the
+// lantern the row 0x1E after it, while the character is drawn) and deletes a slot that was not refreshed, its
+// light with it (destructor 0xDF98B0). Other players' characters never get the slot, so nobody saw anyone else's light.
+// Applying effect 620 or 6950 to their characters could not change that, and 21 (state 58) was no lantern. Each
+// player now reports its slot's bits 3 and 4, and the others refresh the same slot on that player's character in
+// its own update, right after 0xE79770, for as long as the light is reported.
+constexpr uint32_t kLightCall = 0x00E836DA;        // call 0xE79770 in the character update
+constexpr uint32_t kChrLight = 0x00E79770;
+constexpr uint32_t kSetPlayerLight = 0x00E05760;
+constexpr uint32_t kChrAttachSysVtable = 0x0118FD28;
+constexpr int kLightOn = 0x08, kLanternOn = 0x10;
+std::map<uint32_t, int> g_light_want;  // other players' characters -> slot bits to keep refreshed
+double g_light_heard = 0;              // last share_lights; older than 2 s, the list is dropped
 
 template <typename F>
 void each_remote_player(F&& fn) {
     for (uint32_t chr : game::remote_player_chrs()) fn(chr);
 }
 
+// The light bits of a character's ChrLanternSlot (0 when it has none). Slot: +4 s16 category, +6 u16 id with
+// 0x4000 = in use, +8 next, +0x10 u16 flags (the lookup 0xDCC260).
+int slot_light_bits(uint32_t chr) {
+    uint32_t node = 0;
+    if (!chr || !read32(chr + 0x2B8, &node)) return 0;
+    for (int guard = 0; node && guard < 64; ++guard) {
+        uint32_t key = 0, flags = 0;
+        if (!read32(node + 4, &key) || !read32(node + 0x10, &flags)) return 0;
+        const uint32_t category = key & 0xFFFF, id = key >> 16;
+        if (category == 0 && (id & 0x3FFF) == 12 && (id & 0x4000)) return flags & (kLightOn | kLanternOn);
+        if (!read32(node + 8, &node)) return 0;
+    }
+    return 0;
+}
+
+// In place of the character update's call to 0xE79770: the call itself, then another player's light slot.
+void __stdcall hk_chr_light(uint32_t chr) {
+    reinterpret_cast<void(__stdcall*)(uint32_t)>(kChrLight)(chr);
+    if (g_light_want.empty()) return;
+    if (now() - g_light_heard > 2.0) {
+        g_light_want.clear();
+        return;
+    }
+    const auto it = g_light_want.find(chr);
+    uint32_t vt = 0;
+    if (it == g_light_want.end() || !read32(chr + 0x2B4, &vt) || vt != kChrAttachSysVtable) return;
+    const uint32_t sys = chr + 0x2B4;
+    const uint32_t light = (it->second & kLightOn) ? 1 : 0, lantern = (it->second & kLanternOn) ? 1 : 0;
+    __try {
+        __asm {
+            push lantern
+            push light
+            mov eax, sys
+            mov ecx, kSetPlayerLight
+            call ecx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_light_want.erase(chr);
+    }
+}
+
 }  // namespace
 
-int local_lights() {
-    const uint32_t me = game::player();
-    int mask = 0;
-    for (int i = 0; i < 3; ++i) {
-        if (me && find_effect(me, kLights[i], nullptr)) mask |= 1 << i;
-    }
-    return mask;
-}
+int local_lights() { return slot_light_bits(game::player()); }
 
 void share_lights(const std::vector<RemoteLight>& peers) {
     std::map<uint32_t, int> want;
     each_remote_player([&](uint32_t chr) {
-        float p[3];
-        if (!chr_pos(chr, p)) return;
-        int best_mask = 0;
-        float best = 4.0f * 4.0f;  // within 4 m of where the player says they are
         for (const auto& r : peers) {
-            const float dx = p[0] - r.pos[0], dy = p[1] - r.pos[1], dz = p[2] - r.pos[2];
-            const float d = dx * dx + dy * dy + dz * dz;
-            if (d < best) {
-                best = d;
-                best_mask = r.mask;
-            }
+            const int bits = r.mask & (kLightOn | kLanternOn);
+            if (r.chr == chr && bits) want[chr] = bits;
         }
-        want[chr] = best_mask;
     });
-    for (auto& [chr, mask] : want) {
-        const int had = g_light_applied.count(chr) ? g_light_applied[chr] : 0;
-        for (int i = 0; i < 3; ++i) {
-            const bool on = (mask >> i) & 1, was = (had >> i) & 1;
-            // Not as this game's own, as before: ApplySpEffect then refuses it on another player's character
-            // (0xE7E950: a remote player takes an effect only from the local player, by request), so this does
-            // not show the light yet.
-            if (on && !find_effect(chr, kLights[i], nullptr)) apply(chr, kLights[i], false);
-            if (!on && was) remove(chr, kLights[i]);
+    static int lines = 0;
+    for (const auto& [chr, bits] : want) {
+        const auto it = g_light_want.find(chr);
+        if ((it == g_light_want.end() || it->second != bits) && ++lines <= 40) {
+            LOG_INFO("[coop] Showing another player's light (%s)",
+                     (bits & kLanternOn) && (bits & kLightOn) ? "Skull Lantern, Cast Light or Sunlight Maggot"
+                     : (bits & kLanternOn)                    ? "Skull Lantern"
+                                                              : "Cast Light or Sunlight Maggot");
         }
-        g_light_applied[chr] = mask;
     }
-    for (auto it = g_light_applied.begin(); it != g_light_applied.end();) {
-        it = want.count(it->first) ? std::next(it) : g_light_applied.erase(it);
-    }
+    g_light_want.swap(want);
+    g_light_heard = now();
 }
 
 // PlayerIns::update (0xE73060) looks up a param row through [PlayerIns+0x29C]. After the guest traveled
@@ -663,6 +688,9 @@ bool install() {
         static const uint8_t k[5] = {0xA1, 0xA0, 0x84, 0x37, 0x01};  // mov eax,[013784A0h]
         g_sign_warp_orig = reinterpret_cast<VoidFn>(detour(kSetSignWarp, k, sizeof(k), reinterpret_cast<void*>(&hk_sign_warp)));
         if (!g_sign_warp_orig) ++failed;
+    }
+    if (!redirect_call(kLightCall, kChrLight, reinterpret_cast<void*>(&hk_chr_light))) {
+        LOG_ERROR("[coop] Shared light: the character update's light call did not match this build (not shared)");
     }
     if (failed) LOG_ERROR("[coop] %d world rule hook(s) did not match this build", failed);
     return failed == 0;

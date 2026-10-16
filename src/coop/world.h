@@ -41,10 +41,10 @@ void remote_rest();
 bool boss_fight();
 bool local_dead();
 bool in_limbo();
-// Shared light: the light effects the local player carries (bit 0 Skull Lantern, 1 Cast Light, 2 Sunlight
-// Maggot), and applying the other players' lights to their characters here.
+// Shared light: the local player's own light (0x08 Cast Light or the Sunlight Maggot, 0x10 the Skull Lantern;
+// 1.0.0 sent bits 0 to 2, which are ignored), and showing the other players' lights on their characters here.
 struct RemoteLight {
-    float pos[3];
+    uint32_t chr;  // the player's character in our world (the session's match)
     int mask;
 };
 int local_lights();

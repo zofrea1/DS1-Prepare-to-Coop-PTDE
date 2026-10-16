@@ -102,7 +102,7 @@ struct Info {
     int32_t ping_ms;
     uint8_t invader;
     uint8_t dead;
-    int32_t light;  // light SpEffects the player carries (bit mask)
+    int32_t light;  // the player's own light (world::local_lights: 0x08 Cast Light / Sunlight Maggot, 0x10 lantern)
     char name[64];
     wchar_t char_name[17];  // character name: matches the player to their character in our world
     int32_t ceremony;       // the bonfire animation the player is looping (the sit), 0 none
@@ -2170,9 +2170,11 @@ void tick() {
         if (g_role != Role::None && now() - last_light > 0.5 && !game::loading()) {
             last_light = now();
             std::vector<world::RemoteLight> lights;
-            for (const auto& p : g_peers) {
-                if (now() - p.last_seen > 5.0 || p.light <= 0) continue;
-                lights.push_back({{p.pos[0], p.pos[1], p.pos[2]}, p.light});
+            for (const auto& [chr, id] : g_chr_peer) {
+                for (const auto& p : g_peers) {
+                    if (p.id != id || now() - p.last_seen > 5.0 || p.light <= 0) continue;
+                    lights.push_back({chr, p.light});
+                }
             }
             world::share_lights(lights);
         }

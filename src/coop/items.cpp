@@ -79,7 +79,7 @@ const Def kDefs[kCount] = {
      L"Withered fingers.\n\nThe host uses them to taunt invaders into joining."},
     {-94, 0, 2037, L"Cursed Pendant", L"Cause disasters in one's own world",
      L"An old pendant, scratched and dull. Some say it was\ntaken from the tomb of the Gravelord.\n\n"
-     L"The host uses it to bring disaster upon their own world,\nand again to lift the curse."},
+     L"Use it in one's own world to bring disaster upon it,\nalone or as host, and again to lift the curse."},
     {0, 0, 2033, L"Crimson Blossom", L"Accrues curse",
      L"A blood-red flower rooted in the Darksign, feeding\non its bearer.\n\nOne blooms with each death and saps "
      L"the bearer's\nmaximum HP. They wither at a bonfire."},

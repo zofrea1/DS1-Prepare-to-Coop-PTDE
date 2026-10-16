@@ -23,14 +23,17 @@ struct State {
     // The host's world rules (the host decides, guests mirror them).
     int world_rules = 0;      // Ominous Tome: 0 none, 1 allies are hostile, 2 allies fight in teams
     bool taunt = false;       // Dried Fingers: invaders find this world first
-    bool infection = false;   // Cursed Pendant: the world counts as pure black World Tendency
+    bool infection = false;   // Cursed Pendant: the world we are in counts as pure black World Tendency
 };
 
 State& state();
-// The Cursed Pendant's curse is lifted (or its session ended): the maps' disasters end. Every map's disaster flag
-// is cleared and the current map's black phantoms die, as the game's own events do when a disaster ends. Game
-// thread.
-void end_disasters();
+// The Cursed Pendant's curse is lifted, or a curse of a previous game left disasters in the saved flags: the maps'
+// disasters end. Every map's disaster flag is cleared and the current map's black phantoms die, as the game's own
+// events do when a disaster ends. cursed_here: the current map was cursed while we were in it, whatever its flag
+// says now. Returns how many maps had a disaster. Game thread.
+int end_disasters(bool cursed_here);
+// Whether any map's disaster flag is on (the current world's store).
+bool disasters_active();
 // Installs every hook; returns the number that failed (0 = all in place).
 int install();
 // Guests run the world's events in their own game (Remastered Seamless Co-op's rule; default on).

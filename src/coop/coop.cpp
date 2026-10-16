@@ -136,8 +136,9 @@ int can_use(int32_t id) {
             return in_session && !invader_present ? 1 : 0;
         case items::kRules:
         case items::kTaunt:
-        case items::kInfection:
             return host && area_allows(id) ? 1 : 0;
+        case items::kInfection:  // our own world, with or without a session, but not while joining another
+            return (host || !session::active()) && game::own_world() && area_allows(id) ? 1 : 0;
         case items::kBlossom:
             return 0;
         case 230:  // Elizabeth's Mushroom

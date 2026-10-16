@@ -188,6 +188,7 @@ constexpr const wchar_t* kMsgRulesTeams = L"World rules: the host against the gu
 constexpr const wchar_t* kMsgTaunt = L"Invaders are taunted into this world";
 constexpr const wchar_t* kMsgCursed = L"This world is cursed";
 constexpr const wchar_t* kMsgCurseLifted = L"The curse on this world is lifted";
+constexpr const wchar_t* kMsgCurseFaded = L"The curse on this world has faded";  // a curse of a previous game
 constexpr const wchar_t* kMsgDied = L"{} has died";
 constexpr const wchar_t* kMsgInvaderDied = L"Evil spirit {} has died";
 constexpr const wchar_t* kMsgGuestStart = L"Joining another world as a guest...";
@@ -305,6 +306,12 @@ int g_host_bonfire = -1;
 int g_seen_rules = -1;
 int g_seen_infection = -1;
 int g_seen_taunt = -1;
+// The Cursed Pendant. Our own world's curse is kept in memory only, so nothing new is written to the save: it lasts
+// until the pendant lifts it, the game is closed or another character is loaded, through any number of sessions,
+// offline or hosting. g_host_curse is the curse of the world we visit as a guest or invader (the host's rules).
+bool g_own_curse = false;
+std::wstring g_curse_owner;  // the character whose world we last stood in at home
+bool g_host_curse = false;
 bool g_callbacks_set = false;
 // A Black Separation Crystal was used (1 guest, 2 host); handled on the next tick, outside the player's update.
 int g_separation = 0;
@@ -574,13 +581,18 @@ bool peer_is_invader(uint64_t id) {
     return false;
 }
 
+// The world we stand in decides which curse the tendency tests see: ours at home, the host's in another player's
+// world. Deciding by the world and not by the role keeps the host's curse out of a joiner's own world in the
+// seconds between the host's answer and the warp, and ours out of the host's world on the way home.
+void apply_curse() { rules::state().infection = game::own_world() ? g_own_curse : g_host_curse; }
+
 void reset_rules() {
-    auto& st = rules::state();
-    // A host's curse ends with the session, and with it the disasters in the host's own world. A guest has nothing
-    // to clean up: its copy of the host's world is dropped when it goes home, and the disaster flags set there are
-    // never copied into its own world (rules.cpp, kDisasterFlags).
-    if (st.infection && st.host) rules::end_disasters();
-    st = rules::State{};
+    // Our own curse outlives the session; it is lifted only with the pendant. A guest has nothing to clean up: its
+    // copy of the host's world is dropped when it goes home, and the disaster flags set there are never copied into
+    // its own world (rules.cpp, kDisasterFlags).
+    rules::state() = rules::State{};
+    g_host_curse = false;
+    apply_curse();
 }
 
 void finish(const std::wstring& why) {
@@ -1108,16 +1120,18 @@ const wchar_t* rules_text(int world_rules) {
 void apply_host_rules(int world_rules, bool infection, bool taunt) {
     auto& st = rules::state();
     st.world_rules = world_rules;
-    st.infection = infection;
+    g_host_curse = infection;
+    apply_curse();
     st.taunt = taunt;
-    // Changes the host makes while we are there (Ominous Tome, Dried Fingers, Cursed Pendant) are shown to guests.
+    // Changes the host makes while we are there (Ominous Tome, Dried Fingers, Cursed Pendant) are shown to guests,
+    // and a curse also when the guest arrives in a world that is already cursed.
     if (g_step != Step::InWorld || g_invade) return;
     if (g_seen_rules >= 0 && world_rules != g_seen_rules) say(rules_text(world_rules));
     if (g_seen_taunt == 0 && taunt) say(kMsgTaunt);
-    if (g_seen_infection == 0 && infection) say(kMsgCursed);
+    if (g_seen_infection != 1 && infection) say(kMsgCursed);
     if (g_seen_infection == 1 && !infection) {
         say(kMsgCurseLifted);
-        rules::end_disasters();  // this game runs the host's world's events too, phantoms included
+        rules::end_disasters(true);  // this game runs the host's world's events too, phantoms included
     }
     g_seen_rules = world_rules;
     g_seen_taunt = taunt ? 1 : 0;
@@ -2275,6 +2289,19 @@ void configure(const Config& cfg) {
 
 void tick() {
     flash_tick();
+    // The first time a character stands at home (after the game starts or another character is loaded), a curse
+    // laid on another character is dropped, and disasters still on in the saved flags (the game was closed while the
+    // world was cursed) end, as the phantoms would otherwise roam for up to 600 s more in each such map.
+    if (game::in_game() && !game::loading() && game::own_world() && g_role != Role::Guest) {
+        const std::wstring name = party::local_name();
+        if (!name.empty() && name != g_curse_owner) {
+            if (g_own_curse) LOG_INFO("[coop] Another character: the curse on the world is dropped");
+            g_own_curse = false;
+            g_curse_owner = name;
+            if (rules::disasters_active() && rules::end_disasters(false) > 0) say(kMsgCurseFaded);
+        }
+    }
+    apply_curse();
     {
         static bool f12_down = false;
         const bool down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
@@ -2547,18 +2574,20 @@ void taunt() {
     g_last_state = 0;
 }
 
-// The Cursed Pendant curses the host's world, and lifts the curse when used again.
+// The Cursed Pendant curses our own world, offline or hosting, and lifts the curse when used again. It cannot be
+// used in another player's world, nor while joining one (coop.cpp can_use).
 void curse_world() {
-    if (!hosting()) return;
-    auto& st = rules::state();
-    st.infection = !st.infection;
-    if (st.infection) {
-        LOG_INFO("[coop] The world is cursed (pure black World Tendency)");
+    if (!game::own_world() || g_role == Role::Guest) return;
+    g_own_curse = !g_own_curse;
+    g_curse_owner = party::local_name();
+    apply_curse();
+    if (g_own_curse) {
+        LOG_INFO("[coop] The world is cursed (pure black World Tendency, %s)", hosting() ? "hosting" : "no session");
         say(kMsgCursed);
     } else {
         LOG_INFO("[coop] The curse on the world is lifted");
         say(kMsgCurseLifted);
-        rules::end_disasters();
+        rules::end_disasters(false);
     }
     g_last_state = 0;
 }

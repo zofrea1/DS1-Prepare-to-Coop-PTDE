@@ -2530,18 +2530,38 @@ bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
 
 State& state() { return g_state; }
 
-void end_disasters() {
-    int cleared = 0;
+bool disasters_active() {
     for (int id : kDisasterFlags) {
-        if (game::flag(id)) ++cleared;
+        if (game::flag(id)) return true;
+    }
+    return false;
+}
+
+// The map (area << 24 | block << 16) a disaster flag (1AABxxxx) belongs to.
+int disaster_map(int id) { return ((id / 100000) % 100) << 24 | ((id / 10000) % 10) << 16; }
+
+// 735 makes the current map's end event kill its phantoms. That event also sets flag 5001, and the game then shows
+// its own notice "Disasters are gone after the defeat of the Gravelord Servant" (text 141210, 0xD78E93), so 735 is
+// set only when this map's phantoms are out: its disaster flag was on, or the caller knows the map was cursed
+// (a guest, whose copy of the flags may already have been cleared by the host's).
+int end_disasters(bool cursed_here) {
+    const int map = static_cast<int>(static_cast<uint32_t>(game::map_id()) & 0xFFFF0000u);
+    int cleared = 0;
+    bool here = cursed_here;
+    for (int id : kDisasterFlags) {
+        if (game::flag(id)) {
+            ++cleared;
+            here = here || disaster_map(id) == map;
+        }
         game::set_flag(id, false);
     }
-    const int map = game::map_id();
-    bool end_now = false;
-    for (int m : kDisasterEndMaps) end_now = end_now || m == map;
+    bool end_map = false;
+    for (int m : kDisasterEndMaps) end_map = end_map || m == map;
+    const bool end_now = end_map && here;
     if (end_now) game::set_flag(kDisasterEnd, true);
     LOG_INFO("[coop] Disasters ended: %d map(s) had one; this map (%08X) %s", cleared, static_cast<unsigned>(map),
-             end_now ? "ends its own at once (flag 735)" : "has no disaster to end at once");
+             end_now ? "ends its own at once (flag 735)" : end_map ? "had none" : "has no disaster to end at once");
+    return cleared;
 }
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }

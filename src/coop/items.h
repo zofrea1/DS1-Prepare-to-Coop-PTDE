@@ -18,7 +18,7 @@ enum Id : int32_t {
     kLeave = 389003,      // Abyssal Eye Orb: leave (guest) or disband (host)
     kRules = 389004,      // Ominous Tome: host changes the world rules
     kTaunt = 389005,      // Dried Fingers: host taunts invaders into joining
-    kInfection = 389006,  // Cursed Pendant: host curses their own world
+    kInfection = 389006,  // Cursed Pendant: curses one's own world (offline or hosting)
     kBlossom = 389007,    // Crimson Blossom: death debuff counter (key item, never used)
     kParchment = 389008,  // Parchment of Deliverance: revive certain NPCs
     kFirst = kHost,

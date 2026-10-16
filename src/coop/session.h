@@ -54,7 +54,7 @@ void leave();        // Abyssal Eye Orb
 void close_world();  // the host's Black Separation Crystal: every other player goes home, the session ends
 void cycle_rules();  // Ominous Tome: none -> allies hostile -> teams -> none
 void taunt();        // Dried Fingers
-void curse_world();  // Cursed Pendant
+void curse_world();  // Cursed Pendant: curses the host's world, or lifts the curse
 // The host used a Homeward Bone in a session: the host and every guest go to the host's last bonfire.
 void host_homeward();
 

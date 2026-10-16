@@ -256,7 +256,7 @@ Gait local_gait() {
     }
     if (g != g_local) {
         static int lines = 0;
-        if (++lines <= 300) LOG_INFO("[coop] gait me %d (%.2f m/s, dash %d)", g, g_speed, dash);
+        if (++lines <= 40) LOG_INFO("[coop] gait me %d (%.2f m/s, dash %d)", g, g_speed, dash);
     }
     return g_local = g;
 }

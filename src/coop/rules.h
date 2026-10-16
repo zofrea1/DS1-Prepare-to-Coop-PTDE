@@ -27,6 +27,10 @@ struct State {
 };
 
 State& state();
+// The Cursed Pendant's curse is lifted (or its session ended): the maps' disasters end. Every map's disaster flag
+// is cleared and the current map's black phantoms die, as the game's own events do when a disaster ends. Game
+// thread.
+void end_disasters();
 // Installs every hook; returns the number that failed (0 = all in place).
 int install();
 // Guests run the world's events in their own game (Remastered Seamless Co-op's rule; default on).

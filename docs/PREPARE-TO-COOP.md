@@ -29,7 +29,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | Abyssal Eye Orb | A guest returns home; the host disbands the session. | in a session, no invader present |
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
    | Dried Fingers | Host: taunt invaders; invaders searching for a world find yours first. | host |
-   | Cursed Pendant | Host: curse your own world: it counts as pure black World Tendency. | host |
+   | Cursed Pendant | Host: curse your own world: it counts as pure black World Tendency. Use it again to lift the curse. | host |
    | Crimson Blossom | Not used: with `DeathDebuffs`, one blooms with each death in a session (up to five), each lowering maximum HP by 10%. They wither at a bonfire. | never |
    | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
 
@@ -84,7 +84,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. |
-| World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
+| World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency, and lifts the curse when used again or when the session ends: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
 | Limbo | Dying during a boss fight or while an invader is present holds your respawn until the fight ends, everyone has fallen, or someone rests. |
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. When the host dies the invader wins; when the invader dies the invasion fails. |
 | Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |

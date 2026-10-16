@@ -169,6 +169,7 @@ constexpr const wchar_t* kMsgRulesHostile = L"World rules: allies can harm each 
 constexpr const wchar_t* kMsgRulesTeams = L"World rules: the host against the guests";
 constexpr const wchar_t* kMsgTaunt = L"Invaders are taunted into this world";
 constexpr const wchar_t* kMsgCursed = L"This world is cursed";
+constexpr const wchar_t* kMsgCurseLifted = L"The curse on this world is lifted";
 constexpr const wchar_t* kMsgDied = L"{} has died";
 constexpr const wchar_t* kMsgInvaderDied = L"Evil spirit {} has died";
 constexpr const wchar_t* kMsgGuestStart = L"Joining another world as a guest...";
@@ -392,6 +393,9 @@ bool peer_is_invader(uint64_t id) {
 
 void reset_rules() {
     auto& st = rules::state();
+    // A host's curse ends with the session, and with it the disasters in the host's own world. A guest's copy of
+    // the host's world goes with the guest, so there is nothing of it to clean up.
+    if (st.infection && st.host) rules::end_disasters();
     st = rules::State{};
 }
 
@@ -898,6 +902,10 @@ void apply_host_rules(int world_rules, bool infection, bool taunt) {
     if (g_seen_rules >= 0 && world_rules != g_seen_rules) say(rules_text(world_rules));
     if (g_seen_taunt == 0 && taunt) say(kMsgTaunt);
     if (g_seen_infection == 0 && infection) say(kMsgCursed);
+    if (g_seen_infection == 1 && !infection) {
+        say(kMsgCurseLifted);
+        rules::end_disasters();  // this game runs the host's world's events too, phantoms included
+    }
     g_seen_rules = world_rules;
     g_seen_taunt = taunt ? 1 : 0;
     g_seen_infection = infection ? 1 : 0;
@@ -2306,11 +2314,19 @@ void taunt() {
     g_last_state = 0;
 }
 
+// The Cursed Pendant curses the host's world, and lifts the curse when used again.
 void curse_world() {
     if (!hosting()) return;
-    rules::state().infection = true;
-    LOG_INFO("[coop] The world is cursed (pure black World Tendency)");
-    say(kMsgCursed);
+    auto& st = rules::state();
+    st.infection = !st.infection;
+    if (st.infection) {
+        LOG_INFO("[coop] The world is cursed (pure black World Tendency)");
+        say(kMsgCursed);
+    } else {
+        LOG_INFO("[coop] The curse on the world is lifted");
+        say(kMsgCurseLifted);
+        rules::end_disasters();
+    }
     g_last_state = 0;
 }
 

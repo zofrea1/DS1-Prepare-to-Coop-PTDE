@@ -1615,6 +1615,23 @@ void __fastcall hk_tendency(uint8_t* cond, void*, int, int) {
     }
 }
 
+// The disasters themselves are the maps' events. In 14 maps one event waits for black tendency over 50 for six
+// frames in a row and then sets the map's disaster flag (e.g. 11010050, the Undead Burg's 13 black phantoms),
+// which another event turns into enabled black phantoms; after 600 s it ends the disaster only if the
+// tendency is no longer black (flag 1xx15075). A third event ends it at once when 1xx15075 or the global flag
+// 735 is on: it clears 735, the disaster flag and 1xx15075, and kills the phantoms. Ash Lake and the Undead
+// Asylum have one phantom each, enabled while black and killed when the tendency drops, behind a flag that
+// stays on. The disaster flags are saved like any other, so a map that was cursed and is not loaded would bring
+// its phantoms back for another 600 s on the next visit. Lifting the curse therefore clears every map's disaster
+// flag, and sets 735 when the current map has the event that ends its disaster at once.
+constexpr int kDisasterFlags[] = {11000050, 11010050, 11100050, 11200050, 11210080, 11300050, 11310060, 11325090,
+                                  11400080, 11410050, 11500050, 11510050, 11600050, 11700050, 11800050, 11815090};
+constexpr int kDisasterEnd = 735;
+// Maps (area << 24 | block << 16) whose events end the disaster when flag 735 is on.
+constexpr int kDisasterEndMaps[] = {0x0A000000, 0x0A010000, 0x0B000000, 0x0C000000, 0x0C010000,
+                                    0x0D000000, 0x0D010000, 0x0E000000, 0x0E010000, 0x0F000000,
+                                    0x0F010000, 0x10000000, 0x11000000, 0x12000000};
+
 // ---------------------------------------------------------------- world events run in every player's game
 // Map events (EMEVD) test the session with EcTestMultiplayState::Test (0xBB3130, thiscall(cond, dt, event),
 // ret 8; cond+0x18 kind: 0 host, 1 client, 2 multiplayer, 3 single player; result in bit 0 of cond+8). The
@@ -2500,6 +2517,20 @@ int install_one(const char* what, bool ok) {
 bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
 
 State& state() { return g_state; }
+
+void end_disasters() {
+    int cleared = 0;
+    for (int id : kDisasterFlags) {
+        if (game::flag(id)) ++cleared;
+        game::set_flag(id, false);
+    }
+    const int map = game::map_id();
+    bool end_now = false;
+    for (int m : kDisasterEndMaps) end_now = end_now || m == map;
+    if (end_now) game::set_flag(kDisasterEnd, true);
+    LOG_INFO("[coop] Disasters ended: %d map(s) had one; this map (%08X) %s", cleared, static_cast<unsigned>(map),
+             end_now ? "ends its own at once (flag 735)" : "has no disaster to end at once");
+}
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
 void set_cutscene_listener(void (*fn)(int map, int point)) { g_cutscene_fn = fn; }

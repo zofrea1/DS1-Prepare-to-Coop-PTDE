@@ -40,7 +40,7 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 | Abyssal Eye Orb | A guest returns home; the host disbands the session. |
 | Ominous Tome | Host: change the world rules (allies cannot harm each other, allies can harm each other, the host against the guests). |
 | Dried Fingers | Host: taunt invaders into your world. |
-| Cursed Pendant | Host: curse your own world (pure black World Tendency). |
+| Cursed Pendant | Host: curse your own world (pure black World Tendency). Use it again to lift the curse; the curse also ends when the session does. |
 | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds. |
 
 The items are used like any other item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1** host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Another player's floating health bar shows their soul level and ping (`OverheadPlayerDisplay`), and joins, departures, deaths and rule changes are told at the bottom of the screen. If a player's connection drops (a crash, a lost network, a Steam Deck put to sleep), the others are told within seconds and that player is sent home.

@@ -304,6 +304,8 @@ void coop_install(const CoopConfig& config) {
     cfg.allow_invaders = g_cfg.allow_invaders;
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
+    cfg.test_protocol = g_cfg.test_protocol;
+    cfg.test_version = g_cfg.test_version;
     coop::session::configure(cfg);
     static const char* const kOverhead[] = {"name only", "name and ping", "name and soul level", "name and deaths",
                                             "name, soul level and ping"};

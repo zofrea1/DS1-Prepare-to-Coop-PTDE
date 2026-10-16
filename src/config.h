@@ -34,6 +34,10 @@ struct CoopConfig {
     char save_extension[16] = "co2";
     // Keyboard shortcuts as well as the co-op items (Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave).
     bool hotkeys = true;
+    // Hidden test keys (not in the shipped INI): TestProtocol / TestVersion make this game speak another co-op
+    // protocol and report another version, to see the version mismatch notices between two copies of one build.
+    int test_protocol = 0;
+    char test_version[16] = {};
 };
 
 // Reads the keys from PTDE-FPS-Unlock.ini next to the DLL (missing keys keep their defaults).

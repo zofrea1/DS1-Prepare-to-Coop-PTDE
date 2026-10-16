@@ -18,6 +18,9 @@ struct Config {
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
     int overhead_display = 4;
     int max_players = 4;  // PTDE keeps three remote players (GameDataMan+0xC holds 3 x 0x4C0)
+    // Hidden test keys: pretend to speak another protocol / be another version (0 / empty: the real ones).
+    int test_protocol = 0;
+    std::string test_version;
 };
 
 struct PeerInfo {

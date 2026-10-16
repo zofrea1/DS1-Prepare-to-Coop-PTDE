@@ -45,6 +45,8 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 
 The items are used like any other item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1** host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Another player's floating health bar shows their soul level and ping (`OverheadPlayerDisplay`), and joins, departures, deaths and rule changes are told at the bottom of the screen. If a player's connection drops (a crash, a lost network, a Steam Deck put to sleep), the others are told within seconds and that player is sent home.
 
+Everyone in a session needs the same version of Prepare to Co-op. When the only session found has another version, the game says so instead of "No sessions found": three times at the bottom of the screen, with the versions and who needs to update. A host is told the same when a player of another version tries to join (from 1.1.0 on; Prepare to Co-op 1.0.0 itself only says "Failed to connect").
+
 [docs/PREPARE-TO-COOP.md](docs/PREPARE-TO-COOP.md) describes what changes in a session, how it works and how it differs from the Remastered mod.
 
 ## Settings

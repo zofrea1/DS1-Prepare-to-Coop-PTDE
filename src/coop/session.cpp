@@ -12,12 +12,15 @@
 #include "steam.h"
 #include "text.h"
 #include "world.h"
+#include "version.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -29,6 +32,16 @@ namespace {
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
 constexpr uint32_t kProtocol = 8;
+// What this game speaks and reports: kProtocol and PREPARE_TO_COOP_VERSION, unless the hidden INI keys TestProtocol /
+// TestVersion pretend otherwise (to see the version notices between two copies of the same build).
+uint32_t g_protocol = kProtocol;
+std::string g_version = PREPARE_TO_COOP_VERSION;
+// Lobby data. "ptdesc_ver" with 8 is what Prepare to Co-op 1.0.0 searches for, so every host keeps publishing it:
+// a 1.0.0 player then still finds a newer host, is refused, and the host is told who tried. The protocol a host
+// really speaks is "ptdesc_proto" and its Prepare to Co-op version "ptdesc_mod" (both from 1.1.0 on; a lobby without
+// them is 1.0.0's, protocol 8). Searches no longer filter by version, so a session of another version is reported
+// to the player instead of being hidden.
+constexpr const char* kLegacyProtocol = "8";
 
 enum MsgType : uint8_t {
     kHello = 1,        // guest/invader -> host: please let me in
@@ -66,6 +79,7 @@ struct Hello {
     uint32_t invade;
     int32_t soul_level;
     char name[64];
+    char version[16];  // the sender's Prepare to Co-op version (from 1.1.0 on; 1.0.0's hello ends before it)
 };
 struct Welcome {
     Header h;
@@ -149,6 +163,8 @@ struct FlagsMsg {
     } f[kFlagsPerMsg];
 };
 #pragma pack(pop)
+// How much of a hello 1.0.0 sends: a host reads at least this much, and the version only when it is there.
+constexpr size_t kHelloV1Size = offsetof(Hello, version);
 
 // ---------------------------------------------------------------- messages (Remastered Seamless Co-op's)
 std::wstring fmt(const wchar_t* pattern, const std::wstring& arg) {
@@ -338,6 +354,120 @@ void say(const std::wstring& w) {
     LOG_INFO("[coop] %s", narrow);
 }
 
+// ---------------------------------------------------------------- version mismatch notices
+// A message that matters (a connection refused for another Prepare to Co-op version) is shown three times, four
+// seconds apart, so it is not missed among the game's own messages. The middle showing can say who has to update.
+struct Flash {
+    std::wstring lines[3];
+    int next = 3;
+    double at = 0;
+};
+Flash g_flash;
+
+void flash(const std::wstring& line, const std::wstring& middle = L"") {
+    g_flash.lines[0] = line;
+    g_flash.lines[1] = middle.empty() ? line : middle;
+    g_flash.lines[2] = line;
+    g_flash.next = 0;
+    g_flash.at = 0;
+}
+
+void flash_tick() {
+    if (g_flash.next >= 3 || now() < g_flash.at) return;
+    const std::wstring& line = g_flash.lines[g_flash.next];
+    if (g_flash.next == 0 || line != g_flash.lines[0]) {
+        say(line);  // logged once per distinct line
+    } else {
+        text::show(line);
+    }
+    ++g_flash.next;
+    g_flash.at = now() + 4.0;
+}
+
+std::wstring our_version() { return text::widen(g_version); }
+
+// The protocol and Prepare to Co-op version a lobby's host speaks (1.0.0 publishes only "ptdesc_ver").
+struct PeerVersion {
+    uint32_t protocol = 0;
+    std::string mod;
+};
+
+PeerVersion lobby_version(uint64_t lobby) {
+    PeerVersion v;
+    std::string p = steam::lobby_data(lobby, "ptdesc_proto");
+    if (p.empty()) p = steam::lobby_data(lobby, "ptdesc_ver");
+    v.protocol = static_cast<uint32_t>(std::strtoul(p.c_str(), nullptr, 10));
+    v.mod = steam::lobby_data(lobby, "ptdesc_mod");
+    return v;
+}
+
+// "Prepare to Co-op 1.0.0", or "an older / a newer Prepare to Co-op" when the other side did not say.
+std::wstring version_words(const PeerVersion& v) {
+    if (!v.mod.empty()) return L"Prepare to Co-op " + text::widen(v.mod);
+    return v.protocol < g_protocol ? L"an older Prepare to Co-op" : L"a newer Prepare to Co-op";
+}
+
+// A search found only sessions of another version (a joiner still knocks on that host's door, so the host learns
+// why we cannot come in); what we know of that session.
+struct Mismatch {
+    bool active = false;
+    PeerVersion host;
+};
+Mismatch g_mismatch;
+
+void show_join_mismatch(const PeerVersion& host) {
+    LOG_INFO("[coop] The host speaks protocol %u (Prepare to Co-op %s), we speak %u (%s)", host.protocol,
+             host.mod.empty() ? "unknown" : host.mod.c_str(), g_protocol, g_version.c_str());
+    std::wstring line = L"Can't join: the host has " + version_words(host);
+    if (!host.mod.empty()) line += L", you have " + our_version();
+    flash(line, host.protocol > g_protocol ? L"Please update Prepare to Co-op to join this host"
+                                          : L"The host needs to update Prepare to Co-op");
+}
+
+void show_invade_mismatch(const std::vector<uint64_t>& lobbies) {
+    PeerVersion newest;
+    for (uint64_t l : lobbies) {
+        const PeerVersion v = lobby_version(l);
+        if (v.protocol >= newest.protocol) newest = v;
+    }
+    LOG_INFO("[coop] %zu world(s) to invade, none with our protocol %u (newest found: %u, Prepare to Co-op %s)",
+             lobbies.size(), g_protocol, newest.protocol, newest.mod.empty() ? "unknown" : newest.mod.c_str());
+    if (newest.protocol > g_protocol) {
+        std::wstring line = L"Can't invade: the worlds found have " + version_words(newest);
+        if (!newest.mod.empty()) line += L", you have " + our_version();
+        flash(line, L"Please update Prepare to Co-op to invade them");
+    } else {
+        flash(L"Can't invade: the worlds found have an older Prepare to Co-op",
+              L"Their hosts need to update Prepare to Co-op");
+    }
+}
+
+// Host: someone of another version knocked. Told once a minute per player (a 1.0.0 player retries).
+std::map<uint64_t, double> g_version_notice;
+
+void show_hello_mismatch(uint64_t from, const Hello& m, bool has_version) {
+    PeerVersion them;
+    them.protocol = m.protocol;
+    if (has_version) {
+        char v[sizeof(m.version) + 1] = {};
+        std::memcpy(v, m.version, sizeof(m.version));
+        them.mod = v;
+    }
+    char name[sizeof(m.name) + 1] = {};
+    std::memcpy(name, m.name, sizeof(m.name));
+    LOG_INFO("[coop] %s (%s) knocked with protocol %u (Prepare to Co-op %s); we speak %u: refused",
+             name, m.invade ? "invader" : "guest", them.protocol, them.mod.empty() ? "unknown" : them.mod.c_str(),
+             g_protocol);
+    auto it = g_version_notice.find(from);
+    if (it != g_version_notice.end() && now() - it->second < 60.0) return;
+    g_version_notice[from] = now();
+    const std::wstring who = m.invade ? std::wstring(L"An evil spirit") : text::widen(name);
+    std::wstring line = who + L" can't " + (m.invade ? L"invade" : L"join") + L": they have " + version_words(them);
+    if (!them.mod.empty()) line += L", you have " + our_version();
+    flash(line, them.protocol > g_protocol ? L"Please update Prepare to Co-op to play with them"
+                                          : who + L" needs to update Prepare to Co-op");
+}
+
 template <typename T>
 void fill_header(T* m, MsgType t) {
     m->h.magic = kMagic;
@@ -449,7 +579,9 @@ void host_open_lobby() {
         }
         g_lobby = lobby;
         steam::set_lobby_data(lobby, "ptdesc", "1");
-        steam::set_lobby_data(lobby, "ptdesc_ver", std::to_string(kProtocol).c_str());
+        steam::set_lobby_data(lobby, "ptdesc_ver", kLegacyProtocol);
+        steam::set_lobby_data(lobby, "ptdesc_proto", std::to_string(g_protocol).c_str());
+        steam::set_lobby_data(lobby, "ptdesc_mod", g_version.c_str());
         steam::set_lobby_data(lobby, "ptdesc_key", g_key.c_str());
         steam::set_lobby_data(lobby, "ptdesc_name", steam::persona(steam::self()).c_str());
         steam::set_lobby_data(lobby, "ptdesc_invade", g_cfg.allow_invaders ? "1" : "0");
@@ -825,10 +957,11 @@ void host_tick() {
 void guest_send_hello() {
     Hello h{};
     fill_header(&h, kHello);
-    h.protocol = kProtocol;
+    h.protocol = g_protocol;
     h.invade = g_invade ? 1 : 0;
     h.soul_level = game::soul_level();
     strncpy_s(h.name, steam::persona(steam::self()).c_str(), _TRUNCATE);
+    strncpy_s(h.version, g_version.c_str(), _TRUNCATE);
     steam::accept(g_host);
     send_to(g_host, h);
     ++g_hello_tries;
@@ -838,12 +971,13 @@ void guest_send_hello() {
 void issue_search() {
     const int gen = ++g_search_gen;
     ++g_search_waves;
-    std::vector<std::pair<std::string, std::string>> filters = {{"ptdesc_ver", std::to_string(kProtocol)}};
+    std::vector<std::pair<std::string, std::string>> filters;
     if (g_invade) {
         filters.push_back({"ptdesc_invade", "1"});
     } else {
         filters.push_back({"ptdesc_key", g_key});
     }
+    g_mismatch = Mismatch{};
     steam::find_lobbies(filters, 50, [gen](std::vector<uint64_t> found) {
         LOG_INFO("[coop] Lobby list returned %zu", found.size());
         // A newer request replaces this one. An older empty answer must not cancel the retry.
@@ -855,6 +989,26 @@ void issue_search() {
         if (found.empty()) {
             finish(kMsgNoOne);
             return;
+        }
+        // Sessions of another Prepare to Co-op version cannot be joined or invaded: they are set apart and,
+        // when nothing else was found, reported.
+        std::vector<uint64_t> other;
+        for (uint64_t l : found) {
+            if (lobby_version(l).protocol != g_protocol) other.push_back(l);
+        }
+        found.erase(std::remove_if(found.begin(), found.end(),
+                                   [](uint64_t l) { return lobby_version(l).protocol != g_protocol; }),
+                    found.end());
+        if (found.empty()) {
+            if (g_invade) {
+                finish(L"");
+                show_invade_mismatch(other);
+                return;
+            }
+            // Knock anyway: the host refuses us for the version and learns why we cannot come in.
+            g_mismatch.active = true;
+            g_mismatch.host = lobby_version(other.front());
+            found.push_back(other.front());
         }
         uint64_t pick = g_invade ? found[GetTickCount() % found.size()] : found.front();
         if (g_invade) {
@@ -869,6 +1023,11 @@ void issue_search() {
         steam::join_lobby(pick, [](bool ok, uint64_t lobby) {
             if (g_step != Step::LobbyJoin) return;
             if (!ok) {
+                if (g_mismatch.active) {
+                    finish(L"");
+                    show_join_mismatch(g_mismatch.host);
+                    return;
+                }
                 finish(kMsgConnectTimeout);
                 return;
             }
@@ -916,6 +1075,13 @@ void guest_on_welcome(const Welcome& w) {
     if (w.status == kBusy && g_hello_tries < 8) {
         set_step(Step::Hello);
         g_step_since = now() - 17.0;  // retry in 3 s
+        return;
+    }
+    if (w.status == kVersion || (w.status != kOk && g_mismatch.active)) {
+        LOG_INFO("[coop] The host refused us (status %u: another Prepare to Co-op version)", w.status);
+        const PeerVersion host = g_mismatch.active ? g_mismatch.host : lobby_version(g_lobby);
+        finish(L"");
+        show_join_mismatch(host);
         return;
     }
     if (w.status != kOk) {
@@ -1063,7 +1229,10 @@ void guest_tick() {
             if (in_step > 20.0) finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
             break;
         case Step::Hello:
-            if (in_step > 20.0) {
+            if (in_step > 20.0 && g_mismatch.active) {
+                finish(L"");
+                show_join_mismatch(g_mismatch.host);
+            } else if (in_step > 20.0) {
                 if (g_hello_tries < 8) {
                     guest_send_hello();
                 } else {
@@ -1284,13 +1453,15 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
     }
     switch (h.type) {
         case kHello: {
-            Hello m;
-            if (!as(&m) || g_role != Role::Host || g_step != Step::Hosting) return;
-            if (m.protocol != kProtocol) {
+            Hello m{};
+            if (size < kHelloV1Size || g_role != Role::Host || g_step != Step::Hosting) return;
+            std::memcpy(&m, data, size < sizeof(m) ? size : sizeof(m));
+            if (m.protocol != g_protocol) {
                 Welcome w{};
                 fill_header(&w, kWelcome);
                 w.status = kVersion;
                 send_to(from, w);
+                show_hello_mismatch(from, m, size >= sizeof(m));
                 return;
             }
             steam::accept(from);
@@ -2039,9 +2210,16 @@ void configure(const Config& cfg) {
     g_cfg = cfg;
     g_cfg.max_players = std::max(2, std::min(4, g_cfg.max_players));
     g_key = password_key(g_cfg.password);
+    if (cfg.test_protocol > 0) g_protocol = static_cast<uint32_t>(cfg.test_protocol);
+    if (!cfg.test_version.empty()) g_version = cfg.test_version;
+    if (g_protocol != kProtocol || g_version != PREPARE_TO_COOP_VERSION) {
+        LOG_INFO("[coop] TEST: speaking protocol %u as Prepare to Co-op %s (TestProtocol / TestVersion)", g_protocol,
+                 g_version.c_str());
+    }
 }
 
 void tick() {
+    flash_tick();
     {
         static bool f12_down = false;
         const bool down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && (GetAsyncKeyState(VK_F12) & 0x8000) != 0;

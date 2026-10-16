@@ -11,8 +11,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <set>
 #include <vector>
@@ -677,7 +679,7 @@ void __cdecl hk_lock_session() {
 // ---------------------------------------------------------------- progress carries home
 // The event flag setter (0xD38CB0: eax = EventFlagMan, cl, push value, push id; ret 8). While a co-op guest is
 // in the host's world (active store = the other-world store at +0x90), every flag it sets is written to the
-// guest's own world store (+0x14) too.
+// guest's own world store (+0x14) too, except the maps' disaster flags (see kDisasterFlags).
 constexpr uint32_t kSetFlag = 0x00D38CB0;
 void* g_set_flag_orig = nullptr;
 
@@ -691,6 +693,8 @@ void call_set_flag(uint32_t efm, int id, uint32_t value) {
         call fn
     }
 }
+
+bool disaster_flag(int id);  // a map's disaster flag (see kDisasterFlags)
 
 // Shared progress: flags changed in the host's world travel to the other players (guest -> host -> guests).
 void (*g_flag_listener)(int, bool) = nullptr;
@@ -835,7 +839,7 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
         note_flag_change(id);
         if (!g_contested.count(id)) g_flag_listener(id, on);
     }
-    if (!g_state.guest) return;
+    if (!g_state.guest || disaster_flag(id)) return;
     uint32_t active = 0;
     if (!read32(efm + 0x10C, &active) || active != efm + 0x90) return;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
@@ -1623,9 +1627,17 @@ void __fastcall hk_tendency(uint8_t* cond, void*, int, int) {
 // Asylum have one phantom each, enabled while black and killed when the tendency drops, behind a flag that
 // stays on. The disaster flags are saved like any other, so a map that was cursed and is not loaded would bring
 // its phantoms back for another 600 s on the next visit. Lifting the curse therefore clears every map's disaster
-// flag, and sets 735 when the current map has the event that ends its disaster at once.
+// flag, and sets 735 when the current map has the event that ends its disaster at once. A guest's game copies the
+// flags set in the host's world into the guest's own world (after_set_flag), but not these: a disaster of the host's
+// world, from the curse or the host's own black tendency, would otherwise follow the guest home and bring the
+// phantoms there for 600 s.
 constexpr int kDisasterFlags[] = {11000050, 11010050, 11100050, 11200050, 11210080, 11300050, 11310060, 11325090,
                                   11400080, 11410050, 11500050, 11510050, 11600050, 11700050, 11800050, 11815090};
+
+bool disaster_flag(int id) {
+    return std::find(std::begin(kDisasterFlags), std::end(kDisasterFlags), id) != std::end(kDisasterFlags);
+}
+
 constexpr int kDisasterEnd = 735;
 // Maps (area << 24 | block << 16) whose events end the disaster when flag 735 is on.
 constexpr int kDisasterEndMaps[] = {0x0A000000, 0x0A010000, 0x0B000000, 0x0C000000, 0x0C010000,

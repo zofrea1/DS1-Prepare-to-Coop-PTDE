@@ -31,7 +31,9 @@ namespace {
 
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
-constexpr uint32_t kProtocol = 8;
+// Players of the same protocol and the same Prepare to Co-op version play together (see same_version). 1.0.0 spoke 8
+// and compares only the protocol, so 1.1.0 speaks 9: a 1.0.0 host then refuses a 1.1.0 player too.
+constexpr uint32_t kProtocol = 9;
 // What this game speaks and reports: kProtocol and PREPARE_TO_COOP_VERSION, unless the hidden INI keys TestProtocol /
 // TestVersion pretend otherwise (to see the version notices between two copies of the same build).
 uint32_t g_protocol = kProtocol;
@@ -39,7 +41,7 @@ std::string g_version = PREPARE_TO_COOP_VERSION;
 // Lobby data. "ptdesc_ver" with 8 is what Prepare to Co-op 1.0.0 searches for, so every host keeps publishing it:
 // a 1.0.0 player then still finds a newer host, is refused, and the host is told who tried. The protocol a host
 // really speaks is "ptdesc_proto" and its Prepare to Co-op version "ptdesc_mod" (both from 1.1.0 on; a lobby without
-// them is 1.0.0's, protocol 8). Searches no longer filter by version, so a session of another version is reported
+// them is 1.0.0's, protocol 8). Searches do not filter by version, so a session of another version is reported
 // to the player instead of being hidden.
 constexpr const char* kLegacyProtocol = "8";
 
@@ -386,7 +388,16 @@ void flash_tick() {
 
 std::wstring our_version() { return text::widen(g_version); }
 
-// The protocol and Prepare to Co-op version a lobby's host speaks (1.0.0 publishes only "ptdesc_ver").
+// The action box shows one line, and the longest of our own notices (kMsgHostLost) is 59 characters. A notice with a
+// player's name that would be longer is shown in its short form.
+constexpr size_t kNoticeMax = 59;
+
+std::wstring fit_or(const std::wstring& line, const std::wstring& short_form) {
+    return line.size() <= kNoticeMax ? line : short_form;
+}
+
+// The protocol and Prepare to Co-op version a lobby's host or a hello's sender speaks. 1.0.0 publishes only
+// "ptdesc_ver" and its hello ends before the version: protocol 8 without a version is 1.0.0.
 struct PeerVersion {
     uint32_t protocol = 0;
     std::string mod;
@@ -401,10 +412,42 @@ PeerVersion lobby_version(uint64_t lobby) {
     return v;
 }
 
-// "Prepare to Co-op 1.0.0", or "an older / a newer Prepare to Co-op" when the other side did not say.
+// Players can play together only with the same protocol and the same Prepare to Co-op version.
+bool same_version(const PeerVersion& v) { return v.protocol == g_protocol && v.mod == g_version; }
+
+// Compares two versions part by part as numbers ("1.10.0" is newer than "1.9.0"); a missing version is the oldest.
+int compare_versions(const std::string& a, const std::string& b) {
+    const char* pa = a.c_str();
+    const char* pb = b.c_str();
+    while (*pa || *pb) {
+        char* end_a = nullptr;
+        char* end_b = nullptr;
+        const unsigned long na = std::strtoul(pa, &end_a, 10);
+        const unsigned long nb = std::strtoul(pb, &end_b, 10);
+        if (na != nb) return na < nb ? -1 : 1;
+        if (end_a == pa && end_b == pb) break;  // neither has a number left
+        pa = *end_a == '.' ? end_a + 1 : end_a;
+        pb = *end_b == '.' ? end_b + 1 : end_b;
+    }
+    return 0;
+}
+
+// Whether the other side has the newer Prepare to Co-op: the higher protocol, else the higher version.
+bool is_newer(const PeerVersion& v) {
+    if (v.protocol != g_protocol) return v.protocol > g_protocol;
+    return compare_versions(v.mod, g_version) > 0;
+}
+
+// "Prepare to Co-op 1.1.0", or "an older / a newer Prepare to Co-op" when the other side did not say which.
 std::wstring version_words(const PeerVersion& v) {
     if (!v.mod.empty()) return L"Prepare to Co-op " + text::widen(v.mod);
-    return v.protocol < g_protocol ? L"an older Prepare to Co-op" : L"a newer Prepare to Co-op";
+    if (v.protocol == 8) return L"Prepare to Co-op 1.0.0";
+    return is_newer(v) ? L"a newer Prepare to Co-op" : L"an older Prepare to Co-op";
+}
+
+std::string version_text(const PeerVersion& v) {
+    if (!v.mod.empty()) return v.mod;
+    return v.protocol == 8 ? "1.0.0" : "unknown";
 }
 
 // A search found only sessions of another version (a joiner still knocks on that host's door, so the host learns
@@ -417,35 +460,33 @@ Mismatch g_mismatch;
 
 void show_join_mismatch(const PeerVersion& host) {
     LOG_INFO("[coop] The host speaks protocol %u (Prepare to Co-op %s), we speak %u (%s)", host.protocol,
-             host.mod.empty() ? "unknown" : host.mod.c_str(), g_protocol, g_version.c_str());
-    std::wstring line = L"Can't join: the host has " + version_words(host);
-    if (!host.mod.empty()) line += L", you have " + our_version();
-    flash(line, host.protocol > g_protocol ? L"Please update Prepare to Co-op to join this host"
-                                          : L"The host needs to update Prepare to Co-op");
+             version_text(host).c_str(), g_protocol, g_version.c_str());
+    const std::wstring you = L"You have " + our_version();
+    flash(L"Can't join: the host has " + version_words(host),
+          is_newer(host) ? you + L". Please update to join this host" : you + L". The host needs to update");
 }
 
 void show_invade_mismatch(const std::vector<uint64_t>& lobbies) {
-    PeerVersion newest;
+    PeerVersion newest = lobby_version(lobbies.front());
     for (uint64_t l : lobbies) {
         const PeerVersion v = lobby_version(l);
-        if (v.protocol >= newest.protocol) newest = v;
+        if (v.protocol > newest.protocol ||
+            (v.protocol == newest.protocol && compare_versions(v.mod, newest.mod) > 0)) {
+            newest = v;
+        }
     }
-    LOG_INFO("[coop] %zu world(s) to invade, none with our protocol %u (newest found: %u, Prepare to Co-op %s)",
-             lobbies.size(), g_protocol, newest.protocol, newest.mod.empty() ? "unknown" : newest.mod.c_str());
-    if (newest.protocol > g_protocol) {
-        std::wstring line = L"Can't invade: the worlds found have " + version_words(newest);
-        if (!newest.mod.empty()) line += L", you have " + our_version();
-        flash(line, L"Please update Prepare to Co-op to invade them");
-    } else {
-        flash(L"Can't invade: the worlds found have an older Prepare to Co-op",
-              L"Their hosts need to update Prepare to Co-op");
-    }
+    LOG_INFO("[coop] %zu world(s) to invade, none with our protocol %u and version %s (newest found: %u, "
+             "Prepare to Co-op %s)",
+             lobbies.size(), g_protocol, g_version.c_str(), newest.protocol, version_text(newest).c_str());
+    const std::wstring you = L"You have " + our_version();
+    flash(L"Can't invade: these worlds have " + version_words(newest),
+          is_newer(newest) ? you + L". Please update to invade them" : you + L". Their hosts need to update");
 }
 
 // Host: someone of another version knocked. Told once a minute per player (a 1.0.0 player retries).
 std::map<uint64_t, double> g_version_notice;
 
-void show_hello_mismatch(uint64_t from, const Hello& m, bool has_version) {
+PeerVersion hello_version(const Hello& m, bool has_version) {
     PeerVersion them;
     them.protocol = m.protocol;
     if (has_version) {
@@ -453,19 +494,31 @@ void show_hello_mismatch(uint64_t from, const Hello& m, bool has_version) {
         std::memcpy(v, m.version, sizeof(m.version));
         them.mod = v;
     }
+    return them;
+}
+
+void show_hello_mismatch(uint64_t from, const Hello& m, const PeerVersion& them) {
     char name[sizeof(m.name) + 1] = {};
     std::memcpy(name, m.name, sizeof(m.name));
-    LOG_INFO("[coop] %s (%s) knocked with protocol %u (Prepare to Co-op %s); we speak %u: refused",
-             name, m.invade ? "invader" : "guest", them.protocol, them.mod.empty() ? "unknown" : them.mod.c_str(),
-             g_protocol);
+    LOG_INFO("[coop] %s (%s) knocked with protocol %u (Prepare to Co-op %s); we speak %u (%s): refused", name,
+             m.invade ? "invader" : "guest", them.protocol, version_text(them).c_str(), g_protocol, g_version.c_str());
     auto it = g_version_notice.find(from);
     if (it != g_version_notice.end() && now() - it->second < 60.0) return;
     g_version_notice[from] = now();
-    const std::wstring who = m.invade ? std::wstring(L"An evil spirit") : text::widen(name);
-    std::wstring line = who + L" can't " + (m.invade ? L"invade" : L"join") + L": they have " + version_words(them);
-    if (!them.mod.empty()) line += L", you have " + our_version();
-    flash(line, them.protocol > g_protocol ? L"Please update Prepare to Co-op to play with them"
-                                          : who + L" needs to update Prepare to Co-op");
+    const std::wstring line = m.invade ? L"An evil spirit with " + version_words(them) + L" can't invade"
+                                       : L"A player with " + version_words(them) + L" can't join";
+    // The middle showing names a guest when the name fits; an invader stays an evil spirit.
+    const std::wstring you = L"You have " + our_version();
+    const std::wstring who = m.invade ? std::wstring() : text::widen(name);
+    std::wstring middle;
+    if (is_newer(them)) {
+        middle = you + L". Please update to play with them";
+        if (!who.empty()) middle = fit_or(L"Please update to play with " + who, middle);
+    } else {
+        middle = you + L". They need to update";
+        if (!who.empty()) middle = fit_or(who + L" needs to update, you have " + our_version(), middle);
+    }
+    flash(line, middle);
 }
 
 template <typename T>
@@ -523,8 +576,9 @@ bool peer_is_invader(uint64_t id) {
 
 void reset_rules() {
     auto& st = rules::state();
-    // A host's curse ends with the session, and with it the disasters in the host's own world. A guest's copy of
-    // the host's world goes with the guest, so there is nothing of it to clean up.
+    // A host's curse ends with the session, and with it the disasters in the host's own world. A guest has nothing
+    // to clean up: its copy of the host's world is dropped when it goes home, and the disaster flags set there are
+    // never copied into its own world (rules.cpp, kDisasterFlags).
     if (st.infection && st.host) rules::end_disasters();
     st = rules::State{};
 }
@@ -994,10 +1048,10 @@ void issue_search() {
         // when nothing else was found, reported.
         std::vector<uint64_t> other;
         for (uint64_t l : found) {
-            if (lobby_version(l).protocol != g_protocol) other.push_back(l);
+            if (!same_version(lobby_version(l))) other.push_back(l);
         }
         found.erase(std::remove_if(found.begin(), found.end(),
-                                   [](uint64_t l) { return lobby_version(l).protocol != g_protocol; }),
+                                   [](uint64_t l) { return !same_version(lobby_version(l)); }),
                     found.end());
         if (found.empty()) {
             if (g_invade) {
@@ -1456,12 +1510,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             Hello m{};
             if (size < kHelloV1Size || g_role != Role::Host || g_step != Step::Hosting) return;
             std::memcpy(&m, data, size < sizeof(m) ? size : sizeof(m));
-            if (m.protocol != g_protocol) {
+            const PeerVersion them = hello_version(m, size >= sizeof(m));
+            if (!same_version(them)) {
                 Welcome w{};
                 fill_header(&w, kWelcome);
                 w.status = kVersion;
                 send_to(from, w);
-                show_hello_mismatch(from, m, size >= sizeof(m));
+                show_hello_mismatch(from, m, them);
                 return;
             }
             steam::accept(from);

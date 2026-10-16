@@ -83,7 +83,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Host travel | When the host warps by bonfire, the guests follow to the same bonfire. A guest's own bonfire warp does nothing. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later ("The power of the homeward bone consumes you..."). Guests cannot use Homeward Bones. |
 | Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
-| Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. |
+| Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. A disaster of the host's world (the black phantoms of black World Tendency or the Cursed Pendant) stays there. |
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency, and lifts the curse when used again or when the session ends: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
 | Limbo | Dying during a boss fight or while an invader is present holds your respawn until the fight ends, everyone has fallen, or someone rests. |
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. When the host dies the invader wins; when the invader dies the invasion fails. |
@@ -281,7 +281,7 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 | Enemy and object drops, scripted reward items | inlined guest checks in `0xDC80A0`, `0xDC8370`, `0xDC9170` |
 | Bonfires and NPC talk | `HasPartyMembers` (`0xD2A4B0`) at the bonfire object (`0xD58AE4`) and talk script function 0x34 (`0xD4ABFB`) |
 | Multiplayer walls | Lua `GetMultiWallNum` (`0xD5DC40`) answers 0 in every co-op role: `OnEvent_4034` (`OnSessionJustIn`) raises the walls on the host's side (`IsClient()` false), which every player then meets |
-| Progress | the event-flag setter (`0xD38CB0`): changes are shared, and a guest's are also written to their own world's store |
+| Progress | the event-flag setter (`0xD38CB0`): changes are shared, and a guest's are also written to their own world's store, except the maps' disaster flags |
 
 ### World rules
 

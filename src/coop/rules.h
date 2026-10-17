@@ -100,6 +100,7 @@ void set_remote_players(const std::vector<RemotePlayer>& players);
 struct PeerSpot {
     float pos[3] = {};
     int map = -1;
+    bool dead = false;  // fallen (spectating, or on the way to their bonfire): their game still runs
 };
 void set_peer_spots(const std::vector<PeerSpot>& spots);
 

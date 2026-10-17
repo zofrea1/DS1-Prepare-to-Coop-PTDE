@@ -295,6 +295,47 @@ std::string key_layout() {
     return out;
 }
 
+namespace {
+
+// The goods in a key array's held slots (+0x10 in use) that have this id.
+bool key_array_holds(uint32_t array, uint32_t keys, int32_t goods_id) {
+    for (uint32_t i = 0; array >= 0x10000 && i < keys && i < 256; ++i) {
+        uint32_t cat = 0, id = 0;
+        uint8_t held = 0;
+        const uint32_t e = array + i * 0x1C;
+        if (!read32(e, &cat) || !read32(e + 4, &id) || !read8(e + 0x10, &held)) return false;
+        if (held && cat == kGoodsCategory && static_cast<int32_t>(id) == goods_id) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+// MoveMapStep's constructor (0xEFC470) switches the key array with the world: at home the inventory reads its own
+// array (+0x120 = +0x114, the counter at +0x134 = &+0x12C); in someone else's world 0x51C520 points it at a second
+// array (+0x11C, counter +0x130) and clears that. Keys gained in the host's world went into the second array, and the
+// trip home pointed the inventory back at the own one, which never had them (2026-10-17 log: "array 06395A98" in the
+// host's world, "array 06387A88" = own at home, own array "2010" both times). The key is added once more with the
+// own array switched in for the moment, so the game's own switch brings it home, also after a crash or a quit there.
+bool keep_key_for_home(int32_t goods_id) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return false;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t own = 0, keys = 0, active = 0, counter = 0;
+    if (!read32(inv + 0x114, &own) || !read32(inv + 0x118, &keys) || !read32(inv + 0x120, &active) ||
+        !read32(inv + 0x134, &counter) || own < 0x10000 || active < 0x10000) {
+        return false;
+    }
+    if (active == own) return false;  // home
+    if (key_array_holds(own, keys, goods_id)) return true;
+    *ptr<uint32_t>(inv + 0x120) = own;
+    *ptr<uint32_t>(inv + 0x134) = inv + 0x12C;
+    give(goods_id, 1);
+    *ptr<uint32_t>(inv + 0x120) = active;
+    *ptr<uint32_t>(inv + 0x134) = counter;
+    return key_array_holds(own, keys, goods_id);
+}
+
 void give(int32_t goods_id, int n) {
     if (!game::in_game() || n <= 0) return;
     const uint32_t pgd = game::player_game_data();

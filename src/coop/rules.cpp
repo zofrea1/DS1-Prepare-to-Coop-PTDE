@@ -507,6 +507,8 @@ bool kick_prepare(bool dead) {
     return true;
 }
 
+int clear_visited_temporary_flags();  // the death reload's reset of the maps' xxxx5xxx flags (below)
+
 void __cdecl before_map_load() {
     g_marked = false;
     g_bonfire_spawn = false;
@@ -529,6 +531,11 @@ void __cdecl before_map_load() {
         g_marked = true;
         if (g_place_bonfire) g_bonfire_spawn = true;
         LOG_INFO("[coop] Map load stays in the host's world");
+        if (g_place_bonfire) {
+            const int n = clear_visited_temporary_flags();
+            LOG_INFO("[coop] Death reload: the host's world's temporary flags (xxxx5xxx) start over, as a load at home "
+                     "does (%d block(s))", n);
+        }
     }
 }
 
@@ -2866,6 +2873,33 @@ bool each_flag_block(uint32_t store, F&& fn) {
     return true;
 }
 
+// A load at home starts each map's temporary flags (xxxx5000-xxxx5999: timers, who stands where, which runs of the
+// map's events are done) over: after the host's death reload the Asylum's 11815151 was set again by its event and
+// 11815393 was no longer done. A guest's death reload stays in the host's world (the visited store at +0x90), and
+// those flags kept their old values there (2026-10-17, both games logged). With 11815393 still done, the event that
+// switches the Asylum Demon's AI on (11815392) passed the moment the map loaded, ahead of the intro event that
+// switches it off and puts the demon on its perch (11810310), so the guest's copy fought the whole retry with its AI
+// off. So at a guest's death reload the visited store's temporary blocks (group 1, sub-block 5 of every map) are
+// cleared, as the host's own reload clears them at home. The flag sharing does not see this (each game's own state).
+int clear_visited_temporary_flags() {
+    const uint32_t efm = game::event_flag_man();
+    if (!efm) return 0;
+    const uint32_t store = efm + kStoreVisited;
+    constexpr int kGroup = 1, kTemporary = 5;
+    uint32_t areas = 0, count = 0;
+    if (!read32(store + kGroup * 0xC, &areas) || !read32(store + kGroup * 0xC + 4, &count) || !areas || count > 64) {
+        return 0;
+    }
+    int cleared = 0;
+    for (uint32_t a = 0; a < count; ++a) {
+        uint32_t block = 0, size = 0;
+        const uint32_t at = areas + a * kAreaStride + kTemporary * 8;
+        if (!read32(at, &block) || !read32(at + 4, &size) || !block || size != kBlockBytes) continue;
+        if (copy_to_game(block, nullptr, kBlockBytes)) ++cleared;
+    }
+    return cleared;
+}
+
 int install_one(const char* what, bool ok) {
     if (!ok) LOG_ERROR("[coop] Hook not installed: %s (code does not match this build)", what);
     return ok ? 0 : 1;
@@ -3042,7 +3076,8 @@ float dist3(const game::Vec3& a, const game::Vec3& b) {
 // guest's game for the whole fight and on in the host's. While the host stood, the host's game moved the demon; once
 // the host fell, the guest's game took it over and the demon stood idle, attacking only now and then when the host's
 // game won it back. A game whose copy has its AI off does not bid while another player is near enough to take the
-// enemy, so it stays with a game where its AI runs.
+// enemy, so it stays with a game where its AI runs; a player who fell counts too (their game still runs the boss
+// while they spectate: the retry of 2026-10-17 17:56 idled again once the host had fallen).
 bool ai_off_here(uint32_t chr) {
     uint32_t ctrl = 0;
     uint8_t ai = 1;
@@ -3069,6 +3104,7 @@ uint32_t __stdcall hk_net_priority(uint32_t chr) {
     const float mine = dist3(me, at);
     if (mine <= kBidReach) return bid;
     for (const PeerSpot& p : g_peer_spots) {
+        if (p.dead) continue;
         const float theirs = dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at);
         if (theirs < mine) {
             static std::set<uint32_t> logged;

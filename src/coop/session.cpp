@@ -1595,6 +1595,7 @@ void guest_go_home(const std::wstring& why, const char* reason) {
         g_keys_home_at = 0;
         LOG_INFO("[coop] Key items as we leave: %s (gained here: %s)", key_text(now_keys).c_str(),
                  key_text(g_keys_carried).c_str());
+        for (int32_t id : g_keys_carried) items::keep_key_for_home(id);  // in case the last poll missed one
         LOG_INFO("[coop] Key range as we leave: %s", items::key_layout().c_str());
     }
     if (!why.empty()) say(why);
@@ -1727,6 +1728,13 @@ void guest_tick() {
                     LOG_INFO("[coop] Key items here now: %s (on arrival: %s)", key_text(k).c_str(),
                              key_text(g_keys_arrival).c_str());
                     g_keys_seen = k;
+                    // A key gained here goes into the own world's key array as well (items::keep_key_for_home).
+                    for (int32_t id : k) {
+                        if (holds(g_keys_arrival, id)) continue;
+                        LOG_INFO("[coop] Key item %d, gained here, %s", id,
+                                 items::keep_key_for_home(id) ? "is kept for home as well"
+                                                              : "could not be kept for home (given back there)");
+                    }
                 }
             }
             if (g_host_heard > 0 && now() >= g_quiet_grace_until) {
@@ -2854,10 +2862,11 @@ void tick() {
         std::vector<rules::PeerSpot> spots;
         if (g_step == Step::Hosting || g_step == Step::InWorld) {
             for (const auto& p : g_peers) {
-                if (p.dead || p.map == -1 || now() - p.last_seen > 3.0) continue;
+                if (p.map == -1 || now() - p.last_seen > 3.0) continue;
                 rules::PeerSpot s;
                 std::memcpy(s.pos, p.pos, sizeof(s.pos));
                 s.map = p.map;
+                s.dead = p.dead;
                 spots.push_back(s);
             }
         }

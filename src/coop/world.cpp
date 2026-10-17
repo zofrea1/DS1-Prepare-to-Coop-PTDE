@@ -71,6 +71,10 @@ bool g_bypass = false;
 bool g_limbo = false;
 bool g_team_hold = false;   // a team wipe: our respawn waits for the other players' (session::team_respawn_wait)
 bool g_team_asked = false;  // asked once per death: a second warp of the same death does not wait again
+double g_death_at = 0;          // our death, or the end of its wait (spectating, limbo, the team); 0 while we live
+bool g_death_warp = false;      // this death's respawn warp was asked for
+bool g_death_finished = false;  // finish_death ran for this death
+bool g_return_cleared = false;  // finish_death cleared a stale return to the title for this death
 bool g_rest_heard = false;
 double g_limbo_since = 0;
 std::map<uint32_t, int> g_scaled;  // EnemyIns -> applied effect id
@@ -348,6 +352,7 @@ void __cdecl hk_sign_warp() {
 }
 
 char __cdecl hk_warp_kick() {
+    if (local_dead()) g_death_warp = true;
     if (!g_bypass) keep_guest_in_world();
     if (!g_bypass && !g_limbo && !spectate::installed() && limbo_wanted()) {
         g_limbo = true;
@@ -741,8 +746,97 @@ bool install_param_guard() {
     return patch(kParamLookup, k, jmp, sizeof(jmp));
 }
 
+// ---------------------------------------------------------------- a death that does not reach its respawn
+// A death is the global script's chain OnEvent_4000 ("YOU DIED") -> SoloPlayDeath -> SoloPlayDeath_TextWait ->
+// SoloPlayDeath_1 -> SoloPlayDeath_2, which asks for the respawn warp (WarpNextStageKick) and clears flag 4000. In the
+// 2026-10-17 test a guest who fell after the host (the host spectating) never got there: no warp for the rest of the
+// session, a teammate's rest changed nothing, and the death went ahead the moment the guest was home. The script's
+// own lines are logged now (Lua print, below), and a death that has not asked for its warp 15 s after it went ahead
+// (not counting a wait for the fight, limbo or the team) is finished with the chain's last step, as is one when
+// another player rests (a rest respawns the fallen).
+constexpr double kDeathStall = 15.0;
+constexpr uint32_t kReturnStateVar = 0x013784A4;  // [[it]]: 2 = back to the title (OnEvent_4000 waits while > 0)
+
+static uint32_t return_state() {
+    uint32_t p = 0, v = 0;
+    return read32(kReturnStateVar, &p) && p && read32(p, &v) ? v : 0;
+}
+
+static void finish_death(const char* why) {
+    if (g_death_finished) return;
+    // OnEvent_4000 ignores the death while a return to the title is asked for (GetReturnState > 0). One that was
+    // asked for (Quit Game, or the network error handlers' RegistReturnTitle) and never happened is dropped first,
+    // and the game's own death gets another 15 s to go ahead ("YOU DIED", the bloodstain, the warp).
+    uint32_t p = 0;
+    if (return_state() != 0 && !g_return_cleared && read32(kReturnStateVar, &p) && p) {
+        g_return_cleared = true;
+        LOG_INFO("[coop] Our death has not asked for its respawn (%s): a return to the title (state %u) was asked for "
+                 "and never happened; dropped, so the death can go ahead", why, return_state());
+        *ptr<uint32_t>(p) = 0;
+        g_death_at = now();
+        return;
+    }
+    g_death_finished = true;
+    LOG_INFO("[coop] Our death has not asked for its respawn (%s; return state %u, flag 4000 %s): finishing it with "
+             "SoloPlayDeath_2", why, return_state(), game::flag(4000) ? "on" : "off");
+    if (!game::call_lua("SoloPlayDeath_2")) LOG_ERROR("[coop] SoloPlayDeath_2 could not be called");
+}
+
+// A menu or dialog is open (the indictment menu after an invader's kill holds the death until it closes; the same
+// checks as the co-op items' "in control").
+static bool menu_open() {
+    uint32_t mm = 0, request = 0, dialog = 0, text = 0;
+    if (!read32(kMenuManVar, &mm) || mm < 0x10000) return false;
+    if (read32(mm + 0x60, &request) && request != 0) return true;
+    static const uint32_t kOpen[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC};
+    for (uint32_t off : kOpen) {
+        uint8_t open = 0;
+        if (read8(mm + off, &open) && open) return true;
+    }
+    return read32(mm + 0x9E8, &dialog) && dialog > 0x10000 && read32(dialog, &text) && text != 0;
+}
+
+static void death_watch_tick() {
+    if (!local_dead()) {
+        g_death_at = 0;
+        g_death_warp = false;
+        g_death_finished = false;
+        g_return_cleared = false;
+        return;
+    }
+    if (g_death_at == 0 || spectate::holding() || g_limbo || g_team_hold || game::loading() || menu_open()) {
+        g_death_at = now();
+        return;
+    }
+    if (g_active && !g_invader && !g_death_warp && now() - g_death_at > kDeathStall) finish_death("15 s");
+}
+
+// Lua's print (luaB_print, 0x65AA80) writes each argument with fputs (0xAC2751) to a stdout nobody reads; the call
+// for the text (0x65AB01: push stdout; push text) is redirected, and in a session the death script's lines reach
+// the log.
+constexpr uint32_t kLuaPrintPut = 0x0065AB01;
+constexpr uint32_t kFputs = 0x00AC2751;
+
+static int __cdecl hk_lua_print(const char* text, void* file) {
+    static int lines = 0;
+    if (g_active && text && lines < 300) {
+        static const char* const kWatched[] = {"Death", "4000", "HostDead", "BossArea", "ChrType", "Mission",
+                                               "DEATH_STATE", "SetRestart", "TextWait"};
+        bool show = std::strcmp(text, "Normal") == 0;
+        for (const char* w : kWatched) show = show || std::strstr(text, w) != nullptr;
+        if (show) {
+            ++lines;
+            LOG_INFO("[coop] Lua: %s", text);
+        }
+    }
+    return reinterpret_cast<int(__cdecl*)(const char*, void*)>(kFputs)(text, file);
+}
+
 bool install() {
     int failed = 0;
+    if (!redirect_call(kLuaPrintPut, kFputs, reinterpret_cast<void*>(&hk_lua_print))) {
+        LOG_ERROR("[coop] Death diagnostic: Lua's print did not match this build (the death script is not logged)");
+    }
     if (!install_param_guard()) {
         ++failed;
         LOG_ERROR("[coop] Player param lookup guard did not match this build");
@@ -810,6 +904,7 @@ void tick() {
         }
     }
     if (!local_dead()) g_team_asked = false;  // alive again, or loading (no character)
+    death_watch_tick();
     if (g_team_hold) {
         if (!local_dead()) {
             g_team_hold = false;  // a load took over (the trip home) or we live again
@@ -869,6 +964,12 @@ void remote_rest() {
     }
     g_rest_heard = true;
     spectate::someone_rested();
+    // A death that is not waiting for the fight but is stuck before its respawn goes ahead too.
+    // (An ordinary death reaches its warp in about 8 s; one that has not after 10 s is stuck.)
+    if (local_dead() && g_active && !g_invader && !g_death_warp && !spectate::holding() && g_death_at != 0 &&
+        now() - g_death_at > 10.0) {
+        finish_death("another player rested");
+    }
 }
 
 bool boss_fight() { return boss_handle(0) != 0xFFFFFFFF || boss_handle(1) != 0xFFFFFFFF; }

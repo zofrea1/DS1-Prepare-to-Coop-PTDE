@@ -38,6 +38,9 @@ int count(int32_t goods_id);
 std::vector<int32_t> key_items();
 // The inventory's key-range header and the ids in the own-world key array, for the log (diagnostic).
 std::string key_layout();
+// In another player's world: writes a key item into the own world's key array too, so the trip home keeps it.
+// True when it is there (already or now); false at home (nothing to do) or when it could not be added.
+bool keep_key_for_home(int32_t goods_id);
 // Straight into the inventory, without the "items obtained" box (see kInventoryAdd).
 void give(int32_t goods_id, int n);
 void remove_all(int32_t goods_id);

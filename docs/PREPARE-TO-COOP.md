@@ -219,6 +219,16 @@ wipe lasts through the loads. Another player's character that a load threw away 
 for during their load, it came out invisible and could be walked through. A character first seen while its player
 reports being dead or loading is rebuilt once they are back.
 
+**A death that does not reach its respawn.** A death is the global script's chain `OnEvent_4000` ("YOU DIED") ->
+`SoloPlayDeath` -> `SoloPlayDeath_TextWait` -> `SoloPlayDeath_1` -> `SoloPlayDeath_2`, which asks for the respawn
+warp and clears flag 4000; `OnEvent_4000` ignores the death while a return to the title is asked for
+(`GetReturnState`, `[[0x13784A4]]` > 0). A guest who fell after the host once never got to the warp: no respawn for
+the rest of the session, and a rest changed nothing. The script's own lines are logged (Lua's `print`, whose
+`fputs` call at `0x65AB01` is redirected). A death that has not asked for its warp 15 s after it went ahead (not
+counting a wait for the fight, limbo, the team or an open menu such as the indictment menu) first has a return to
+the title that never happened dropped, then is finished with `SoloPlayDeath_2`; another player's rest finishes one
+that has waited over 10 s.
+
 ### Invasions: arrival, boss fogs
 
 The maps' MSBs hold one black invasion point per play region: a region named `黒侵入ポイント` with entity id
@@ -347,9 +357,17 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 Each game bids for the enemies around it (`0xE6D250`: authority, engagement, nearness to its player) and the
 session host's game hands each enemy to the highest bid; the others follow it over the network. The events switch
 an enemy's AI on or off in each game by that game's own player (Set Character AI State, `ChrCtrl+0xC0` bit 0), so
-the copies can differ: a game whose copy has its AI off does not bid while another player is near the enemy, and
-a game whose player is more than 64 m away does not bid while another player is nearer. Without the first rule
-the Asylum Demon, its AI off in the guest's game after a retry, stood idle once the guest's game took it over.
+the copies can differ: a game whose copy has its AI off does not bid while another player is near the enemy (a
+player who fell and spectates counts: their game still runs it), and a game whose player is more than 64 m away
+does not bid while another player is nearer. Without the first rule the Asylum Demon, its AI off in the guest's
+game after a retry, stood idle once the guest's game took it over.
+
+A load at home starts every map's temporary flags (`xxxx5000`-`xxxx5999`: timers, who stands where, which runs of
+the map's events are done) over. A guest's death reload stays in the host's world, whose flags the game then left
+as they were: the Asylum Demon's "AI on" event (11815392) saw its condition (11815393) still done, passed at the
+load ahead of the intro that switches the AI off, and the guest's copy fought the retry with its AI off. At a
+guest's death reload the visited world's temporary blocks (group 1, sub-block 5 of every map) are cleared, as the
+host's own reload clears them at home.
 
 In a guest's game the host's NPCs (teams 8 and 9) die only when the host's game says so (its HP report or its list
 of the dead) while the host is in the same map, also while the host's game is loading and has not reported them
@@ -364,6 +382,13 @@ yet: Oscar otherwise died in the guest's game during the host's load and dropped
 | Effect | `PlayerIns::UseGoods` (vtable slot 128) |
 | Names | the game's FMG lookup (`0xD175E0`); the Parchment dialog (event text 93129700) shows the soul cost |
 | Given / removed | Lua `AddInventoryItem` (`0xD664C0`) at each rest; `RemoveInventoryEquip`'s core (`0xD6D670`) for the Crimson Blossoms |
+
+Key items: `MoveMapStep`'s constructor (`0xEFC470`) switches the inventory's key array with the world. At home it
+reads the own array (`+0x120` = `+0x114`, its count at `+0x134` = `&+0x12C`); in someone else's world `0x51C520`
+points it at a second array (`+0x11C`, count `+0x130`) and clears that. Keys a guest gained in the host's world went
+into the second array and were gone after the trip home. Each one is now added to the own array as well (the own
+array switched in for the moment), so the game's own switch brings it home, also after a crash or a quit there;
+three seconds after the trip home any that is still missing is given back.
 
 ### Rules for guests
 

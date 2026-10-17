@@ -347,6 +347,8 @@ bool g_close_forced = false;  // a guest was still in the game session when it w
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
 bool g_hidden = false;
+// We invade and are in the host's world: the other players' health bars are shown (hk_bar_type; set every tick).
+uint8_t g_invader_bars = 0;
 
 double now() { return GetTickCount64() / 1000.0; }
 // After a session ends, the party is put back to solo for a while (see settle_after_session).
@@ -1326,6 +1328,7 @@ void guest_on_welcome(const Welcome& w) {
     g_home_bonfire = game::last_bonfire();
     g_home_map = game::map_id();
     g_host_map = w.map;
+    st.host_map = w.map;
     g_host_bonfire = w.bonfire;
     // Until the guest rests, a death uses the host's bonfire. Set before the join: the reload can run inside it.
     if (w.bonfire >= 0 && !g_invade) g_guest_bonfire = w.bonfire;
@@ -1719,6 +1722,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             StateMsg m;
             if (from != g_host || !as(&m)) return;
             g_host_map = m.map;
+            if (m.map != -1) rules::state().host_map = m.map;
             if (m.bonfire >= 0) g_host_bonfire = m.bonfire;
             rules::state().invader_present = m.invader_present != 0;
             g_host_coop_players = m.coop_players ? m.coop_players : 1;
@@ -2523,6 +2527,7 @@ void tick() {
     if (g_role == Role::Host) host_tick();
     if (g_role == Role::Guest) guest_tick();
     text::set_seamless_active(g_role != Role::None);
+    g_invader_bars = g_role == Role::Guest && g_invade && g_step == Step::InWorld ? 1 : 0;
     text::tick();
     // Characters of the other players: rebuilt after loads and after a death (co-op only; invaders keep the
     // game's own rules).
@@ -2901,6 +2906,44 @@ bool install_nameplate() {
     const bool b = redirect_call(kFloatingNameB, kNameSet, reinterpret_cast<void*>(&hk_floating_name));
     if (!a || !b) return false;
     LOG_INFO("[coop] Companion names on the floating health bar can show more (OverheadPlayerDisplay)");
+    return true;
+}
+
+// The floating health bars of the other players (0xFA89C0, one widget per slot, data at MenuMan+0x8F4 + 0x20 *
+// slot, filled by 0x1012C30) are hidden while our own character is a dark spirit (chr type 2, or 0xC): vanilla
+// invaders see no bars at all. The host and its guests see each other's, so an invader now sees theirs too: the
+// test at 0xFA8A11 skips the hide while we invade. A remote dark spirit's bar stays hidden (the slot's own flag at
+// +0x1C), as in vanilla.
+constexpr uint32_t kBarTypeTest = 0x00FA8A11;
+uint32_t g_bar_hide = 0x00FA8A1E;  // xor bl,bl ; mov [esp+14h],bl: no bars
+uint32_t g_bar_next = 0x00FA8A24;  // the next test (cmp ecx,0Dh), with ecx = our chr type
+
+__declspec(naked) void hk_bar_type() {
+    __asm {
+        mov ecx, dword ptr [eax + 0x70]
+        cmp ecx, 2
+        je dark
+        cmp ecx, 0Ch
+        je dark
+        jmp dword ptr [g_bar_next]
+    dark:
+        cmp byte ptr [g_invader_bars], 0
+        jne keep
+        jmp dword ptr [g_bar_hide]
+    keep:
+        jmp dword ptr [g_bar_next]
+    }
+}
+
+bool install_invader_bars() {
+    // mov ecx,[eax+70h] ; cmp ecx,2 ; je +5 ; cmp ecx,0Ch ; jne +6
+    static const uint8_t k[13] = {0x8B, 0x48, 0x70, 0x83, 0xF9, 0x02, 0x74, 0x05, 0x83, 0xF9, 0x0C, 0x75, 0x06};
+    if (!bytes_match(kBarTypeTest, k, sizeof(k))) return false;
+    uint8_t jmp[6] = {0xE9, 0, 0, 0, 0, 0x90};
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_bar_type) - (kBarTypeTest + 5));
+    std::memcpy(jmp + 1, &rel, 4);
+    if (!patch(kBarTypeTest, k, jmp, sizeof(jmp))) return false;
+    LOG_INFO("[coop] Invaders see the host's and guests' health bars");
     return true;
 }
 

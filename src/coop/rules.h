@@ -24,6 +24,7 @@ struct State {
     int world_rules = 0;      // Ominous Tome: 0 none, 1 allies are hostile, 2 allies fight in teams
     bool taunt = false;       // Dried Fingers: invaders find this world first
     bool infection = false;   // Cursed Pendant: the world we are in counts as pure black World Tendency
+    int host_map = -1;        // guest: the host's map as last reported (kept while the host's game loads)
 };
 
 State& state();

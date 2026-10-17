@@ -79,6 +79,8 @@ const std::vector<PeerInfo>& peers();
 // The game draws a companion's name from the player-data string. This replaces that pointer, while the
 // floating bar is updated, with "(name, SL: N, Pms)".
 bool install_nameplate();
+// An invader sees the floating health bars of the host and its guests, as they see each other's.
+bool install_invader_bars();
 
 // The host's arrival point for guests: where the host last rested at a bonfire (set on every rest).
 void remember_rest_point();

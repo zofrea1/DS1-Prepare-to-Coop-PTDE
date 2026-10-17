@@ -1236,6 +1236,7 @@ void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
 }
 
 // ---------------------------------------------------------------- the host's NPCs live through a guest's rest
+// and through the host's death
 // Every HP change goes through 0xE688E0 (stdcall(chr, hp)): clamped to 0..max into +0x2D4, then at 0 the
 // character's own "cannot die" rules (+0x1FF bit 1, its param, SpEffect state 0x8F) keep 1. The SpEffects' per
 // second change (0xE72E20) dies there too when it reaches 0. Oscar sits with SpEffect 5492 (99.9 % of his HP
@@ -1245,9 +1246,42 @@ void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
 // rest's own heal: a second 5492 (or the host's) landed after the heal. A death in the guest's game during that
 // window is never a death the host sees. So while a guest's world resets and for 5 s after, a host NPC (team 8
 // or 9) that is alive keeps 1 HP instead of reaching 0 in the guest's game. The rest's heal then fills it up.
+// The host's death killed him the same way (2026-10-16 20:53): the host's world reloaded after its death, and a
+// second later his HP read 0 in the guest's game (death animation, his items dropped), while the host's Oscar lived
+// and still talked to both. The session host is the one whose HP counts: 0xE40FE0 sends each character's HP when it
+// changes (WorldChrMan+0x2B4, a u16 per net handle, 0xF987 = none) and a guest's game sets it (SetHP returning to
+// kRetHpSync). So in a guest's game, with the host in the same map, a host NPC the host still reports alive does
+// not die of anything else; the host's report of its death (or the host's list of its dead) still kills it.
 constexpr uint32_t kSetHp = 0x00E688E0;
+constexpr uint32_t kRetHpSync = 0x00E4127B;        // 0xE40FE0: a guest's game takes the host's HP report
+constexpr uint32_t kRetHostDeadList = 0x00E441FC;  // 0xE44150: the host's list of its dead characters (kill)
+constexpr uint32_t kHpTableField = 0x2B4;          // WorldChrMan: the HP report table
+constexpr uint32_t kHpNone = 0xF987;
 void* g_set_hp_orig = nullptr;
 int g_hp_saves = 0;
+int g_hp_kept = 0;
+
+// The host's last HP report for a character, -1 when there is none. Read in place: 0xE551C0 would take the
+// table's "new" mark, which the game's own sync waits for.
+int host_reported_hp(uint32_t chr) {
+    uint32_t handle = 0, wcm = 0, table = 0, n1 = 0, page = 0, n2 = 0, entries = 0, word = 0;
+    if (!read32(chr + 0x78, &handle) || static_cast<int>(handle) < 0) return -1;
+    if (!read32(kWorldChrManAddr, &wcm) || !wcm || !read32(wcm + kHpTableField, &table) || !table) return -1;
+    const uint32_t i1 = (handle >> 11) & 0x1F, i2 = handle & 0x7FF;
+    if (!read32(table + 4, &n1) || static_cast<int>(i1) >= static_cast<int>(n1)) return -1;
+    if (!read32(table + 8 + i1 * 4, &page) || !page) return -1;
+    if (!read32(page + 8, &n2) || static_cast<int>(i2) >= static_cast<int>(n2)) return -1;
+    if (!read32(page + 0x18, &entries) || !entries || !read32(entries + i2 * 4, &word)) return -1;
+    const uint32_t hp = word & 0xFFFF;
+    return hp == kHpNone ? -1 : static_cast<int>(hp);
+}
+
+// The host stands in the map we are in (its game has the same characters), as it last said.
+bool host_in_our_map() {
+    const int here = game::map_id();
+    return here != -1 && g_state.host_map != -1 &&
+           (static_cast<uint32_t>(here) & 0xFFFF0000u) == (static_cast<uint32_t>(g_state.host_map) & 0xFFFF0000u);
+}
 
 bool reset_window(ULONGLONG ms) {
     uint32_t wcm = 0, state = 0;
@@ -1255,17 +1289,26 @@ bool reset_window(ULONGLONG ms) {
     return g_world_reset_at && GetTickCount64() - g_world_reset_at < ms;
 }
 
-int __stdcall set_hp_value(uint32_t chr, int hp) {
+int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
     if (hp > 0 || !chr || !g_state.active || !g_state.guest || g_state.invader) return hp;
     uint32_t cur = 0, team = 0, max_hp = 0;
     if (!read32(chr + 0x2D4, &cur) || static_cast<int>(cur) <= 0 || !read32(chr + 0x74, &team) ||
         (team != 8 && team != 9) || !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0) {
         return hp;
     }
-    if (!reset_window(5000)) return hp;
-    if (++g_hp_saves <= 20) {
-        LOG_INFO("[coop] The host's NPC %08X (HP %d/%d, team %u) is kept alive during our world reset (the host's "
-                 "game decides its NPCs' deaths)", chr, static_cast<int>(cur), static_cast<int>(max_hp), team);
+    if (reset_window(5000)) {
+        if (++g_hp_saves <= 20) {
+            LOG_INFO("[coop] The host's NPC %08X (HP %d/%d, team %u) is kept alive during our world reset (the host's "
+                     "game decides its NPCs' deaths)", chr, static_cast<int>(cur), static_cast<int>(max_hp), team);
+        }
+        return 1;
+    }
+    if (ret == kRetHpSync || ret == kRetHostDeadList || !host_in_our_map()) return hp;
+    const int reported = host_reported_hp(chr);
+    if (reported <= 0) return hp;
+    if (++g_hp_kept <= 20) {
+        LOG_INFO("[coop] The host's NPC %08X (HP %d/%d, team %u) stays alive here: the host's game reports it alive "
+                 "(HP %d; from %08X)", chr, static_cast<int>(cur), static_cast<int>(max_hp), team, reported, ret);
     }
     return 1;
 }
@@ -1275,13 +1318,15 @@ int __stdcall set_hp_value(uint32_t chr, int hp) {
 constexpr uint32_t kKillChr = 0x00E6B4E0;
 void* g_kill_orig = nullptr;
 
-bool __stdcall kill_allowed(uint32_t chr) { return set_hp_value(chr, 0) == 0; }
+bool __stdcall kill_allowed(uint32_t chr, uint32_t ret) { return set_hp_value(chr, 0, ret) == 0; }
 
+// Our stack: [esp] = return address, [esp+4] = chr. ecx and edx are kept for the original.
 __declspec(naked) void hk_kill_chr() {
     __asm {
         push ecx
         push edx
-        push dword ptr [esp + 0xC]  // chr
+        push dword ptr [esp + 8]    // the return address
+        push dword ptr [esp + 0x10] // chr (one push later)
         call kill_allowed
         pop edx
         pop ecx
@@ -1293,13 +1338,107 @@ __declspec(naked) void hk_kill_chr() {
     }
 }
 
+// ---------------------------------------------------------------- why a throw did not happen (diagnostic)
+// A hit that can start a throw (a backstab, a riposte, a plunging attack) asks 0xE2E8A0 (eax = the character hit,
+// esi = the attacker's action controller, chr+0x28 -> +0x2C, ecx = the hit's throw id) whether a ThrowParam row
+// allows it; -1 means none did, and the hit lands as plain damage. On 2026-10-16 a co-op guest's plunging attack
+// on the Asylum Demon did its damage without the throw while the host's took. The rows' checks (0xE2D640) read the
+// characters' throw masks from their effects' states (0xDC0280: state 1 none, 2 and 3 more), the target's "can be
+// thrown" animation id (action+0x1E8, 0xFF none), its busy bits (action+0x84 bits 14 and 15), both throw nodes
+// (chr+0x330, state +0x10) and the chr+0x202 bit 4 of either side, then the two positions. A failed attempt by our
+// own character is logged with all of these.
+constexpr uint32_t kThrowTry = 0x00E2E8A0;
+void* g_throw_try_orig = nullptr;
+int g_throw_lines = 0;
+
+bool has_effect_state(uint32_t chr, int state) {
+    uint32_t mgr = 0, e = 0;
+    if (!read32(chr + 0x1E0, &mgr) || !mgr || !read32(mgr + 4, &e)) return false;
+    for (int guard = 0; e && guard < 128; ++guard) {
+        uint32_t flags = 0, row = 0;
+        uint8_t st = 0;
+        if (!read32(e + 0x14, &flags)) return false;
+        if (!(flags & 0x800C0003) && read32(e + 0x2C, &row) && row && read8(row + 0x15A, &st) && st == state) return true;
+        if (!read32(e + 0x30, &e)) return false;
+    }
+    return false;
+}
+
+bool chr_xyz(uint32_t chr, float out[3]) {
+    uint32_t ctrl = 0, phys = 0;
+    if (!read32(chr + 0x28, &ctrl) || !ctrl || !read32(ctrl + 0x1C, &phys) || !phys) return false;
+    for (int i = 0; i < 3; ++i) {
+        uint32_t v = 0;
+        if (!read32(phys + 0x10 + i * 4, &v)) return false;
+        std::memcpy(&out[i], &v, 4);
+    }
+    return true;
+}
+
+void __stdcall throw_failed(uint32_t target, uint32_t action, uint32_t throw_id) {
+    if (g_throw_lines >= 30 || !g_state.active) return;
+    uint32_t a1 = 0, attacker = 0;
+    if (!read32(action + 0x10, &a1) || !a1 || !read32(a1 + 0x10, &attacker) || attacker != game::player()) return;
+    ++g_throw_lines;
+    auto u32 = [](uint32_t at) {
+        uint32_t v = 0;
+        read32(at, &v);
+        return v;
+    };
+    uint32_t t_action = 0, t_ctrl = 0;
+    if (read32(target + 0x28, &t_ctrl) && t_ctrl) read32(t_ctrl + 0x2C, &t_action);
+    const uint32_t t_def = t_action ? u32(t_action + 0x1E8) : 0xFFFFFFFF;
+    const uint32_t t_busy = t_action ? (u32(t_action + 0x84) >> 14) & 3 : 0;
+    const uint32_t a_atk = u32(action + 0x1E4);
+    const uint32_t t_node = u32(target + 0x330), a_node = u32(attacker + 0x330);
+    uint8_t t_state = 0xFF, a_state = 0xFF, t_202 = 0, a_202 = 0;
+    if (t_node) read8(t_node + 0x10, &t_state);
+    if (a_node) read8(a_node + 0x10, &a_state);
+    read8(target + 0x202, &t_202);
+    read8(attacker + 0x202, &a_202);
+    const uint32_t current = u32(target + 0x2C), own_ai = u32(target + 0x410), net_ai = u32(target + 0x414);
+    const char* control = current && current == own_ai ? "this game" : current && current == net_ai ? "another game" : "?";
+    float tp[3] = {}, ap[3] = {};
+    const bool pos = chr_xyz(target, tp) && chr_xyz(attacker, ap);
+    const float dx = ap[0] - tp[0], dz = ap[2] - tp[2];
+    LOG_INFO("[coop] Our throw attempt (throw id %u) on character %d found no throw: target moved by %s, can-be-thrown "
+             "id %u (255 none), busy bits %u, throw node %u, 0x202 %02X, states 1/2/3 %d%d%d; ours: throw id %u, node %u, "
+             "0x202 %02X, states 1/2/3 %d%d%d; we are %.2f m above it, %.2f m away%s",
+             throw_id & 0xFFFF, static_cast<int>(u32(target + 0x6C)), control, t_def, t_busy, t_state, t_202,
+             has_effect_state(target, 1), has_effect_state(target, 2), has_effect_state(target, 3), a_atk, a_state, a_202,
+             has_effect_state(attacker, 1), has_effect_state(attacker, 2), has_effect_state(attacker, 3),
+             pos ? ap[1] - tp[1] : 0.0f, pos ? std::sqrt(dx * dx + dz * dz) : 0.0f, pos ? "" : " (positions unknown)");
+}
+
+// eax, ecx and esi are the attempt's inputs; eax returns its answer.
+__declspec(naked) void hk_throw_try() {
+    __asm {
+        push esi
+        push ecx
+        push eax
+        call dword ptr [g_throw_try_orig]
+        cmp eax, -1
+        jne done
+        pushad                       // [esp+32] = eax in, [esp+36] = ecx in, [esp+40] = esi in
+        push dword ptr [esp + 36]    // throw id
+        push dword ptr [esp + 44]    // action (one push later)
+        push dword ptr [esp + 40]    // target (two pushes later)
+        call throw_failed
+        popad
+    done:
+        add esp, 12
+        ret
+    }
+}
+
 // Our stack: [esp] = return address, [esp+4] = chr, [esp+8] = hp. ecx and edx are kept for the original.
 __declspec(naked) void hk_set_hp() {
     __asm {
         push ecx
         push edx
-        push dword ptr [esp + 0x10]  // hp
-        push dword ptr [esp + 0x10]  // chr (one push later)
+        push dword ptr [esp + 8]     // the return address
+        push dword ptr [esp + 0x14]  // hp (one push later)
+        push dword ptr [esp + 0x14]  // chr (two pushes later)
         call set_hp_value
         mov [esp + 0x10], eax        // the hp argument
         pop edx
@@ -2867,6 +3006,12 @@ int install() {
         static const uint8_t k[6] = {0x51, 0x55, 0x8B, 0x6C, 0x24, 0x0C};  // push ecx ; push ebp ; mov ebp,[esp+0Ch]
         g_kill_orig = detour(kKillChr, k, sizeof(k), reinterpret_cast<void*>(&hk_kill_chr));
         failed += install_one("the host's NPCs live through a guest's rest (kills)", g_kill_orig != nullptr);
+    }
+    {
+        // sub esp,0Ch ; lea edx,[esp] (a diagnostic: its failure does not stop the co-op)
+        static const uint8_t k[6] = {0x83, 0xEC, 0x0C, 0x8D, 0x14, 0x24};
+        g_throw_try_orig = detour(kThrowTry, k, sizeof(k), reinterpret_cast<void*>(&hk_throw_try));
+        if (!g_throw_try_orig) LOG_ERROR("[coop] Throw diagnostic did not match this build");
     }
     failed += install_one("respawn points set by events", install_respawn_point());
     {

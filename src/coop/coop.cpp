@@ -282,6 +282,7 @@ void coop_install(const CoopConfig& config) {
         return;
     }
     if (!coop::session::install_nameplate()) LOG_ERROR("[coop] Companion nameplates were not changed");
+    if (!coop::session::install_invader_bars()) LOG_ERROR("[coop] Invaders still see no health bars");
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");

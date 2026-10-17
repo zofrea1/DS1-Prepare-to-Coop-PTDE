@@ -87,7 +87,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. A disaster of the host's world (the black phantoms of black World Tendency or the Cursed Pendant) stays there. |
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency (a player can also curse their own world without a session), and lifts the curse when used again: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster. Each area with black phantoms starts its own disaster when a player enters it; the game checks every 600 s whether the world is still black and ends the disaster only if not, so in a cursed world the phantoms stay. The curse lasts through sessions but is not saved: after the game is restarted, or another character is loaded, the world is no longer cursed and disasters left from the curse end; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
 | Spectating | Bosses and invaders are fought as one team. Falling during a boss fight or while an invader is in the world, with another co-op player (host or guest) still standing, you do not die yet: after your fall the camera follows a living teammate (D-pad left/right or the arrow keys switch between them). Your death ("YOU DIED", the lost souls, the respawn) goes ahead once the fight is decided: the boss is gone and no invader is left, every co-op player has fallen, someone rests at a bonfire, or after ten minutes. |
-| Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. The invader wins when every co-op player has fallen (the host's death alone does not end an invasion while a guest stands; with a 1.0.0 invader it still does); when the invader dies the invasion fails. |
+| Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Boss fogs stay shut for the host and the guests while an invader is in the world, and no invader joins while anyone in the world is in a boss fight (the invader tries another world; such a world is also hidden from invaders' searches). An invader arrives at the game's own black invasion point for the play region the host stands in, else at the nearest one within 50 m, else on the host (Firelink Shrine and the Undead Asylum have none; invasions are allowed there). The invader wins when every co-op player has fallen (the host's death alone does not end an invasion while a guest stands; with a 1.0.0 invader it still does); when the invader dies the invasion fails. |
 | Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |
 | Shared light | Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game. |
 
@@ -194,6 +194,26 @@ the menus and the pad too, so not usable) or else the local player (`0xEFDB1F`);
 handed over there instead, and the death camera's flag (`WorldChrMan+0x40`, set at `0xE8332E` when the local
 player dies) reads clear for that character only (`0xF1457A`). A boss gauge is EMEVD's (`2003[11]`): the
 Asylum Demon's goes off when the boss dies or when the local player leaves the arena, and a dead body stays.
+
+### Invasions: arrival, boss fogs
+
+The maps' MSBs hold one black invasion point per play region: a region named `黒侵入ポイント` with entity id
+map base + 4000 + the play region's number (the Undead Burg's play regions 101000 ... 101210, the collisions'
+`PlayRegionID`, have points 1014000 ... 1014210; seventeen maps checked, the range holds nothing else; Firelink
+Shrine, the Undead Asylum and Ash Lake have none). The game keeps the player's play region at `PlayerIns+0x284`
+and turns it into the point's id the same way (`0xD6BB50`: id / 1000 * 9000 + 4000 + id). The host picks the
+point of its own play region from the loaded maps' regions (`WorldPointManImp`, `[0x137D6E8]`, as `0xD6C490`
+looks one up), else the nearest within 50 m, else its own position, and sends it in its answer as the invader's
+arrival (the game's summon position, `GameMan+0xA80`/`+0xAB0`, map `+0xAA4`).
+
+A boss fog's entry is an EMEVD "Action Button - Boss Room" (`3[19]`). Its test (`EcTestActionButton`, `0xBBD7E0`)
+greys the button out for a Gravelord or Path of the Dragon phantom in the party (invade types 7 and 10) or state
+effect 185; any other invader leaves it open, cannot follow (the fog takes living players and white phantoms),
+and is sent home by the host's entry (`2009[06]` Issue Boss Room Entry Notification: Lua 4068 `ReportBossArea`
+-> `Failed_BossAreaMission` on the invader, `0xEA2C80` drops black phantoms from the party). Prepare to Co-op adds
+"an invader is in the world" to those reasons at `0xBBD86C`. Each player reports whether a boss gauge is shown in
+their game (an addition behind the status message that older versions ignore); while one is, the host answers
+invaders "refused" and its lobby's `ptdesc_invade` reads `0`.
 
 ### When a player leaves
 

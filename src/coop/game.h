@@ -64,6 +64,21 @@ int map_id();                  // PlayerIns+0x444
 bool position(Vec3* pos, float* angle);
 // Another character's position (PlayerIns/ChrIns: +0x28 controller, +0x1C physics, +0x10 position).
 bool chr_position(uint32_t chr, Vec3* pos);
+// The local player's play region (PlayerIns+0x284, the collision's PlayRegionID: area/block * 1000 + region, e.g.
+// 101010 in the Undead Burg), -1 none.
+int play_region();
+// A black invasion point (MSB regions named 黒侵入ポイント, entity = map base + 4000..4999, one per play region):
+// the one of play region `region` wherever it is, else the nearest to `from` within `max_dist`, among the loaded
+// maps. Firelink Shrine, the Undead Asylum and Ash Lake have none.
+struct InvasionPoint {
+    int id = -1;
+    int map = -1;      // the point's map (area << 24 | block << 16)
+    Vec3 pos{};
+    float angle = 0;   // facing, radians
+    bool exact = false;  // the play region's own point
+    float dist = 0;    // squared distance from `from`
+};
+bool invasion_point(int region, const Vec3& from, float max_dist, InvasionPoint* out);
 // The other players' characters in our world: WorldChrMan's player slots 1.. (+0x24 count, +0x28 array of
 // 0x20-byte entries; slot 0 is the local player).
 std::vector<uint32_t> remote_player_chrs();

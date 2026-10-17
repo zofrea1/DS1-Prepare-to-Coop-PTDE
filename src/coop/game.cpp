@@ -110,6 +110,66 @@ bool chr_position(uint32_t chr, Vec3* pos) {
     return true;
 }
 
+int play_region() {
+    const uint32_t p = player();
+    const int r = p ? field<int>(p, 0x284, -1) : -1;
+    return r >= 0 && r < 1000000 ? r : -1;
+}
+
+// The loaded maps' MSB regions (WorldPointManImp, [0x137D6E8]), as 0xD6C490 looks one up by entity id: +0x24 the
+// number of id tables, then tables of 0x14 bytes from +0x28 {first id, last id, ?, count, (id, handle) pairs sorted
+// by id} (0xD9C850); a handle is block << 20 | index, and +0x20 holds the blocks (0x1C bytes each), whose map data
+// (+4) leads through +0x18 to the block's regions (+0x24: +8 count + 1, +0xC records) (0xD9C550). A record is the
+// MSB's own: +0x10 position, +0x1C rotation in degrees.
+constexpr uint32_t kWorldPointManVar = 0x0137D6E8;
+
+uint32_t region_record(uint32_t wpm, uint32_t handle) {
+    const uint32_t block = handle >> 20 & 0xFF, index = handle & 0xFFFFF;
+    if (static_cast<int>(handle) < 0 || block >= field<uint32_t>(wpm, 0x1C, 0)) return 0;
+    const uint32_t blocks = field<uint32_t>(wpm, 0x20, 0);
+    const uint32_t data = field<uint32_t>(field<uint32_t>(blocks, 4 + block * 0x1C, 0), 0x18, 0);
+    const uint32_t list = field<uint32_t>(data, 0x24, 0);
+    const int count = field<int>(list, 8, 0) - 1;
+    if (!list || static_cast<int>(index) >= count) return 0;
+    return field<uint32_t>(list, 0xC + index * 4, 0);
+}
+
+bool invasion_point(int region, const Vec3& from, float max_dist, InvasionPoint* out) {
+    const uint32_t wpm = deref(kWorldPointManVar);
+    const int tables = field<int>(wpm, 0x24, 0);
+    if (!wpm || tables <= 0 || tables > 64) return false;
+    // The play region's own point: region 101010 (m10_01, play region 10) -> 1014010.
+    const int wanted = region >= 0 ? (region / 1000) * 10000 + 4000 + region % 1000 : -1;
+    bool found = false;
+    float best = max_dist * max_dist;
+    for (int t = 0; t < tables; ++t) {
+        const uint32_t table = wpm + 0x28 + t * 0x14;
+        const int count = field<int>(table, 0xC, 0);
+        const uint32_t pairs = field<uint32_t>(table, 0x10, 0);
+        for (int i = 0; pairs && i < count && i < 8192; ++i) {
+            const int id = field<int>(pairs, i * 8, -1);
+            if (id < 0 || id % 10000 < 4000 || id % 10000 >= 5000) continue;
+            const uint32_t rec = region_record(wpm, field<uint32_t>(pairs, i * 8 + 4, 0xFFFFFFFF));
+            if (!rec) continue;
+            const Vec3 pos = field<Vec3>(rec, 0x10, Vec3{0, 0, 0});
+            const float dx = pos.x - from.x, dy = pos.y - from.y, dz = pos.z - from.z;
+            const float d = dx * dx + dy * dy + dz * dz;
+            const bool exact = id == wanted;
+            if (!exact && d >= best) continue;
+            best = d;
+            out->id = id;
+            out->map = (id / 100000) << 24 | (id / 10000 % 10) << 16;
+            out->pos = pos;
+            out->angle = field<float>(rec, 0x20, 0.0f) * 3.14159265f / 180.0f;
+            out->exact = exact;
+            out->dist = d;
+            found = true;
+            if (exact) return true;
+        }
+    }
+    return found;
+}
+
 std::vector<uint32_t> remote_player_chrs() {
     std::vector<uint32_t> out;
     const uint32_t wcm = deref(kWorldChrManVar);

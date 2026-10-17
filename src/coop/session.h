@@ -42,6 +42,7 @@ struct PeerInfo {
     int ceremony = 0;        // the bonfire animation they report looping (their sit), 0 none
     double anim_at = 0;      // when one of their event animations last arrived
     int death_events = 0;    // kDead messages about them this session
+    bool boss_fight = false; // a boss gauge is shown in their game (1.1.0 players report it)
 };
 
 void configure(const Config& cfg);

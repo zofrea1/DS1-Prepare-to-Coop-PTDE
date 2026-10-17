@@ -8,6 +8,7 @@
 #include "rules.h"
 #include "session.h"
 #include "spectate.h"
+#include "text.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -358,6 +359,56 @@ char __cdecl hk_warp_kick() {
     return g_warp_orig();
 }
 
+// ---------------------------------------------------------------- boss fogs sealed while an invader is here
+// A boss fog's entry is an EMEVD "Action Button - Boss Room" (3[19]); its test (EcTestActionButton 0xBBD7E0) greys
+// the button out for the game's own reasons (state effect 185, a Gravelord or Path of the Dragon phantom in the
+// party: invade types 7 and 10). Any other invader leaves it open, the invader cannot follow (the fog takes
+// living players and white phantoms), and the host's entry sends the invader home (the boss room notification,
+// 2009[06]: Lua 4068 ReportBossArea -> Failed_BossAreaMission, and 0xEA2C80 drops black phantoms from the party).
+// In a session the fog stays shut for the host and the guests while an invader is in the world, so a fight with
+// an invader cannot be ended by walking into a boss: our answer joins the game's at 0xBBD86C.
+constexpr uint32_t kBossFogTest = 0x00BBD86C;   // mov ecx,[0137D644h] ; xor eax,eax (the boss-room checks begin)
+constexpr uint32_t kBossFogShut = 0x00BBD8AB;   // mov byte [esp+10h],0: the button greyed out
+uint32_t g_fog_shut_at = kBossFogShut;
+bool g_fog_told = false;
+
+bool __cdecl boss_fog_sealed() {
+    const bool sealed = g_active && !g_invader && g_invader_present;
+    if (sealed) {
+        static double told = -100;
+        if (now() - told > 60.0) {
+            told = now();
+            LOG_INFO("[coop] A boss fog stays shut: an invader is in the world");
+        }
+    }
+    return sealed;
+}
+
+__declspec(naked) void hk_boss_fog() {
+    __asm {
+        pushad
+        call boss_fog_sealed
+        test al, al
+        popad
+        jnz shut
+        mov ecx, 0x0137D644
+        mov ecx, [ecx]
+        xor eax, eax
+        ret
+    shut:
+        add esp, 4  // our return address: the game's frame as at 0xBBD86C
+        jmp g_fog_shut_at
+    }
+}
+
+bool install_boss_fog() {
+    static const uint8_t k[8] = {0x8B, 0x0D, 0x44, 0xD6, 0x37, 0x01, 0x33, 0xC0};
+    uint8_t code[8] = {0xE8, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_boss_fog) - (kBossFogTest + 5));
+    std::memcpy(code + 1, &rel, 4);
+    return patch(kBossFogTest, k, code, sizeof(code));
+}
+
 void release_limbo(const char* why) {
     if (!g_limbo) return;
     g_limbo = false;
@@ -691,6 +742,9 @@ bool install() {
         g_sign_warp_orig = reinterpret_cast<VoidFn>(detour(kSetSignWarp, k, sizeof(k), reinterpret_cast<void*>(&hk_sign_warp)));
         if (!g_sign_warp_orig) ++failed;
     }
+    if (!install_boss_fog()) {
+        LOG_ERROR("[coop] Boss fogs: the boss-room button test did not match this build (not sealed for invasions)");
+    }
     if (!redirect_call(kLightCall, kChrLight, reinterpret_cast<void*>(&hk_chr_light))) {
         LOG_ERROR("[coop] Shared light: the character update's light call did not match this build (not shared)");
     }
@@ -733,6 +787,12 @@ void tick() {
 }
 
 void set_session(bool active, bool invader, bool invader_present) {
+    // An invader arrives: the boss fogs shut for the co-op players until it is gone.
+    if (active && !invader && invader_present && !g_fog_told) {
+        g_fog_told = true;
+        text::show(L"The boss fogs are sealed while an invader is in this world");
+    }
+    if (!invader_present || !active) g_fog_told = false;
     g_active = active;
     g_invader = invader;
     g_invader_present = invader_present;

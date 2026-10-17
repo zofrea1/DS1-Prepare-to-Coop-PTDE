@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
@@ -136,6 +137,13 @@ struct Info {
     char name[64];          // as in Hello: the character name from 1.1.0 on, 1.0.0's Steam name
     wchar_t char_name[17];  // character name: matches the player to their character in our world
     int32_t ceremony;       // the bonfire animation the player is looping (the sit), 0 none
+};
+// Added in 1.1.0 behind Info, which keeps protocol 8: an older player reads the Info part and ignores the rest,
+// and an older player's shorter Info leaves these at their defaults.
+struct InfoMore {
+    Info info;
+    uint8_t boss_fight;  // a boss gauge is shown in this player's game (the host keeps invaders out meanwhile)
+    uint8_t reserved[7];
 };
 struct BonfireMsg {
     Header h;
@@ -357,6 +365,7 @@ bool g_close_left = false;
 bool g_close_forced = false;  // a guest was still in the game session when it was ended
 // We invade and the host died: the invasion is won, and our own death a moment later (both fell) is no defeat.
 bool g_invade_won = false;
+bool g_invade_open = false;  // host: our lobby tells invaders' searches we take invaders (ptdesc_invade)
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
 bool g_hidden = false;
@@ -751,6 +760,7 @@ void host_open_lobby() {
         steam::set_lobby_data(lobby, "ptdesc_key", g_key.c_str());
         steam::set_lobby_data(lobby, "ptdesc_name", steam::persona(steam::self()).c_str());
         steam::set_lobby_data(lobby, "ptdesc_invade", g_cfg.allow_invaders ? "1" : "0");
+        g_invade_open = g_cfg.allow_invaders;
         steam::set_lobby_data(lobby, "ptdesc_taunt", "0");  // stays 0: see kFingersWeight
         steam::set_lobby_data(lobby, "ptdesc_fingers", "0");
         steam::set_lobby_joinable(lobby, true);
@@ -819,6 +829,34 @@ void drop_quiet_players() {
     }
 }
 
+// A boss gauge is shown in our game or in a co-op guest's (1.1.0 guests report it).
+bool boss_fight_in_world() {
+    if (world::boss_fight()) return true;
+    for (const auto& p : g_peers) {
+        if (!p.invader && p.boss_fight && admitted(p.id) && now() - p.last_seen <= 5.0) return true;
+    }
+    return false;
+}
+
+// Where an invader arrives in our world, as the game's own invasions do: the black invasion point of the play
+// region we stand in (the collision's PlayRegionID, PlayerIns+0x284; one point per play region in the maps'
+// MSBs). Where our play region has none (connecting stretches the multiplayer walls used to close, Firelink
+// Shrine, the Undead Asylum), the nearest point within kNearPoint; with none in reach, on the host (false).
+constexpr float kNearPoint = 50.0f;
+
+bool invader_arrival(game::InvasionPoint* ip) {
+    game::Vec3 me{};
+    const int region = game::play_region();
+    if (!game::position(&me, nullptr) || !game::invasion_point(region, me, kNearPoint, ip)) {
+        LOG_INFO("[coop] No invasion point for play region %d or within %.0f m: the invader arrives on the host",
+                 region, kNearPoint);
+        return false;
+    }
+    LOG_INFO("[coop] The invader arrives at invasion point %d (%s, %.0f m away, map %08X)", ip->id,
+             ip->exact ? "our play region's" : "the nearest", std::sqrt(ip->dist), ip->map);
+    return true;
+}
+
 void host_answer(const Pending& p) {
     Welcome w{};
     fill_header(&w, kWelcome);
@@ -832,9 +870,12 @@ void host_answer(const Pending& p) {
     for (uint64_t id : g_admitted) in_session += id == p.from ? 0 : 1;
     if (in_session >= g_cfg.max_players) w.status = kFull;
     if (p.invade && !g_cfg.allow_invaders) w.status = kRefused;
-    // No invasions in the Undead Asylum or Firelink Shrine (as in Remastered Seamless Co-op).
-    const int host_map = game::map_id();
-    if (p.invade && (host_map == 0x12010000 || host_map == 0x0A020000)) w.status = kRefused;
+    // No invader joins a boss fight (ours or a guest's): it tries another world. Remastered Seamless Co-op also
+    // keeps invaders out of the Undead Asylum and Firelink Shrine; Prepare to Co-op lets them in (1.1.0).
+    if (p.invade && w.status == kOk && boss_fight_in_world()) {
+        w.status = kRefused;
+        LOG_INFO("[coop] An invader knocked during a boss fight: refused");
+    }
     // Between maps or at the title screen there is no world to arrive in yet: the joiner asks again.
     if (w.status == kOk && (!game::in_game() || game::loading() || !game::own_world())) w.status = kBusy;
     std::vector<uint8_t> inv;
@@ -846,14 +887,22 @@ void host_answer(const Pending& p) {
     }
     if (w.status == kOk) {
         const auto& st = rules::state();
-        // Guests arrive at the host's last bonfire (where the host last rested); invaders near the host.
+        // Guests arrive at the host's last bonfire (where the host last rested); invaders at a black invasion point
+        // (invader_arrival), else on the host.
         const int bonfire = game::last_bonfire();
+        game::InvasionPoint ip;
         if (!p.invade && g_rest.valid && g_rest.bonfire == bonfire) {
             w.map = g_rest.map;
             w.pos[0] = g_rest.pos.x;
             w.pos[1] = g_rest.pos.y;
             w.pos[2] = g_rest.pos.z;
             w.angle = g_rest.angle;
+        } else if (p.invade && invader_arrival(&ip)) {
+            w.map = ip.map;
+            w.pos[0] = ip.pos.x;
+            w.pos[1] = ip.pos.y;
+            w.pos[2] = ip.pos.z;
+            w.angle = ip.angle;
         } else {
             game::Vec3 pos{};
             float angle = 0;
@@ -1093,6 +1142,20 @@ void host_hide_while_away() {
     }
 }
 
+// Invaders' searches skip a world that would refuse them: ptdesc_invade reads "0" while a boss fight is on (and
+// with AllowInvaders off). 1.0.0 invaders search on the same key.
+void host_invasions_open() {
+    static double last = 0;
+    if (now() - last < 1.0) return;
+    last = now();
+    const bool open = g_cfg.allow_invaders && !boss_fight_in_world();
+    if (open == g_invade_open) return;
+    g_invade_open = open;
+    steam::set_lobby_data(g_lobby, "ptdesc_invade", open ? "1" : "0");
+    LOG_INFO("[coop] A boss fight %s: invaders %s our world", open ? "is over" : "is on",
+             open ? "can find" : "cannot find");
+}
+
 void host_tick() {
     if (g_step == Step::Closing) {
         host_close_tick();
@@ -1100,6 +1163,7 @@ void host_tick() {
     }
     if (g_step != Step::Hosting) return;
     host_hide_while_away();
+    host_invasions_open();
     host_ensure_game_session();
     drop_quiet_players();
     const bool ready = game::session_state() == 3;
@@ -1626,7 +1690,8 @@ void guest_tick() {
 
 // ---------------------------------------------------------------- shared
 void send_info() {
-    Info i{};
+    InfoMore more{};
+    Info& i = more.info;
     fill_header(&i, kInfo);
     i.soul_level = game::soul_level();
     i.deaths = game::death_count();
@@ -1651,7 +1716,8 @@ void send_info() {
     strncpy_s(i.name, utf8(own_name()).c_str(), _TRUNCATE);
     wcsncpy_s(i.char_name, party::local_name().c_str(), _TRUNCATE);
     i.ceremony = motion::local_loop_anim();
-    broadcast(i, false);
+    more.boss_fight = world::boss_fight() ? 1 : 0;
+    broadcast(more, false);
 }
 
 // The player an event is about, by their character's name when we know them (a 1.0.0 player's events carry its
@@ -1836,6 +1902,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             p->light = m.light;
             p->char_name = m.char_name;
             p->ceremony = motion::synced_anim(m.ceremony) ? m.ceremony : 0;
+            InfoMore more{};
+            p->boss_fight = as(&more) && more.boss_fight != 0;
             p->last_seen = now();
             break;
         }

@@ -9,6 +9,7 @@
 #include "motion.h"
 #include "party.h"
 #include "rules.h"
+#include "spectate.h"
 #include "steam.h"
 #include "text.h"
 #include "world.h"
@@ -636,6 +637,45 @@ bool peer_is_invader(uint64_t id) {
     return false;
 }
 
+uint32_t chr_of_peer(uint64_t id);
+
+// A co-op player of our session (the host or a guest; invaders do not count). The lobby can also hold players who
+// never got in, and a refused joiner still broadcasts its status: a host counts the players it admitted, everyone
+// else the host, players whose character is here, and the players the game lists as session members (`members`,
+// party::remotes; the game's record holds the Steam name, cut to 16 characters).
+bool coop_member(const PeerInfo& p, const std::vector<party::Remote>& members) {
+    if (p.invader || now() - p.last_seen > 10.0) return false;
+    if (g_role == Role::Host) return admitted(p.id);
+    if (p.id == g_host || chr_of_peer(p.id)) return true;
+    const std::wstring steam_name = text::widen(p.name);
+    for (const auto& m : members) {
+        if (m.name.empty()) continue;
+        if (m.name == p.char_name || m.name == steam_name) return true;
+        if (m.name.size() >= 16 && steam_name.compare(0, m.name.size(), m.name) == 0) return true;
+    }
+    return false;
+}
+
+// We invade: the host has fallen and so has every co-op guest. Since 1.1.0 the host's death alone does not end an
+// invasion while a guest still stands (the fallen spectate, spectate.cpp): the co-op players win or lose together.
+bool coop_team_down() {
+    const std::vector<party::Remote> members = party::remotes();
+    bool host_down = false;
+    for (const auto& p : g_peers) {
+        if (!coop_member(p, members)) continue;
+        if (!p.dead) return false;
+        if (p.id == g_host) host_down = true;
+    }
+    return host_down;
+}
+
+void invasion_won() {
+    LOG_INFO("[coop] Every co-op player of this world has fallen: invasion victory");
+    g_invade_won = true;
+    say(kMsgBreakInSuccess);
+    game::call_lua("HostDead");  // the game's own invader victory
+}
+
 // The world we stand in decides which curse the tendency tests see: ours at home, the host's in another player's
 // world. Deciding by the world and not by the role keeps the host's curse out of a joiner's own world in the
 // seconds between the host's answer and the warp, and ours out of the host's world on the way home.
@@ -1100,7 +1140,8 @@ void host_tick() {
         s.bonfire = game::last_bonfire();
         s.players = static_cast<uint8_t>(game::member_count());
         bool invader = false;
-        for (const auto& p : g_peers) invader |= p.invader && now() - p.last_seen <= 10.0;
+        // Admitted only: an invader that knocked and was refused still broadcasts its status for a moment.
+        for (const auto& p : g_peers) invader |= p.invader && admitted(p.id) && now() - p.last_seen <= 10.0;
         const int coop = 1 + coop_guest_count();
         s.invader_present = invader ? 1 : 0;
         s.coop_players = static_cast<uint8_t>(coop);
@@ -1866,13 +1907,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 ++p->death_events;  // their character here gets rebuilt (party::tick)
             }
             say(fmt(m.invader ? kMsgInvaderDied : kMsgDied, event_name(m)));
-            // The host fell while we invade: the game's own invader victory (HostDead) runs here.
-            if (m.who == g_host && g_invade && g_step == Step::InWorld) {
-                LOG_INFO("[coop] The host died: invasion victory");
-                g_invade_won = true;
-                say(kMsgBreakInSuccess);
-                game::call_lua("HostDead");
-            }
+            // We invade and the last co-op player fell (the host alone is not enough while a guest stands).
+            if (g_invade && g_step == Step::InWorld && !g_invade_won && coop_team_down()) invasion_won();
             break;
         }
         case kBonfireWarp: {
@@ -2593,9 +2629,10 @@ void tick() {
     }
     g_invader_bars = g_role == Role::Guest && g_invade && g_step == Step::InWorld ? 1 : 0;
     text::tick();
-    // Characters of the other players: rebuilt after loads and after a death (co-op only; invaders keep the
-    // game's own rules).
-    party::tick(!g_invade && (g_step == Step::Hosting || g_step == Step::InWorld), &peer_state);
+    // Characters of the other players: rebuilt after loads and after a death. An invader's game too: a co-op
+    // guest who fell and came back stayed an invisible, untouchable dead copy there with only their health bar
+    // showing (2026-10-16 invasions; the game never sees a player come back within one session).
+    party::tick(g_step == Step::Hosting || g_step == Step::InWorld, &peer_state);
     if (g_step == Step::Hosting || g_step == Step::InWorld) cutscene_tick();
     update_remote_players();
     {
@@ -2663,10 +2700,28 @@ void tick() {
         bool all_dead = true;
         int others = 0;
         if (g_role == Role::Host || (g_role == Role::Guest && g_step == Step::InWorld)) coop = g_host_coop_players;
-        for (const auto& p : g_peers) {
-            if (p.invader || now() - p.last_seen > 10.0) continue;
-            ++others;
-            all_dead &= p.dead;
+        std::vector<spectate::Teammate> team;
+        if (g_role != Role::None && !g_invade && !game::loading()) {
+            const std::vector<party::Remote> members = party::remotes();
+            for (const auto& p : g_peers) {
+                if (!coop_member(p, members)) continue;
+                ++others;
+                all_dead &= p.dead;
+                spectate::Teammate t;
+                t.id = p.id;
+                t.name = shown_name(p);
+                t.chr = chr_of_peer(p.id);
+                t.alive = !p.dead;
+                team.push_back(t);
+            }
+        }
+        spectate::set_teammates(team);
+        if (g_invade && g_step == Step::InWorld && !g_invade_won) {
+            static double last_down = 0;
+            if (now() - last_down > 0.5) {
+                last_down = now();
+                if (coop_team_down()) invasion_won();  // also a last guest who left instead of falling
+            }
         }
         world::set_players(coop);
         world::set_everyone_dead(others > 0 && all_dead);
@@ -3029,6 +3084,7 @@ std::vector<std::wstring> panel_lines(int mode) {
         head = g_invade ? L"Prepare to Co-op: invading..." : L"Prepare to Co-op: joining...";
     }
     if (world::in_limbo()) head += L"  (limbo)";
+    if (spectate::holding()) head += L"  (spectating)";
     out.push_back(head);
     const auto& st = rules::state();
     if (st.active && (st.world_rules || st.infection || st.taunt)) {

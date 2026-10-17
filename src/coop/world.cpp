@@ -7,6 +7,7 @@
 #include "log.h"
 #include "rules.h"
 #include "session.h"
+#include "spectate.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -297,6 +298,7 @@ __declspec(naked) void hk_regene() {
 }
 
 // ---------------------------------------------------------------- limbo
+// The respawn warp waits instead of the death itself: only when the death event cannot be held (spectate.cpp).
 bool limbo_wanted() {
     return g_active && !g_invader && local_dead() && g_players >= 2 && !g_everyone_dead &&
            (boss_fight() || g_invader_present);
@@ -344,7 +346,7 @@ void __cdecl hk_sign_warp() {
 
 char __cdecl hk_warp_kick() {
     if (!g_bypass) keep_guest_in_world();
-    if (!g_bypass && !g_limbo && limbo_wanted()) {
+    if (!g_bypass && !g_limbo && !spectate::installed() && limbo_wanted()) {
         g_limbo = true;
         g_rest_heard = false;
         g_limbo_since = now();
@@ -771,6 +773,7 @@ void remote_rest() {
         LOG_INFO("[coop] Another player rested: the world resets");
     }
     g_rest_heard = true;
+    spectate::someone_rested();
 }
 
 bool boss_fight() { return boss_handle(0) != 0xFFFFFFFF || boss_handle(1) != 0xFFFFFFFF; }

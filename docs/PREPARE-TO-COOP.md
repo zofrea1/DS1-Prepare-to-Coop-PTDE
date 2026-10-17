@@ -86,8 +86,8 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. A disaster of the host's world (the black phantoms of black World Tendency or the Cursed Pendant) stays there. |
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency (a player can also curse their own world without a session), and lifts the curse when used again: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster. Each area with black phantoms starts its own disaster when a player enters it; the game checks every 600 s whether the world is still black and ends the disaster only if not, so in a cursed world the phantoms stay. The curse lasts through sessions but is not saved: after the game is restarted, or another character is loaded, the world is no longer cursed and disasters left from the curse end; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
-| Limbo | Dying during a boss fight or while an invader is present holds your respawn until the fight ends, everyone has fallen, or someone rests. |
-| Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. When the host dies the invader wins; when the invader dies the invasion fails. |
+| Spectating | Bosses and invaders are fought as one team. Falling during a boss fight or while an invader is in the world, with another co-op player (host or guest) still standing, you do not die yet: after your fall the camera follows a living teammate (D-pad left/right or the arrow keys switch between them). Your death ("YOU DIED", the lost souls, the respawn) goes ahead once the fight is decided: the boss is gone and no invader is left, every co-op player has fallen, someone rests at a bonfire, or after ten minutes. |
+| Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Invaders cannot enter the Undead Asylum or Firelink Shrine. The invader wins when every co-op player has fallen (the host's death alone does not end an invasion while a guest stands; with a 1.0.0 invader it still does); when the invader dies the invasion fails. |
 | Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |
 | Shared light | Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game. |
 
@@ -127,7 +127,8 @@ synchronises sits on this layer and can be ported:
 | Items from bosses and NPCs | each player gets their own (guest checks lifted), flags shared | the same |
 | World rules, tendency, teams | own hooks on the team and tendency functions | the same functions in PTDE; teams written on the characters (PTDE inlines the team lookup) |
 | World events for every player | event condition `EcTestMultiplayState`: "host" passes, "client" fails, two event lists | the same function in PTDE |
-| Players after a load or a death | (part of its session emulation) | members put back on the game's character waiting list; dead copies rebuilt |
+| Players after a load or a death | (part of its session emulation) | members put back on the game's character waiting list; dead copies rebuilt (in an invader's game too) |
+| Spectating | the death event's dispatch held while a teammate lives (`0x1404A7740`), the HUD gauges retargeted | the same dispatch (`0xD66130` from the Lua HP test `0xD53B70`); the camera retargeted instead of the HUD |
 | Six players | Remastered's six-player sessions plus patches for its character and object lists | **not possible without rebuilding PTDE's session and world limits (three remote players)** |
 
 The one hard limit found is the player count. Everything else is a matter of porting more of the mod's rules,
@@ -174,8 +175,25 @@ of the in-game step on every load, the idle timer, the empty-room timeout, the h
 block, a load with fewer than two members, event restart warps), the party reset after three of them too
 (`0xEA1CB0`); network failures, invasions and an intended leave still run. Lua `LockSession` does nothing.
 The host's death would broadcast `LuaCallStart(4000, 1)`, which sends every guest home; it is not sent (an
-invader gets the victory from the mod instead). A guest's later loads (death, following the host) are marked
+invader gets the victory from the mod instead, once every co-op player has fallen). A guest's later loads (death, following the host) are marked
 as loads into someone else's world while `MoveMapStep` (`0xEFC470`) decides which world to load.
+
+### Spectating
+
+The global event script registers `OnCharacterDead(99999, LOCAL_PLAYER, 'OnEvent_4000', everytime)`: the
+Lua HP test (`0xD53B70`) fires it every frame while the local player is dead, through one call to the event
+dispatch (`0xD66130`, stdcall kind/event/entity/extra with `esi` = the event system; kind `0xE` = dead), and
+`OnEvent_4000` ignores the repeats with flag 4000. Remastered Seamless Co-op holds the same dispatch
+(`0x1404A7740` from `0x1404CFAF0`) while a teammate lives during a boss fight (a boss gauge shown) or an
+invasion, and lets it through once nobody is left; the game's own death sequence ("YOU DIED", the bloodstain,
+the warp) then runs as usual. Prepare to Co-op does the same at `0xD53CF0` and also releases it when the fight
+is over, someone rests, the session ends or after ten minutes. Where Remastered points the HUD's HP and stamina
+gauges at the spectated player (a fake `GameDataMan` for the gauge code), PTDE's camera is retargeted: the
+in-game step (`0xEFD2F0`) hands ChrCam's update (`0xF14320`) the debug "player" (`[0x137D648]+0xEC`, read by
+the menus and the pad too, so not usable) or else the local player (`0xEFDB1F`); the teammate's character is
+handed over there instead, and the death camera's flag (`WorldChrMan+0x40`, set at `0xE8332E` when the local
+player dies) reads clear for that character only (`0xF1457A`). A boss gauge is EMEVD's (`2003[11]`): the
+Asylum Demon's goes off when the boss dies or when the local player leaves the arena, and a dead body stays.
 
 ### When a player leaves
 

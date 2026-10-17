@@ -19,6 +19,7 @@ struct State {
     bool leaving = false;     // we are leaving on purpose: the game's own leave code may run
     bool closing = false;     // host: the session is being disbanded; the guests are on their way out
     bool invader_present = false;  // an invader is in the session (vanilla multiplayer limits apply)
+    bool teammate_boss_fight = false;  // a living co-op teammate has a boss gauge up: bonfires wait (no rest)
     int own_chr_type = -1;    // guest: our chr type at home (0 human, 8 hollow)
     // The host's world rules (the host decides, guests mirror them).
     int world_rules = 0;      // Ominous Tome: 0 none, 1 allies are hostile, 2 allies fight in teams

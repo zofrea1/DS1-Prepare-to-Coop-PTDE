@@ -82,7 +82,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Fog walls | The white walls that keep phantoms in the host's area are gone (boss fog stays). |
 | World events | Every player's game runs the world's scripted events, not only the host's (`GuestWorldEvents`): a guest exploring alone meets the Hellkite on the Undead Burg bridge, starts boss fights, rides lifts and gets the event rewards. Progress (event flags) is shared. |
 | Host travel | When the host warps by bonfire, the guests follow to the same bonfire. A guest's own bonfire warp does nothing. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later ("The power of the homeward bone consumes you..."). Guests cannot use Homeward Bones. |
-| Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn). The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
+| Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn), and a teammate who fell and is spectating respawns. While a living teammate is in a boss fight nobody can rest (the bonfire is out of use, as with enemies nearby), so the boss is not reset in the middle of their fight. The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. A disaster of the host's world (the black phantoms of black World Tendency or the Cursed Pendant) stays there. |
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency (a player can also curse their own world without a session), and lifts the curse when used again: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster. Each area with black phantoms starts its own disaster when a player enters it; the game checks every 600 s whether the world is still black and ends the disaster only if not, so in a cursed world the phantoms stay. The curse lasts through sessions but is not saved: after the game is restarted, or another character is loaded, the world is no longer cursed and disasters left from the curse end; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
@@ -344,6 +344,17 @@ game runs the world's events; events 11005844, 11015846, ... 11810150 (the Asylu
 multiplayer test, and 11020301, 11200005, 11200006, 11305000, 11510230, 11600200 act as in single player. The
 event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = false` restores the game's rule.
 
+Each game bids for the enemies around it (`0xE6D250`: authority, engagement, nearness to its player) and the
+session host's game hands each enemy to the highest bid; the others follow it over the network. The events switch
+an enemy's AI on or off in each game by that game's own player (Set Character AI State, `ChrCtrl+0xC0` bit 0), so
+the copies can differ: a game whose copy has its AI off does not bid while another player is near the enemy, and
+a game whose player is more than 64 m away does not bid while another player is nearer. Without the first rule
+the Asylum Demon, its AI off in the guest's game after a retry, stood idle once the guest's game took it over.
+
+In a guest's game the host's NPCs (teams 8 and 9) die only when the host's game says so (its HP report or its list
+of the dead) while the host is in the same map, also while the host's game is loading and has not reported them
+yet: Oscar otherwise died in the guest's game during the host's load and dropped his items under the living Oscar.
+
 ### Items
 
 | What | Where |
@@ -366,7 +377,9 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 ### World rules
 
 - **Rest:** Lua `Util_RequestRegene` (`0xD5D820`, the bonfire rest event) first gives the items and withers the
-  blossoms, then tells the others, who reset their world the way a rest does (`WorldChrMan+0x2CC`).
+  blossoms, then tells the others, who reset their world the way a rest does (`WorldChrMan+0x2CC`). The bonfire's
+  "enemies about" test (`0xE3DF90` from `0xD58B49`) also answers yes while a living teammate reports a boss gauge
+  (the 1.1.0 player report), so nobody rests during someone else's boss fight.
 - **Bonfires:** `WarpNextStage_Bonfire` (`0xD62CA0`) and `Util_RequestLevelUpFirst` (`0xD5D850`) are mirrored.
 - **Teams:** who may hit whom comes from the team relation table (`0x12DF268`, 19 x 19, row attacker,
   column target) and each character's team (`chr+0x74`), mostly read inline, so the mod writes the team on the

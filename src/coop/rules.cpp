@@ -1328,11 +1328,22 @@ int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
         return hp;
     }
     if (!host_in_our_map()) return hp;
+    // No report at all: the host's game is loading (its death, a rest that released its death) and has not sent
+    // this character's HP yet. Oscar died in the guest's game that way and dropped his Estus and key on the floor
+    // under the living Oscar the host's game kept (2026-10-17, 17:04:20, during the host's load). The host's report
+    // of the death still comes through the sync above.
     const int reported = host_reported_hp(chr);
-    if (reported <= 0) return hp;
+    if (reported == 0) return hp;
     if (++g_hp_kept <= 20) {
-        LOG_INFO("[coop] The host's NPC %08X (HP %d/%d, team %u) stays alive here: the host's game reports it alive "
-                 "(HP %d; from %08X)", chr, static_cast<int>(cur), static_cast<int>(max_hp), team, reported, ret);
+        if (reported > 0) {
+            LOG_INFO("[coop] The host's NPC %08X (HP %d/%d, team %u) stays alive here: the host's game reports it "
+                     "alive (HP %d; from %08X)", chr, static_cast<int>(cur), static_cast<int>(max_hp), team, reported,
+                     ret);
+        } else {
+            LOG_INFO("[coop] The host's NPC %08X (HP %d/%d, team %u) stays alive here: the host's game has not "
+                     "reported its HP (loading?; from %08X)", chr, static_cast<int>(cur), static_cast<int>(max_hp),
+                     team, ret);
+        }
     }
     return 1;
 }
@@ -1842,10 +1853,18 @@ __declspec(naked) void hk_lock_on() {
 }
 
 // The bonfire refuses a rest while a character hostile to players is about and fighting (0xE3DF90, thiscall
-// (WorldChrMan, block), called from the bonfire object at 0xD58B49). A player made hostile by the world rules does
-// not count, so a companion does not lock the bonfire.
+// (WorldChrMan, block), called from the bonfire object at 0xD58B49: a "yes" offers the bonfire's "cannot use"
+// prompt instead of the rest, as HasPartyMembers does). A player made hostile by the world rules does not count, so
+// a companion does not lock the bonfire. A living co-op teammate in a boss fight does: a rest resets every
+// player's world, the boss's and its arena's too in the middle of that fight, while a boss fight is won or lost by
+// the team together (spectate.cpp). A teammate who fell and spectates does not count, so a rest still ends a
+// fight nobody is left to finish.
 constexpr uint32_t kBonfireFoes = 0x00E3DF90;
 constexpr uint32_t kBonfireFoesSite = 0x00D58B49;
+
+bool __cdecl teammate_boss_fight() {
+    return seamless_rules() && !g_state.invader && g_state.teammate_boss_fight;
+}
 
 __declspec(naked) void hk_bonfire_foes() {
     __asm {
@@ -1858,6 +1877,14 @@ __declspec(naked) void hk_bonfire_foes() {
         pushad
         call teams_restore
         popad
+        test al, al
+        jnz done
+        push ecx
+        push edx
+        call teammate_boss_fight
+        pop edx
+        pop ecx
+    done:
         ret 4
     }
 }
@@ -3010,12 +3037,35 @@ float dist3(const game::Vec3& a, const game::Vec3& b) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// The world's events switch an enemy's AI on and off in each game by that game's own player (Set Character AI State,
+// ChrCtrl+0xC0 bit 0), so the copies can differ: in the 2026-10-17 retry of the Asylum Demon its AI was off in the
+// guest's game for the whole fight and on in the host's. While the host stood, the host's game moved the demon; once
+// the host fell, the guest's game took it over and the demon stood idle, attacking only now and then when the host's
+// game won it back. A game whose copy has its AI off does not bid while another player is near enough to take the
+// enemy, so it stays with a game where its AI runs.
+bool ai_off_here(uint32_t chr) {
+    uint32_t ctrl = 0;
+    uint8_t ai = 1;
+    return read32(chr + 0x28, &ctrl) && ctrl && read8(ctrl + 0xC0, &ai) && !(ai & 1);
+}
+
 uint32_t __stdcall hk_net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
     const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
     if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
     game::Vec3 at{}, me{};
     if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return bid;
+    if (ai_off_here(chr)) {
+        for (const PeerSpot& p : g_peer_spots) {
+            if (dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
+            static std::set<uint32_t> logged;
+            if (logged.size() < 30 && logged.insert(chr).second) {
+                LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): its AI is off in this game; no bid from here while "
+                         "another player is near it", chr, at.x, at.y, at.z);
+            }
+            return 0;
+        }
+    }
     const float mine = dist3(me, at);
     if (mine <= kBidReach) return bid;
     for (const PeerSpot& p : g_peer_spots) {
@@ -3118,8 +3168,53 @@ void track_boss_control() {
     }
 }
 
+// Set Character AI State (0xD6C3F0: eax = entity, stdcall(state); from EMEVD 2004[01] at 0xBC299A and from Lua at
+// 0xD5FDA4) on a boss (team 7): logged with the event that ran it and whether another player's game started that
+// run (event sync), to find which run left the Asylum Demon's AI off in the guest's game (2026-10-17).
+constexpr uint32_t kSetAiState = 0x00D6C3F0;
+constexpr uint32_t kBossTeam = 7;  // chr+0x74 of a boss
+void* g_set_ai_orig = nullptr;
+
+void __stdcall note_ai_state(int entity, int state) {
+    if (!g_state.active) return;
+    static int lines = 0;
+    if (lines >= 80) return;
+    const uint32_t chr = chr_by_entity(entity);
+    uint32_t team = 0;
+    if (!chr || !read32(chr + 0x74, &team) || team != kBossTeam) return;
+    uint32_t id = 0, slot = 0, by = 0;
+    if (g_cur_event) {
+        read32(g_cur_event + 0x28, &id);
+        read32(g_cur_event + 0x2C, &slot);
+        read32(g_cur_event + 0x44, &by);
+    }
+    ++lines;
+    LOG_INFO("[coop] Boss %d: AI switched %s by %s %d (slot %d)%s; it was %s here", entity, state ? "on" : "off",
+             g_cur_event ? "event" : "Lua", static_cast<int>(id), static_cast<int16_t>(slot & 0xFFFF),
+             static_cast<int>(by) >= 10001 && static_cast<int>(by) <= 10010 ? ", a run another player's game started"
+                                                                            : "",
+             ai_off_here(chr) ? "off" : "on");
+}
+
+__declspec(naked) void hk_set_ai() {
+    __asm {
+        pushad
+        push dword ptr [esp + 36]  // state: [esp+4] before pushad
+        push eax                   // entity
+        call note_ai_state
+        popad
+        jmp dword ptr [g_set_ai_orig]
+    }
+}
+
 int install() {
     int failed = 0;
+    {
+        // push ebp ; mov ebp,esp ; and esp,-16
+        static const uint8_t k[6] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};
+        g_set_ai_orig = detour(kSetAiState, k, sizeof(k), reinterpret_cast<void*>(&hk_set_ai));
+        if (!g_set_ai_orig) LOG_ERROR("[coop] Boss AI diagnostic: Set Character AI State does not match this build");
+    }
     {
         static const uint8_t k[7] = {0x83, 0xBE, 0x90, 0x00, 0x00, 0x00, 0x00};  // cmp dword [esi+90h],0
         g_leave_orig = detour(kLeave, k, sizeof(k), reinterpret_cast<void*>(&hk_leave));

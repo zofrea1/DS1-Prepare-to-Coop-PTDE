@@ -236,6 +236,7 @@ constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returni
 constexpr const wchar_t* kMsgWorldClosed = L"Your world is closed. Guests return to their worlds";
 constexpr const wchar_t* kMsgWorldOpen = L"Your world is open";
 constexpr const wchar_t* kMsgTeamRespawn = L"Waiting for the other players...";  // a team wipe (1.1.0)
+constexpr const wchar_t* kMsgMateBossFight = L"{} is fighting a boss: no resting until the fight is decided";
 
 // ---------------------------------------------------------------- state
 enum class Role { None, Host, Guest };
@@ -1594,6 +1595,7 @@ void guest_go_home(const std::wstring& why, const char* reason) {
         g_keys_home_at = 0;
         LOG_INFO("[coop] Key items as we leave: %s (gained here: %s)", key_text(now_keys).c_str(),
                  key_text(g_keys_carried).c_str());
+        LOG_INFO("[coop] Key range as we leave: %s", items::key_layout().c_str());
     }
     if (!why.empty()) say(why);
     auto& st = rules::state();
@@ -1620,6 +1622,7 @@ void guest_arrived() {
         g_keys_seen = g_keys_arrival;
         g_keys_polled = now();
         LOG_INFO("[coop] Key items on arrival: %s", key_text(g_keys_arrival).c_str());
+        LOG_INFO("[coop] Key range on arrival: %s", items::key_layout().c_str());
     }
     if (g_invade) {
         int defeat = g_host_coop_players;
@@ -2760,6 +2763,7 @@ void tick() {
             g_own_curse = false;
             g_curse_owner = name;
             LOG_INFO("[coop] Key items of this character: %s", key_text(items::key_items()).c_str());
+            LOG_INFO("[coop] Key range of this character: %s", items::key_layout().c_str());
             if (rules::disasters_active() && rules::end_disasters(false) > 0) say(kMsgCurseFaded);
         }
     }
@@ -2820,10 +2824,14 @@ void tick() {
     text::set_seamless_active(g_role != Role::None);
     // Back home with keys gained in the host's world: three seconds in, any of them that is gone is given back.
     if (!g_keys_carried.empty() && g_role == Role::None && game::in_game() && !game::loading() && game::own_world()) {
-        if (g_keys_home_at == 0) g_keys_home_at = now();
+        if (g_keys_home_at == 0) {
+            g_keys_home_at = now();
+            LOG_INFO("[coop] Key range on the first frame home: %s", items::key_layout().c_str());
+        }
         if (now() - g_keys_home_at >= 3.0) {
             const std::vector<int32_t> k = items::key_items();
             LOG_INFO("[coop] Key items back home: %s", key_text(k).c_str());
+            LOG_INFO("[coop] Key range back home: %s", items::key_layout().c_str());
             for (int32_t id : g_keys_carried) {
                 if (holds(k, id)) continue;
                 items::give(id, 1);
@@ -2912,11 +2920,13 @@ void tick() {
             team_at = now();
             std::vector<spectate::Teammate> team;
             bool all_dead = true;
+            const PeerInfo* boss_mate = nullptr;  // a living teammate with a boss gauge up (rules: bonfires wait)
             if (g_role != Role::None && !g_invade && !game::loading()) {
                 const std::vector<party::Remote> members = party::remotes();
                 for (const auto& p : g_peers) {
                     if (!coop_member(p, members)) continue;
                     all_dead &= p.dead;
+                    if (!boss_mate && !p.dead && p.boss_fight && now() - p.last_seen <= 5.0) boss_mate = &p;
                     spectate::Teammate t;
                     t.id = p.id;
                     t.name = shown_name(p);
@@ -2927,6 +2937,16 @@ void tick() {
             }
             spectate::set_teammates(team);
             world::set_everyone_dead(!team.empty() && all_dead);
+            if (!game::loading()) {
+                auto& st = rules::state();
+                if (boss_mate && !st.teammate_boss_fight) {
+                    LOG_INFO("[coop] %s is in a boss fight: bonfires wait until it is decided", boss_mate->name.c_str());
+                    if (!world::local_dead() && !world::boss_fight()) say(fmt(kMsgMateBossFight, shown_name(*boss_mate)));
+                } else if (!boss_mate && st.teammate_boss_fight) {
+                    LOG_INFO("[coop] No teammate is in a boss fight any more: bonfires can be used");
+                }
+                st.teammate_boss_fight = boss_mate != nullptr;
+            }
         }
         if (invasion_undecided()) {
             static double last_down = 0;

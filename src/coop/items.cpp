@@ -11,6 +11,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <cstdio>
 #include <cstring>
 
 namespace coop::items {
@@ -259,6 +260,37 @@ std::vector<int32_t> key_items() {
         uint8_t used = 0;
         if (!read32(e, &cat) || !read32(e + 4, &id) || !read8(e + 0x10, &used)) break;
         if (used == 1 && cat == kGoodsCategory) out.push_back(static_cast<int32_t>(id));
+    }
+    return out;
+}
+
+// Key items gained in another world are gone after the trip home (2026-10-16/17 tests; given back since 3599bba): the
+// game holds the guest's own keys apart in the host's world ("on arrival: none") and has them again at home without
+// the new ones. The inventory switches its key array only through 0xC0A6C0 (+0x120 = +0x114, the counter at +0x134
+// = &+0x12C), so this logs the header and the own-world array to see where the keys go on the way there and back.
+std::string key_layout() {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return "no player data";
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t v[12] = {};
+    static const uint32_t kOffsets[12] = {0x110, 0x114, 0x118, 0x11C, 0x120, 0x124,
+                                          0x128, 0x12C, 0x130, 0x134, 0x138, 0x13C};
+    for (int i = 0; i < 12; ++i) read32(inv + kOffsets[i], &v[i]);
+    uint32_t in_use = 0;
+    if (v[9] >= 0x10000) read32(v[9], &in_use);
+    char out[400];
+    int used = std::snprintf(out, sizeof(out),
+                             "n %u own %08X keys %u +11C %08X array %08X normal %08X +128 %08X counters %u/%u in use "
+                             "%08X (%u) +138 %08X last %u; own array:",
+                             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], in_use, v[10], v[11]);
+    for (uint32_t i = 0; v[1] >= 0x10000 && i < v[2] && i < 8 && used > 0 && used < static_cast<int>(sizeof(out)) - 16;
+         ++i) {
+        uint32_t cat = 0, id = 0;
+        uint8_t held = 0;
+        if (!read32(v[1] + i * 0x1C, &cat) || !read32(v[1] + i * 0x1C + 4, &id) || !read8(v[1] + i * 0x1C + 0x10, &held)) {
+            break;
+        }
+        if (held) used += std::snprintf(out + used, sizeof(out) - used, " %d", static_cast<int32_t>(id));
     }
     return out;
 }

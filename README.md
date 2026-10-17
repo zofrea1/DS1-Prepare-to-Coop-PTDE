@@ -16,7 +16,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 - Dark Souls: Prepare to Die Edition, the current Steam build (the same check as the FPS Unlock's).
 - Steam running. While Prepare to Co-op is on, the game runs as Steam's Spacewar (app 480): Prepare to Die Edition's own Steam lobbies were switched off in 2022, and Spacewar is the long-standing community route for its multiplayer. Steam shows you as playing Spacewar.
-- Everyone in a session uses the same version of Prepare to Co-op and the same `Password`.
+- Everyone in a session uses the same `Password`. Prepare to Co-op 1.0.0 and 1.1.0 play together.
 - Works with DSfix (set `unlockFPS 0` in `DSfix.ini` if the FPS unlock is on).
 
 ## Install
@@ -39,13 +39,13 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 | Chaos Eye Orb | Invade a session that allows invaders, as an evil spirit. |
 | Abyssal Eye Orb | A guest returns home; the host disbands the session. |
 | Ominous Tome | Host: change the world rules (allies cannot harm each other, allies can harm each other, the host against the guests). |
-| Dried Fingers | Host: taunt invaders into your world. |
+| Dried Fingers | Host: taunt invaders into your world: an invader looking for a world is 50% more likely to pick yours. |
 | Cursed Pendant | Curse your own world (pure black World Tendency), alone or as host: black phantoms appear in every area that has them and stay until you use the pendant again. The curse lasts through sessions; it is not saved, so after restarting the game use the pendant again. |
 | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds. |
 
-The items are used like any other item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1** host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Another player's floating health bar shows their soul level and ping (`OverheadPlayerDisplay`), and joins, departures, deaths and rule changes are told at the bottom of the screen. If a player's connection drops (a crash, a lost network, a Steam Deck put to sleep), the others are told within seconds and that player is sent home.
+The items are used like any other item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1** host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Another player's floating health bar shows their character's name with their soul level and ping (`OverheadPlayerDisplay`), and joins, departures, deaths and rule changes are told at the bottom of the screen, by character name. If a player's connection drops (a crash, a lost network, a Steam Deck put to sleep), the others are told within seconds and that player is sent home.
 
-Everyone in a session needs the same version of Prepare to Co-op. When the only session found has another version, the game says so instead of "No sessions found": three times at the bottom of the screen, with the versions and who needs to update. A host is told the same when a player of another version tries to join (from 1.1.0 on; Prepare to Co-op 1.0.0 itself only says "Failed to connect").
+Prepare to Co-op 1.0.0 and 1.1.0 use the same co-op protocol, so their players join and invade each other (the features new in 1.1.0 work between 1.1.0 players). When a later version has to change the protocol, players who cannot play together are told so instead of "No sessions found": three times at the bottom of the screen, with the versions and who needs to update. A host is told the same when such a player tries to join (from 1.1.0 on; Prepare to Co-op 1.0.0 itself only says "Failed to connect").
 
 [docs/PREPARE-TO-COOP.md](docs/PREPARE-TO-COOP.md) describes what changes in a session, how it works and how it differs from the Remastered mod.
 
@@ -61,7 +61,7 @@ In the `[PrepareToCoop]` section of `PTDE-FPS-Unlock.ini` (the FPS Unlock's sett
 | `DeathDebuffs` | `false` | Each death in a session lowers maximum HP by 10% (up to five), until the next bonfire rest. |
 | `GuestWorldEvents` | `true` | Guests run the world's scripted events in their own game, as the host does (bosses, lifts, cutscenes, the Hellkite). |
 | `BonfireAnimations` | `true` | The others see you sit, rest and stand at a bonfire. |
-| `OverheadPlayerDisplay` | `4` | Another player's health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping. |
+| `OverheadPlayerDisplay` | `4` | Another player's health bar: their character's name, with 0 nothing more, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping. |
 | `EnemyHealthScaling`, `EnemyDamageScaling`, `EnemyPostureScaling` | `35`, `0`, `15` | Enemy scaling per extra player, in percent. |
 | `BossHealthScaling`, `BossDamageScaling`, `BossPostureScaling` | `100`, `0`, `20` | The same for bosses. |
 | `SaveFileExtension` | `co2` | The save file while the co-op is on (vanilla: `sl2`). |

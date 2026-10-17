@@ -35,7 +35,8 @@ struct CoopConfig {
     // Keyboard shortcuts as well as the co-op items (Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave).
     bool hotkeys = true;
     // Hidden test keys (not in the shipped INI): TestProtocol / TestVersion make this game speak another co-op
-    // protocol and report another version, to see the version mismatch notices between two copies of one build.
+    // protocol and report another version. TestProtocol shows the version mismatch notices between two copies of
+    // one build; versions alone are not compared for now (session.cpp, kRequireSameVersion).
     int test_protocol = 0;
     char test_version[16] = {};
 };

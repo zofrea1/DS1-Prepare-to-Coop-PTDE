@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <random>
 
 namespace coop::session {
 
@@ -31,19 +32,31 @@ namespace {
 
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
-// Players of the same protocol and the same Prepare to Co-op version play together (see same_version). 1.0.0 spoke 8
-// and compares only the protocol, so 1.1.0 speaks 9: a 1.0.0 host then refuses a 1.1.0 player too.
-constexpr uint32_t kProtocol = 9;
+// Players of the same protocol play together (see same_version). 1.0.0 and 1.1.0 both speak 8 and play together:
+// the messages are the same, 1.1.0's hello only adds its version at the end. Bump it when a release can no longer
+// play with the older ones; the version notices then tell the players why they cannot connect.
+constexpr uint32_t kProtocol = 8;
+// Whether players also need the same Prepare to Co-op version, not only the same protocol. Off for now, so 1.0.0
+// and 1.1.0 players meet; the version is still published and sent, for a later release to compare.
+constexpr bool kRequireSameVersion = false;
 // What this game speaks and reports: kProtocol and PREPARE_TO_COOP_VERSION, unless the hidden INI keys TestProtocol /
-// TestVersion pretend otherwise (to see the version notices between two copies of the same build).
+// TestVersion pretend otherwise (TestProtocol shows the version notices between two copies of the same build;
+// TestVersion only does with kRequireSameVersion).
 uint32_t g_protocol = kProtocol;
 std::string g_version = PREPARE_TO_COOP_VERSION;
 // Lobby data. "ptdesc_ver" with 8 is what Prepare to Co-op 1.0.0 searches for, so every host keeps publishing it:
-// a 1.0.0 player then still finds a newer host, is refused, and the host is told who tried. The protocol a host
-// really speaks is "ptdesc_proto" and its Prepare to Co-op version "ptdesc_mod" (both from 1.1.0 on; a lobby without
-// them is 1.0.0's, protocol 8). Searches do not filter by version, so a session of another version is reported
-// to the player instead of being hidden.
+// after a protocol bump a 1.0.0 player still finds a newer host, is refused, and the host is told who tried. The
+// protocol a host really speaks is "ptdesc_proto" and its Prepare to Co-op version "ptdesc_mod" (both from 1.1.0 on;
+// a lobby without them is 1.0.0's, protocol 8). Searches do not filter by version, so a session of another version is
+// reported to the player instead of being hidden.
 constexpr const char* kLegacyProtocol = "8";
+// Dried Fingers. 1.0.0 invaders go to a world with "ptdesc_taunt" = 1 before any other, so with few players one
+// such host would draw every 1.0.0 invader. Hosts from 1.1.0 on publish "ptdesc_fingers" instead, which only 1.1.0
+// invaders read, and make the world kFingersWeight times as likely to be picked as one without (pick_invade_world).
+constexpr double kFingersWeight = 1.5;
+// Steam's room in our lobby: more than the game's four players, so that lobby members who never join (players of
+// other games that use Spacewar, or knocks that fail) cannot fill it. The game's own limit is kept by host_answer.
+constexpr int kLobbyRoom = 16;
 
 enum MsgType : uint8_t {
     kHello = 1,        // guest/invader -> host: please let me in
@@ -80,7 +93,7 @@ struct Hello {
     uint32_t protocol;
     uint32_t invade;
     int32_t soul_level;
-    char name[64];
+    char name[64];     // the sender's character name (UTF-8) from 1.1.0 on; 1.0.0 sends its Steam name
     char version[16];  // the sender's Prepare to Co-op version (from 1.1.0 on; 1.0.0's hello ends before it)
 };
 struct Welcome {
@@ -119,7 +132,7 @@ struct Info {
     uint8_t invader;
     uint8_t dead;
     int32_t light;  // the player's own light (world::local_lights: 0x08 Cast Light / Sunlight Maggot, 0x10 lantern)
-    char name[64];
+    char name[64];          // as in Hello: the character name from 1.1.0 on, 1.0.0's Steam name
     wchar_t char_name[17];  // character name: matches the player to their character in our world
     int32_t ceremony;       // the bonfire animation the player is looping (the sit), 0 none
 };
@@ -135,7 +148,7 @@ struct PlayerEvent {
     Header h;
     uint64_t who;
     uint8_t invader;
-    char name[64];
+    char name[64];  // the name to show: a character name from 1.1.0 on (1.0.0 puts Steam names here)
     uint8_t lost;  // kLeft: the host dropped them after their connection went quiet
 };
 struct GaitMsg {
@@ -363,6 +376,18 @@ void say(const std::wstring& w) {
     LOG_INFO("[coop] %s", narrow);
 }
 
+std::string utf8(const std::wstring& w) {
+    char out[256];
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out, sizeof(out), nullptr, nullptr);
+    return n > 0 ? std::string(out) : std::string();
+}
+
+// The name the other players see for us: our character's name (the Steam name only while no character is loaded).
+std::wstring own_name() {
+    const std::wstring name = party::local_name();
+    return name.empty() ? text::widen(steam::persona(steam::self())) : name;
+}
+
 // ---------------------------------------------------------------- version mismatch notices
 // A message that matters (a connection refused for another Prepare to Co-op version) is shown three times, four
 // seconds apart, so it is not missed among the game's own messages. The middle showing can say who has to update.
@@ -419,8 +444,11 @@ PeerVersion lobby_version(uint64_t lobby) {
     return v;
 }
 
-// Players can play together only with the same protocol and the same Prepare to Co-op version.
-bool same_version(const PeerVersion& v) { return v.protocol == g_protocol && v.mod == g_version; }
+// Players can play together only with the same protocol (and, with kRequireSameVersion, the same Prepare to Co-op
+// version).
+bool same_version(const PeerVersion& v) {
+    return v.protocol == g_protocol && (!kRequireSameVersion || v.mod == g_version);
+}
 
 // Compares two versions part by part as numbers ("1.10.0" is newer than "1.9.0"); a missing version is the oldest.
 int compare_versions(const std::string& a, const std::string& b) {
@@ -567,6 +595,10 @@ PeerInfo* peer(uint64_t id) {
     return &g_peers.back();
 }
 
+// The name we show for another player: their character's name, or their Steam name until they have reported it.
+// PeerInfo.name stays the Steam name, for the log.
+std::wstring shown_name(const PeerInfo& p) { return p.char_name.empty() ? text::widen(p.name) : p.char_name; }
+
 bool admitted(uint64_t id) { return std::find(g_admitted.begin(), g_admitted.end(), id) != g_admitted.end(); }
 
 void set_admitted(uint64_t id, bool on) {
@@ -638,7 +670,7 @@ PlayerEvent player_event(MsgType type, uint64_t who, bool invader, const std::st
 // ---------------------------------------------------------------- host
 void host_open_lobby() {
     set_step(Step::HostLobby);
-    steam::create_lobby(g_cfg.max_players, [](bool ok, uint64_t lobby) {
+    steam::create_lobby(std::max(kLobbyRoom, g_cfg.max_players), [](bool ok, uint64_t lobby) {
         if (!ok) {
             finish(kMsgHostTimeout);
             return;
@@ -651,7 +683,8 @@ void host_open_lobby() {
         steam::set_lobby_data(lobby, "ptdesc_key", g_key.c_str());
         steam::set_lobby_data(lobby, "ptdesc_name", steam::persona(steam::self()).c_str());
         steam::set_lobby_data(lobby, "ptdesc_invade", g_cfg.allow_invaders ? "1" : "0");
-        steam::set_lobby_data(lobby, "ptdesc_taunt", "0");
+        steam::set_lobby_data(lobby, "ptdesc_taunt", "0");  // stays 0: see kFingersWeight
+        steam::set_lobby_data(lobby, "ptdesc_fingers", "0");
         steam::set_lobby_joinable(lobby, true);
         auto& st = rules::state();
         st.active = true;
@@ -703,8 +736,8 @@ void drop_quiet_players() {
         const PeerInfo p = *it;
         LOG_INFO("[coop] %s: nothing heard for %.0f s%s; dropped from the session", p.name.c_str(), quiet,
                  failed ? " and Steam reports the link lost" : "");
-        say(fmt(p.invader ? kMsgInvaderLost : kMsgLost, text::widen(p.name)));
-        PlayerEvent e = player_event(kLeft, id, p.invader, p.name);
+        say(fmt(p.invader ? kMsgInvaderLost : kMsgLost, shown_name(p)));
+        PlayerEvent e = player_event(kLeft, id, p.invader, utf8(shown_name(p)));
         e.lost = 1;
         broadcast(e, true, id);
         steam::close(id);
@@ -723,6 +756,11 @@ void host_answer(const Pending& p) {
     int players = 1;
     for (const auto& peer_info : g_peers) players += peer_info.invader || peer_info.id == p.from ? 0 : 1;
     if (!p.invade && players >= g_cfg.max_players) w.status = kFull;
+    // The game's limit for guests and invaders together (it keeps three remote players). Steam's lobby has more
+    // room (kLobbyRoom), so this is what keeps the count; it used to be the lobby's size.
+    int in_session = 1;
+    for (uint64_t id : g_admitted) in_session += id == p.from ? 0 : 1;
+    if (in_session >= g_cfg.max_players) w.status = kFull;
     if (p.invade && !g_cfg.allow_invaders) w.status = kRefused;
     // No invasions in the Undead Asylum or Firelink Shrine (as in Remastered Seamless Co-op).
     const int host_map = game::map_id();
@@ -766,8 +804,10 @@ void host_answer(const Pending& p) {
     }
     set_admitted(p.from, w.status == kOk);
     send_to(p.from, w);
-    LOG_INFO("[coop] Answered %s (%s): status %u", steam::persona(p.from).c_str(), p.invade ? "invader" : "guest",
-             w.status);
+    const PeerInfo* who = nullptr;
+    for (const auto& q : g_peers) who = q.id == p.from ? &q : who;
+    LOG_INFO("[coop] Answered %s (%s, character '%s'): status %u", steam::persona(p.from).c_str(),
+             p.invade ? "invader" : "guest", who ? utf8(who->char_name).c_str() : "", w.status);
 }
 
 // The party counts the game keeps beside the session (PartyMemberInfo +0x10/+0x14, slot +0x7C). The game
@@ -1026,12 +1066,37 @@ void guest_send_hello() {
     h.protocol = g_protocol;
     h.invade = g_invade ? 1 : 0;
     h.soul_level = game::soul_level();
-    strncpy_s(h.name, steam::persona(steam::self()).c_str(), _TRUNCATE);
+    strncpy_s(h.name, utf8(own_name()).c_str(), _TRUNCATE);
     strncpy_s(h.version, g_version.c_str(), _TRUNCATE);
     steam::accept(g_host);
     send_to(g_host, h);
     ++g_hello_tries;
     set_step(Step::Hello);
+}
+
+// An invader's pick among the worlds found: at random, a world with Dried Fingers kFingersWeight times as likely as
+// one without. A 1.0.0 host with Dried Fingers says so in "ptdesc_taunt", a newer one in "ptdesc_fingers".
+uint64_t pick_invade_world(const std::vector<uint64_t>& found) {
+    static std::mt19937_64 rng = [] {
+        LARGE_INTEGER t{};
+        QueryPerformanceCounter(&t);
+        return std::mt19937_64(static_cast<uint64_t>(t.QuadPart) ^ steam::self());
+    }();
+    std::vector<double> weight;
+    double total = 0;
+    int fingers = 0;
+    for (uint64_t l : found) {
+        const bool f = steam::lobby_data(l, "ptdesc_fingers") == "1" || steam::lobby_data(l, "ptdesc_taunt") == "1";
+        fingers += f ? 1 : 0;
+        weight.push_back(f ? kFingersWeight : 1.0);
+        total += weight.back();
+    }
+    double r = std::uniform_real_distribution<double>(0.0, total)(rng);
+    size_t i = 0;
+    while (i + 1 < found.size() && r >= weight[i]) r -= weight[i++];
+    LOG_INFO("[coop] %zu world(s) to invade, %d with Dried Fingers; picked one %s", found.size(), fingers,
+             weight[i] > 1.0 ? "with Dried Fingers" : "without");
+    return found[i];
 }
 
 void issue_search() {
@@ -1076,15 +1141,7 @@ void issue_search() {
             g_mismatch.host = lobby_version(other.front());
             found.push_back(other.front());
         }
-        uint64_t pick = g_invade ? found[GetTickCount() % found.size()] : found.front();
-        if (g_invade) {
-            for (uint64_t l : found) {
-                if (steam::lobby_data(l, "ptdesc_taunt") == "1") {  // Dried Fingers draw invaders first
-                    pick = l;
-                    break;
-                }
-            }
-        }
+        const uint64_t pick = g_invade ? pick_invade_world(found) : found.front();
         set_step(Step::LobbyJoin);
         steam::join_lobby(pick, [](bool ok, uint64_t lobby) {
             if (g_step != Step::LobbyJoin) return;
@@ -1241,7 +1298,7 @@ void guest_arrived() {
     } else {
         say(kMsgGuestMission);
     }
-    PlayerEvent e = player_event(kArrived, steam::self(), g_invade, steam::persona(steam::self()));
+    PlayerEvent e = player_event(kArrived, steam::self(), g_invade, utf8(own_name()));
     if (g_host) send_to(g_host, e);
     if (!g_invade) {
         g_world_wait = now();
@@ -1413,17 +1470,29 @@ void send_info() {
     }
     i.dead = dead ? 1 : 0;
     i.light = world::local_lights();
-    strncpy_s(i.name, steam::persona(steam::self()).c_str(), _TRUNCATE);
+    strncpy_s(i.name, utf8(own_name()).c_str(), _TRUNCATE);
     wcsncpy_s(i.char_name, party::local_name().c_str(), _TRUNCATE);
     i.ceremony = motion::local_loop_anim();
     broadcast(i, false);
 }
 
+// The player an event is about, by their character's name when we know them (a 1.0.0 player's events carry its
+// Steam name), else by the name the event carries.
 std::wstring event_name(const PlayerEvent& e) {
+    for (const auto& p : g_peers) {
+        if (p.id == e.who && !p.char_name.empty()) return p.char_name;
+    }
     char name[65];
     std::memcpy(name, e.name, 64);
     name[64] = 0;
     return text::widen(name);
+}
+
+// Host: an event passed on to the guests names its player by their character, as far as we know it.
+void name_event(PlayerEvent* e) {
+    for (const auto& p : g_peers) {
+        if (p.id == e->who && !p.char_name.empty()) strncpy_s(e->name, utf8(p.char_name).c_str(), _TRUNCATE);
+    }
 }
 
 // The character in our world that belongs to a player (0 none), from the last match (update_remote_players).
@@ -1537,7 +1606,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             unmark_lost(from);  // asking again
             PeerInfo* p = peer(from);
             m.name[sizeof(m.name) - 1] = 0;
-            p->name = m.name;
+            // From 1.1.0 on the hello names the character (PeerInfo.name keeps the Steam name); 1.0.0's names the
+            // Steam account.
+            if (size >= sizeof(m)) {
+                if (p->char_name.empty()) p->char_name = text::widen(m.name);
+            } else {
+                p->name = m.name;
+            }
             p->soul_level = m.soul_level;
             p->invader = m.invade != 0;
             p->last_seen = now();
@@ -1567,7 +1642,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!as(&m)) return;
             PeerInfo* p = peer(from);
             m.name[sizeof(m.name) - 1] = 0;
-            p->name = m.name;
+            m.char_name[16] = 0;
+            // 1.0.0 sends its Steam name here, 1.1.0 on the character name again; PeerInfo.name is the Steam name.
+            if (text::widen(m.name) != m.char_name) p->name = m.name;
             p->soul_level = m.soul_level;
             p->deaths = m.deaths;
             p->map = m.map;
@@ -1578,7 +1655,6 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!dead && (p->dead || p->alive_since == 0)) p->alive_since = now();
             p->dead = dead;
             p->light = m.light;
-            m.char_name[16] = 0;
             p->char_name = m.char_name;
             p->ceremony = motion::synced_anim(m.ceremony) ? m.ceremony : 0;
             p->last_seen = now();
@@ -1589,6 +1665,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!as(&m)) return;
             if (g_role == Role::Host) {
                 if (m.who != from) return;
+                name_event(&m);
                 broadcast(m, true, from);  // tell the other guests
                 if (!m.invader) send_world_flags(from);
             } else if (from != g_host) {
@@ -1641,6 +1718,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!as(&m)) return;
             if (g_role == Role::Host) {
                 if (m.who != from) return;
+                name_event(&m);
                 broadcast(m, true, from);
             } else if (from != g_host) {
                 return;
@@ -1720,9 +1798,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             } else if (g_role == Role::Host) {
                 steam::close(from);
                 const PeerInfo* p = peer(from);
-                PlayerEvent e = player_event(kLeft, from, p->invader, p->name);
+                PlayerEvent e = player_event(kLeft, from, p->invader, utf8(shown_name(*p)));
                 broadcast(e, true, from);
-                say(fmt(p->invader ? kMsgInvaderLeft : kMsgLeft, text::widen(p->name)));
+                say(fmt(p->invader ? kMsgInvaderLeft : kMsgLeft, shown_name(*p)));
                 g_peers.erase(std::remove_if(g_peers.begin(), g_peers.end(),
                                              [from](const PeerInfo& q) { return q.id == from; }),
                               g_peers.end());
@@ -1824,7 +1902,7 @@ void send_death() {
     if (g_invade && g_step == Step::InWorld) say(kMsgBreakInFailed);
     // The death debuff (Remastered Seamless Co-op): a Crimson Blossom per death in a session, up to five.
     if (g_cfg.death_debuffs && !g_invade && items::count(items::kBlossom) < 5) items::give(items::kBlossom, 1);
-    PlayerEvent e = player_event(kDead, steam::self(), g_invade, steam::persona(steam::self()));
+    PlayerEvent e = player_event(kDead, steam::self(), g_invade, utf8(own_name()));
     if (g_role == Role::Host) {
         broadcast(e);
     } else if (g_host) {
@@ -2239,10 +2317,10 @@ void set_callbacks() {
             const bool member = admitted(user);
             for (const auto& p : g_peers) {
                 if (p.id != user) continue;
-                say(fmt(p.invader ? kMsgInvaderLeft : kMsgLeft, text::widen(p.name)));
+                say(fmt(p.invader ? kMsgInvaderLeft : kMsgLeft, shown_name(p)));
                 if (member) {
                     // The guests see it too (an invader sent home by the game leaves without a Bye).
-                    PlayerEvent e = player_event(kLeft, user, p.invader, p.name);
+                    PlayerEvent e = player_event(kLeft, user, p.invader, utf8(shown_name(p)));
                     broadcast(e, true, user);
                 }
             }
@@ -2568,7 +2646,7 @@ void cycle_rules() {
 void taunt() {
     if (!hosting()) return;
     rules::state().taunt = true;
-    steam::set_lobby_data(g_lobby, "ptdesc_taunt", "1");
+    steam::set_lobby_data(g_lobby, "ptdesc_fingers", "1");  // not ptdesc_taunt: see kFingersWeight
     LOG_INFO("[coop] Invaders are taunted into this world");
     say(kMsgTaunt);
     g_last_state = 0;
@@ -2675,7 +2753,8 @@ bool utf8_is(const wchar_t* shown, const std::string& utf8) {
     return n > 1 && wcscmp(shown, buf) == 0;
 }
 
-// The bar's current name, or null when this string is not a companion we know.
+// The bar's current name, or null when this string is not a companion we know. The game writes the player's Steam
+// name there (its member record, member[n] in the "Character names" log line); the bar shows the character's name.
 const wchar_t* __stdcall nameplate_for(const wchar_t* shown) {
     if (g_role == Role::None) return nullptr;
     wchar_t name[24] = {};
@@ -2687,7 +2766,8 @@ const wchar_t* __stdcall nameplate_for(const wchar_t* shown) {
         const int mine = slot++;
         if (!utf8_is(name, p.name) && (p.char_name.empty() || wcscmp(name, p.char_name.c_str()) != 0)) continue;
         const int mode = g_cfg.overhead_display;
-        if (mode == 0) return nullptr;  // the game's own name
+        const std::wstring shown_as = shown_name(p).substr(0, 16);
+        const wchar_t* who = shown_as.c_str();
         int ping = p.ping_ms;
         // The host does not measure a round trip. A guest's own measurement is the host's ping.
         if (g_role == Role::Guest && p.id == g_host) ping = g_ping_ms;
@@ -2698,10 +2778,11 @@ const wchar_t* __stdcall nameplate_for(const wchar_t* shown) {
         wchar_t* out = g_nameplate[mine][side];
         constexpr size_t kCap = sizeof(g_nameplate[0][0]) / sizeof(wchar_t);
         switch (mode) {
-            case 1: swprintf_s(out, kCap, L"(%ls, %ls)", name, ms); break;
-            case 2: swprintf_s(out, kCap, L"(%ls, SL: %d)", name, p.soul_level); break;
-            case 3: swprintf_s(out, kCap, L"(%ls, deaths: %d)", name, p.deaths); break;
-            default: swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", name, p.soul_level, ms); break;
+            case 0: swprintf_s(out, kCap, L"%ls", who); break;
+            case 1: swprintf_s(out, kCap, L"(%ls, %ls)", who, ms); break;
+            case 2: swprintf_s(out, kCap, L"(%ls, SL: %d)", who, p.soul_level); break;
+            case 3: swprintf_s(out, kCap, L"(%ls, deaths: %d)", who, p.deaths); break;
+            default: swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", who, p.soul_level, ms); break;
         }
         return out;
     }
@@ -2743,7 +2824,9 @@ std::vector<std::wstring> panel_lines(int mode) {
                : g_step == Step::Closing ? L"Prepare to Co-op: closing..."
                                          : L"Prepare to Co-op: creating session...";
     } else if (g_step == Step::InWorld) {
-        head = (g_invade ? L"Invading " : L"In ") + text::widen(steam::persona(g_host)) + L"'s world";
+        std::wstring host_name = text::widen(steam::persona(g_host));
+        for (const auto& p : g_peers) host_name = p.id == g_host ? shown_name(p) : host_name;
+        head = (g_invade ? L"Invading " : L"In ") + host_name + L"'s world";
     } else if (g_step == Step::GoingHome) {
         head = L"Returning home...";
     } else {
@@ -2775,7 +2858,7 @@ std::vector<std::wstring> panel_lines(int mode) {
     out.push_back(L"You" + detail(game::soul_level(), game::death_count(), g_role == Role::Host ? 0 : g_ping_ms));
     for (const auto& p : g_peers) {
         if (now() - p.last_seen > 10.0) continue;
-        std::wstring line = text::widen(p.name);
+        std::wstring line = shown_name(p);
         if (p.invader) line += L" (invader)";
         if (p.dead) line += L" (dead)";
         line += detail(p.soul_level, p.deaths, p.id == g_host || g_role == Role::Host ? p.ping_ms : -1);

@@ -28,7 +28,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | Chaos Eye Orb | Invade a co-operative session that allows invaders, as an evil spirit. | outside a session |
    | Abyssal Eye Orb | A guest returns home; the host disbands the session. | in a session, no invader present |
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
-   | Dried Fingers | Host: taunt invaders; invaders searching for a world find yours first. | host |
+   | Dried Fingers | Host: taunt invaders; an invader searching for a world is 50% more likely to pick yours. | host |
    | Cursed Pendant | Curse your own world: it counts as pure black World Tendency until you use the pendant again. | your own world: alone or as host |
    | Crimson Blossom | Not used: with `DeathDebuffs`, one blooms with each death in a session (up to five), each lowering maximum HP by 10%. They wither at a bonfire. | never |
    | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
@@ -36,9 +36,10 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    The items are used like any other item (quick slot, the item animation); when one cannot be used it is
    refused the way the game refuses any item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1**
    host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Each press is written to the log.
-3. Another player's floating health bar shows their name with their soul level and ping, or ping, soul
-   level or deaths alone (`OverheadPlayerDisplay`). Joins, departures, deaths and changes to the world rules
-   are told at the bottom of the screen.
+3. Another player's floating health bar shows their character's name with their soul level and ping, or
+   ping, soul level or deaths alone (`OverheadPlayerDisplay`). Joins, departures, deaths and changes to the
+   world rules are told at the bottom of the screen, with character names (the game's own records of other
+   players hold their Steam names).
 
 **Your save.** With Prepare to Co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to
 `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to
@@ -147,6 +148,18 @@ the game itself uses channels 0 and 1).
    into the host's world ("other world": separate event-flag store, own world saved for the return).
 4. On arrival the game would turn the guest into a white phantom (`0xEA15B0`); the guest keeps their own
    chr type instead.
+
+Players need the same co-op protocol: 1.0.0 and 1.1.0 both speak 8. Lobbies and hellos also carry the Prepare
+to Co-op version, which a later release can compare; when the protocol changes, both sides are told who needs
+to update.
+
+The Steam lobby has room for 16 members, while the game keeps four players (the host and three others, guests
+and invaders together), which the host enforces when it answers. Players of other games that use Spacewar, or
+knocks that never get through, can sit in a lobby but cannot fill it. Steam lobbies cannot remove a member.
+
+An invader picks at random among the worlds that allow invaders. Dried Fingers make a world 1.5 times as likely
+to be picked. Hosts from 1.1.0 on publish them as `ptdesc_fingers`: 1.0.0 invaders go to a `ptdesc_taunt` world
+before any other, so with few players one host would draw all of them.
 
 ### Keeping the session
 

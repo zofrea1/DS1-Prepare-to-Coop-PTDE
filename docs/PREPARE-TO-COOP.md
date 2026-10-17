@@ -161,6 +161,11 @@ An invader picks at random among the worlds that allow invaders. Dried Fingers m
 to be picked. Hosts from 1.1.0 on publish them as `ptdesc_fingers`: 1.0.0 invaders go to a `ptdesc_taunt` world
 before any other, so with few players one host would draw all of them.
 
+When the world picked cannot take the player (full, invaders refused there, busy for too long, gone, or no answer),
+the next world the search found is tried, up to five worlds, with "Trying another world..." on screen. A host who
+has had no character for 10 s (the title screen) is hidden from searches until back in the world: Steam does not
+list a lobby that cannot be joined, for any version of the mod.
+
 ### Keeping the session
 
 `FrpgSessionManagerImp`'s leave (`0xD2B460`) is called by many rules. The mod checks who calls it: the rule

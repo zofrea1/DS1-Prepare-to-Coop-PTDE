@@ -216,6 +216,7 @@ constexpr const wchar_t* kMsgJoinTimeout = L"Failed to find session";
 constexpr const wchar_t* kMsgBreakInTimeout = L"Failed to find session to invade";
 constexpr const wchar_t* kMsgConnectTimeout = L"Failed to connect";
 constexpr const wchar_t* kMsgNoOne = L"No sessions found";
+constexpr const wchar_t* kMsgTryAnother = L"Trying another world...";
 constexpr const wchar_t* kMsgReturnHome = L"Returning to your world...";
 constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returning to your world...";
 constexpr const wchar_t* kMsgWorldClosed = L"Your world is closed. Guests return to their worlds";
@@ -266,6 +267,11 @@ double g_last_ping = 0;
 int g_hello_tries = 0;
 int g_search_waves = 0;
 int g_search_gen = 0;
+// Guest: the other worlds the search found, tried in turn when the one picked cannot take us (try_next_world).
+std::vector<uint64_t> g_worlds;
+int g_world_tries = 0;   // worlds tried for this search
+int g_join_gen = 0;      // the current lobby join (an answer for an earlier one is stale)
+bool g_last_busy = false;  // the host's last answer was "busy"
 std::vector<Pending> g_pending;
 std::vector<PeerInfo> g_peers;
 // Host: the players it let in (a Welcome with kOk). Steam passes on packets from anyone in the lobby, so the host
@@ -338,6 +344,9 @@ double g_last_gait = 0;
 double g_close_at = 0;
 bool g_close_left = false;
 bool g_close_forced = false;  // a guest was still in the game session when it was ended
+// Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
+double g_away_since = 0;
+bool g_hidden = false;
 
 double now() { return GetTickCount64() / 1000.0; }
 // After a session ends, the party is put back to solo for a while (see settle_after_session).
@@ -651,6 +660,10 @@ void finish(const std::wstring& why) {
     g_close_at = 0;
     g_close_left = false;
     g_close_forced = false;
+    g_away_since = 0;
+    g_hidden = false;
+    g_worlds.clear();
+    g_world_tries = 0;
     g_world_wait = 0;
     g_world_ours.clear();
     reset_rules();
@@ -686,6 +699,8 @@ void host_open_lobby() {
         steam::set_lobby_data(lobby, "ptdesc_taunt", "0");  // stays 0: see kFingersWeight
         steam::set_lobby_data(lobby, "ptdesc_fingers", "0");
         steam::set_lobby_joinable(lobby, true);
+        g_away_since = 0;
+        g_hidden = false;
         auto& st = rules::state();
         st.active = true;
         st.host = true;
@@ -999,12 +1014,37 @@ void host_close_tick() {
     }
 }
 
+// A host at the title screen has no world to join, yet its lobby is still found, and every joiner or invader who
+// picked it waited through "busy" answers. Once we have had no character for kAwayHide s, the lobby is hidden: Steam
+// lists no lobby that cannot be joined, for any version of the mod. It is shown again as soon as we are back in the
+// world. Loading screens are shorter than that; one that is not only hides the session for a moment.
+constexpr double kAwayHide = 10.0;
+
+void host_hide_while_away() {
+    if (game::in_game()) {
+        g_away_since = 0;
+        if (g_hidden) {
+            g_hidden = false;
+            steam::set_lobby_joinable(g_lobby, true);
+            LOG_INFO("[coop] Back in the world: our session can be found again");
+        }
+        return;
+    }
+    if (g_away_since == 0) g_away_since = now();
+    if (!g_hidden && now() - g_away_since >= kAwayHide) {
+        g_hidden = true;
+        steam::set_lobby_joinable(g_lobby, false);
+        LOG_INFO("[coop] No character for %.0f s (title screen): our session is hidden from searches", kAwayHide);
+    }
+}
+
 void host_tick() {
     if (g_step == Step::Closing) {
         host_close_tick();
         return;
     }
     if (g_step != Step::Hosting) return;
+    host_hide_while_away();
     host_ensure_game_session();
     drop_quiet_players();
     const bool ready = game::session_state() == 3;
@@ -1099,6 +1139,66 @@ uint64_t pick_invade_world(const std::vector<uint64_t>& found) {
     return found[i];
 }
 
+// The world we picked cannot take us (full, refused, busy, gone or silent): the next one the search found is
+// tried, up to kMaxWorldTries worlds. Not once the host has let us in, and not for a knock that only tells a host
+// of another version why we cannot come in.
+constexpr int kMaxWorldTries = 5;
+
+bool can_try_another() { return !g_mismatch.active && !g_worlds.empty() && g_world_tries < kMaxWorldTries; }
+
+// How often we knock on one world before trying another: a host answering "busy" (between maps) gets more tries
+// than one that does not answer at all. With no other world to try, 8 as before.
+int knock_limit(bool busy) { return !can_try_another() ? 8 : busy ? 4 : 2; }
+
+void join_world(uint64_t lobby);
+
+bool try_next_world(const char* why) {
+    if (!can_try_another()) return false;
+    LOG_INFO("[coop] %s's world: %s; trying another (%zu more found)", g_host ? steam::persona(g_host).c_str() : "?",
+             why, g_worlds.size());
+    if (g_lobby) steam::leave_lobby(g_lobby);
+    if (g_host) steam::close(g_host);
+    for (const auto& p : g_peers) steam::close(p.id);
+    g_lobby = 0;
+    g_host = 0;
+    g_host_heard = 0;
+    g_peers.clear();
+    say(kMsgTryAnother);
+    join_world(g_invade ? pick_invade_world(g_worlds) : g_worlds.front());
+    return true;
+}
+
+// Enters a world's lobby and knocks (the hello). The world leaves the list of the others to try.
+void join_world(uint64_t pick) {
+    g_worlds.erase(std::remove(g_worlds.begin(), g_worlds.end(), pick), g_worlds.end());
+    ++g_world_tries;
+    const int gen = ++g_join_gen;
+    set_step(Step::LobbyJoin);
+    steam::join_lobby(pick, [gen](bool ok, uint64_t lobby) {
+        // The answer for a lobby we gave up on: leave it if Steam let us in after all.
+        if (gen != g_join_gen || g_step != Step::LobbyJoin) {
+            if (ok && lobby && lobby != g_lobby) steam::leave_lobby(lobby);
+            return;
+        }
+        if (!ok) {
+            if (g_mismatch.active) {
+                finish(L"");
+                show_join_mismatch(g_mismatch.host);
+                return;
+            }
+            if (!try_next_world("could not enter its lobby")) finish(kMsgConnectTimeout);
+            return;
+        }
+        g_lobby = lobby;
+        g_host = steam::lobby_owner(lobby);
+        g_host_heard = now();
+        LOG_INFO("[coop] Entered %s's lobby", steam::persona(g_host).c_str());
+        g_hello_tries = 0;
+        g_last_busy = false;
+        guest_send_hello();
+    });
+}
+
 void issue_search() {
     const int gen = ++g_search_gen;
     ++g_search_waves;
@@ -1142,25 +1242,9 @@ void issue_search() {
             found.push_back(other.front());
         }
         const uint64_t pick = g_invade ? pick_invade_world(found) : found.front();
-        set_step(Step::LobbyJoin);
-        steam::join_lobby(pick, [](bool ok, uint64_t lobby) {
-            if (g_step != Step::LobbyJoin) return;
-            if (!ok) {
-                if (g_mismatch.active) {
-                    finish(L"");
-                    show_join_mismatch(g_mismatch.host);
-                    return;
-                }
-                finish(kMsgConnectTimeout);
-                return;
-            }
-            g_lobby = lobby;
-            g_host = steam::lobby_owner(lobby);
-            g_host_heard = now();
-            LOG_INFO("[coop] Entered %s's lobby", steam::persona(g_host).c_str());
-            g_hello_tries = 0;
-            guest_send_hello();
-        });
+        g_worlds = found;
+        g_world_tries = 0;
+        join_world(pick);
     });
 }
 
@@ -1197,7 +1281,8 @@ void apply_host_rules(int world_rules, bool infection, bool taunt) {
 
 void guest_on_welcome(const Welcome& w) {
     if (g_step != Step::Hello) return;
-    if (w.status == kBusy && g_hello_tries < 8) {
+    if (w.status == kBusy && g_hello_tries < knock_limit(true)) {
+        g_last_busy = true;
         set_step(Step::Hello);
         g_step_since = now() - 17.0;  // retry in 3 s
         return;
@@ -1211,6 +1296,7 @@ void guest_on_welcome(const Welcome& w) {
     }
     if (w.status != kOk) {
         LOG_INFO("[coop] The host refused us (status %u)", w.status);
+        if (try_next_world(w.status == kFull ? "full" : w.status == kRefused ? "refused" : "busy")) return;
         finish(w.status == kFull || w.status == kRefused ? kMsgNoOne : kMsgConnectTimeout);
         return;
     }
@@ -1351,16 +1437,18 @@ void guest_tick() {
             if (in_step > 20.0) finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
             break;
         case Step::LobbyJoin:
-            if (in_step > 20.0) finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
+            if (in_step > 20.0 && !try_next_world("its lobby could not be entered")) {
+                finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
+            }
             break;
         case Step::Hello:
             if (in_step > 20.0 && g_mismatch.active) {
                 finish(L"");
                 show_join_mismatch(g_mismatch.host);
             } else if (in_step > 20.0) {
-                if (g_hello_tries < 8) {
+                if (g_hello_tries < knock_limit(g_last_busy)) {
                     guest_send_hello();
-                } else {
+                } else if (!try_next_world(g_last_busy ? "busy" : "no answer")) {
                     finish(kMsgConnectTimeout);
                 }
             }
@@ -2312,6 +2400,7 @@ void set_callbacks() {
             return;
         }
         if (g_role == Role::Guest && user == g_host) {
+            if (g_step == Step::Hello && try_next_world("the host left its lobby")) return;
             guest_go_home(kMsgReturnHome, "the host left the lobby");
         } else if (g_role == Role::Host) {
             const bool member = admitted(user);

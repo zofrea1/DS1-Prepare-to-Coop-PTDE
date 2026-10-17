@@ -367,6 +367,7 @@ char __cdecl hk_warp_kick() {
     }
     // Before the original body sets the warp request. A death is aimed at the bonfire; the empty map is not loaded.
     if (!g_bypass && rules::prepare_warp_kick(local_dead())) return 1;
+    if (!g_bypass && g_active && local_dead()) session::note_respawn_went();
     return g_warp_orig();
 }
 
@@ -423,15 +424,24 @@ bool install_boss_fog() {
 // The respawn warp that waited (limbo, a team wipe) goes ahead.
 void respawn_now() {
     if (rules::prepare_warp_kick(local_dead())) return;
+    if (g_active) session::note_respawn_went();
     g_bypass = true;
     g_warp_orig();
     g_bypass = false;
 }
 
-void release_limbo(const char* why) {
+// Limbo's respawn goes ahead; after a team wipe it waits for the team's at the barrier like any other.
+void release_limbo(const char* why, bool wipe = false) {
     if (!g_limbo) return;
     g_limbo = false;
     LOG_INFO("[coop] Limbo ends (%s)", why);
+    if (wipe && !g_team_asked && local_dead()) {
+        g_team_asked = true;
+        if (session::team_respawn_wait()) {
+            g_team_hold = true;
+            return;
+        }
+    }
     respawn_now();
 }
 
@@ -790,7 +800,7 @@ void tick() {
         } else if (g_rest_heard) {
             release_limbo("someone rested");
         } else if (g_everyone_dead) {
-            release_limbo("everyone fell");
+            release_limbo("everyone fell", true);
         } else if (!boss_fight() && !g_invader_present) {
             release_limbo("the fight is over");
         } else if (!g_active) {
@@ -871,6 +881,11 @@ bool local_dead() {
 bool in_limbo() { return g_limbo; }
 
 void warp_now(int map, int point) {
+    // This warp replaces a respawn that waits for the team (the trip home): it must not go as well.
+    if (g_team_hold) LOG_INFO("[coop] Team wipe: our respawn no longer waits (another warp goes instead)");
+    g_team_hold = false;
+    g_team_asked = true;
+    g_limbo = false;
     g_bypass = true;
     game::warp(map, point);
     g_bypass = false;

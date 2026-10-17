@@ -206,13 +206,16 @@ first game to wake in its new world met the boss and the enemies from a game sti
 went on following that game for them, and the new world's boss flags went into the old one (the Asylum Demon
 already standing on the hall floor, then jumping from there and falling through it). After a wipe the respawn
 warp (`WarpNextStageKick`, `0xD62930`, which every death reaches: the bonfire case of the regen switch at
-`0xD763E0` for one's own world, `WarpSelfBloodMark` for a guest) waits as limbo did. A guest tells the host its
-warp waits (message 21, "ready", repeated every second). The host sends "go" once every fallen guest that
-announces the feature (a byte in the 1.1.0 extension of the player report) has said so, or after 15 s, and after
-any death of its own that did not wait. A guest goes on "go" (also one that came up to 10 s before its own warp),
-when a teammate is up again, or after 25 s; players from before this never wait or are waited for. A player who fell counts as
-dead in their reports until their respawned character exists, so a wipe lasts through the loads. Another player's
-character that a load threw away is asked for again only once that player reports standing in the world: asked
+`0xD763E0` for one's own world, `WarpSelfBloodMark` for a guest) waits as limbo did, and limbo's own release when
+everyone has fallen waits there too. Each player reports where its respawn is for the death it reports: not at
+the warp yet, waiting at the warp, or gone (message 21 on every change, and a byte in the 1.1.0 extension of the
+player report every second, through the load as well). A new death starts it over. The host waits for every
+fallen guest that announces the feature and is not at its warp yet, up to 15 s; a guest waits for the host's warp
+to go, up to 25 s. Every death's warp says it went, wipe or not, so a guest whose death reaches its warp after the
+host's already went follows at once, and the host does not wait for a guest that went before it (one that died
+alone). A warp that replaces the waiting one (the trip home) drops the wait. Players from before this never wait
+or are waited for. A player who fell counts as dead in their reports until their respawned character exists, so a
+wipe lasts through the loads. Another player's character that a load threw away is asked for again only once that player reports standing in the world: asked
 for during their load, it came out invisible and could be walked through. A character first seen while its player
 reports being dead or loading is rebuilt once they are back.
 

@@ -44,6 +44,7 @@ struct PeerInfo {
     int death_events = 0;    // kDead messages about them this session
     bool boss_fight = false; // a boss gauge is shown in their game (1.1.0 players report it)
     bool team_respawn = false;  // their respawn after a team wipe waits for the others' (kTeamRespawn)
+    uint32_t respawn = 0;       // where that respawn is for their current death (session.cpp, kRespawnNone ...)
 };
 
 void configure(const Config& cfg);
@@ -99,5 +100,7 @@ int guest_respawn_bonfire();
 // asked every frame: true lets it go.
 bool team_respawn_wait();
 bool team_respawn_go();
+// Our respawn warp goes now (every death, wipe or not): the others stop waiting for it.
+void note_respawn_went();
 
 }  // namespace coop::session

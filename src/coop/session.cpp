@@ -721,6 +721,9 @@ uint32_t g_respawn = kRespawnNone;   // ours, for our current death
 bool g_respawn_waiting = false;
 double g_respawn_since = 0;
 double g_respawn_told = 0;  // guest: when we last told the host our warp waits
+// Guest: when the host last said its warp went (message or player report). Kept apart from the host's phase, which
+// its first report after standing up sets back to none: both can arrive in one poll, after a stall.
+double g_host_went_at = -100;
 
 // Every other co-op player has fallen (and there is one). The dead stay dead in their reports until their
 // respawned character exists (send_info), so a wipe lasts through the loads.
@@ -806,6 +809,7 @@ void finish(const std::wstring& why) {
     g_invade_lost = false;
     g_respawn_waiting = false;
     g_respawn = kRespawnNone;
+    g_host_went_at = -100;
     g_away_since = 0;
     g_hidden = false;
     g_worlds.clear();
@@ -2019,6 +2023,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             const bool more_ok = as(&more);
             p->boss_fight = more_ok && more.boss_fight != 0;
             p->team_respawn = more_ok && more.team_respawn != 0;
+            if (more_ok && more.respawn == kRespawnWent && g_role == Role::Guest && from == g_host) g_host_went_at = now();
             if (!dead) p->respawn = kRespawnNone;
             if (more_ok) note_peer_respawn(p, more.respawn);
             p->last_seen = now();
@@ -2101,6 +2106,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             Simple m;
             if (!as(&m) || g_invade || (g_role == Role::Guest && from != g_host)) return;
             // Every death's warp says it went (note_respawn_went); only a wipe waits on it.
+            if (g_role == Role::Guest && m.value == kRespawnWent) g_host_went_at = now();
             PeerInfo* p = peer(from);
             const uint32_t was = p->respawn;
             note_peer_respawn(p, m.value);
@@ -3227,13 +3233,15 @@ bool team_respawn_go() {
             for (const PeerInfo* p : not_ready) why += " " + utf8(shown_name(*p));
         }
     } else {
-        // Only the host's warp lets ours go: a player up again stands in the new world already, and a guest that
-        // went then would leave the old one after them.
+        // Only the host's warp lets ours go (another guest up again says nothing about it): its "went", or the host
+        // standing again since our wait began, which it cannot do before its warp has gone.
         const PeerInfo* host = host_peer();
         if (!host) {
             why = "the host is gone";
-        } else if (host->respawn == kRespawnWent) {
+        } else if (host->respawn == kRespawnWent || g_host_went_at >= g_respawn_since) {
             why = "the host's game reloads";
+        } else if (!host->dead && host->alive_since >= g_respawn_since) {
+            why = "the host is up again (its warp went)";
         } else if (waited >= kGuestWait) {
             why = "no word from the host";
         } else if (now() - g_respawn_told >= 1.0) {

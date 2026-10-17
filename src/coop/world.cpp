@@ -748,12 +748,10 @@ bool install_param_guard() {
 
 // ---------------------------------------------------------------- a death that does not reach its respawn
 // A death is the global script's chain OnEvent_4000 ("YOU DIED") -> SoloPlayDeath -> SoloPlayDeath_TextWait ->
-// SoloPlayDeath_1 -> SoloPlayDeath_2, which asks for the respawn warp (WarpNextStageKick) and clears flag 4000. In the
-// 2026-10-17 test a guest who fell after the host (the host spectating) never got there: no warp for the rest of the
-// session, a teammate's rest changed nothing, and the death went ahead the moment the guest was home. The script's
-// own lines are logged now (Lua print, below), and a death that has not asked for its warp 15 s after it went ahead
-// (not counting a wait for the fight, limbo or the team) is finished with the chain's last step, as is one when
-// another player rests (a rest respawns the fallen).
+// SoloPlayDeath_1 -> SoloPlayDeath_2, which asks for the respawn warp (WarpNextStageKick) and clears flag 4000. One
+// that has not asked for its warp 15 s after it went ahead (a wait for the fight, limbo, the team or a menu does not
+// count) is finished with the chain's last step, as is one when another player rests, so nobody stays dead for the
+// rest of a session (docs: "A death that does not reach its respawn").
 constexpr double kDeathStall = 15.0;
 constexpr uint32_t kReturnStateVar = 0x013784A4;  // [[it]]: 2 = back to the title (OnEvent_4000 waits while > 0)
 

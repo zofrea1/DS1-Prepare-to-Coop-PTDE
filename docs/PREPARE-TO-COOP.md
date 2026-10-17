@@ -211,7 +211,8 @@ everyone has fallen waits there too. Each player reports where its respawn is fo
 the warp yet, waiting at the warp, or gone (message 21 on every change, and a byte in the 1.1.0 extension of the
 player report every second, through the load as well). A new death starts it over. The host waits for every
 fallen guest that announces the feature and is not at its warp yet, up to 15 s; a guest waits for the host's warp
-to go, up to 25 s. Every death's warp says it went, wipe or not, so a guest whose death reaches its warp after the
+to go, up to 25 s: the host's "went" (kept once seen, as the host's first report after standing up sets its phase
+back), or the host standing again since the wait began. Every death's warp says it went, wipe or not, so a guest whose death reaches its warp after the
 host's already went follows at once, and the host does not wait for a guest that went before it (one that died
 alone). A warp that replaces the waiting one (the trip home) drops the wait. Players from before this never wait
 or are waited for. A player who fell counts as dead in their reports until their respawned character exists, so a

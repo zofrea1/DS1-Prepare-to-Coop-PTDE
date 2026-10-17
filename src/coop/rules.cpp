@@ -1335,10 +1335,8 @@ int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
         return hp;
     }
     if (!host_in_our_map()) return hp;
-    // No report at all: the host's game is loading (its death, a rest that released its death) and has not sent
-    // this character's HP yet. Oscar died in the guest's game that way and dropped his Estus and key on the floor
-    // under the living Oscar the host's game kept (2026-10-17, 17:04:20, during the host's load). The host's report
-    // of the death still comes through the sync above.
+    // No report at all: the host's game is loading and has not sent this character's HP yet, and it still decides
+    // (its report of the death comes through the sync above).
     const int reported = host_reported_hp(chr);
     if (reported == 0) return hp;
     if (++g_hp_kept <= 20) {
@@ -2874,13 +2872,10 @@ bool each_flag_block(uint32_t store, F&& fn) {
 }
 
 // A load at home starts each map's temporary flags (xxxx5000-xxxx5999: timers, who stands where, which runs of the
-// map's events are done) over: after the host's death reload the Asylum's 11815151 was set again by its event and
-// 11815393 was no longer done. A guest's death reload stays in the host's world (the visited store at +0x90), and
-// those flags kept their old values there (2026-10-17, both games logged). With 11815393 still done, the event that
-// switches the Asylum Demon's AI on (11815392) passed the moment the map loaded, ahead of the intro event that
-// switches it off and puts the demon on its perch (11810310), so the guest's copy fought the whole retry with its AI
-// off. So at a guest's death reload the visited store's temporary blocks (group 1, sub-block 5 of every map) are
-// cleared, as the host's own reload clears them at home. The flag sharing does not see this (each game's own state).
+// map's events are done) over. A guest's death reload stays in the host's world (the visited store at +0x90) and left
+// them as they were, so the map's events started from the old fight's state (docs: "World events"). The visited
+// store's temporary blocks (group 1, sub-block 5 of every map) are cleared there, as the host's own reload clears them
+// at home. The flag sharing does not see this (each game's own state).
 int clear_visited_temporary_flags() {
     const uint32_t efm = game::event_flag_man();
     if (!efm) return 0;
@@ -3072,12 +3067,9 @@ float dist3(const game::Vec3& a, const game::Vec3& b) {
 }
 
 // The world's events switch an enemy's AI on and off in each game by that game's own player (Set Character AI State,
-// ChrCtrl+0xC0 bit 0), so the copies can differ: in the 2026-10-17 retry of the Asylum Demon its AI was off in the
-// guest's game for the whole fight and on in the host's. While the host stood, the host's game moved the demon; once
-// the host fell, the guest's game took it over and the demon stood idle, attacking only now and then when the host's
-// game won it back. A game whose copy has its AI off does not bid while another player is near enough to take the
-// enemy, so it stays with a game where its AI runs; a player who fell counts too (their game still runs the boss
-// while they spectate: the retry of 2026-10-17 17:56 idled again once the host had fallen).
+// ChrCtrl+0xC0 bit 0), so the copies can differ. A game whose copy has its AI off does not bid while another player
+// is near enough to take the enemy, so it stays with a game where its AI runs; a player who fell counts too (their
+// game still runs the enemy while they spectate).
 bool ai_off_here(uint32_t chr) {
     uint32_t ctrl = 0;
     uint8_t ai = 1;
@@ -3206,7 +3198,7 @@ void track_boss_control() {
 
 // Set Character AI State (0xD6C3F0: eax = entity, stdcall(state); from EMEVD 2004[01] at 0xBC299A and from Lua at
 // 0xD5FDA4) on a boss (team 7): logged with the event that ran it and whether another player's game started that
-// run (event sync), to find which run left the Asylum Demon's AI off in the guest's game (2026-10-17).
+// run (event sync), to see which run decides a boss's AI in each game (diagnostic).
 constexpr uint32_t kSetAiState = 0x00D6C3F0;
 constexpr uint32_t kBossTeam = 7;  // chr+0x74 of a boss
 void* g_set_ai_orig = nullptr;

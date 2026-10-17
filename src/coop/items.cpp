@@ -264,10 +264,7 @@ std::vector<int32_t> key_items() {
     return out;
 }
 
-// Key items gained in another world are gone after the trip home (2026-10-16/17 tests; given back since 3599bba): the
-// game holds the guest's own keys apart in the host's world ("on arrival: none") and has them again at home without
-// the new ones. The inventory switches its key array only through 0xC0A6C0 (+0x120 = +0x114, the counter at +0x134
-// = &+0x12C), so this logs the header and the own-world array to see where the keys go on the way there and back.
+// The inventory's key-range header and own-world array, for the log (the arrays: see keep_key_for_home).
 std::string key_layout() {
     const uint32_t pgd = game::player_game_data();
     if (!pgd) return "no player data";
@@ -313,10 +310,9 @@ bool key_array_holds(uint32_t array, uint32_t keys, int32_t goods_id) {
 
 // MoveMapStep's constructor (0xEFC470) switches the key array with the world: at home the inventory reads its own
 // array (+0x120 = +0x114, the counter at +0x134 = &+0x12C); in someone else's world 0x51C520 points it at a second
-// array (+0x11C, counter +0x130) and clears that. Keys gained in the host's world went into the second array, and the
-// trip home pointed the inventory back at the own one, which never had them (2026-10-17 log: "array 06395A98" in the
-// host's world, "array 06387A88" = own at home, own array "2010" both times). The key is added once more with the
-// own array switched in for the moment, so the game's own switch brings it home, also after a crash or a quit there.
+// array (+0x11C, counter +0x130) and clears that, so keys gained there are not in the own array when the trip home
+// switches back. The key is added once more with the own array switched in for the moment, so the game's own switch
+// brings it home, also after a crash or a quit there.
 bool keep_key_for_home(int32_t goods_id) {
     const uint32_t pgd = game::player_game_data();
     if (!pgd) return false;

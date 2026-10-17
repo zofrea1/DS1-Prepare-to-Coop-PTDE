@@ -337,6 +337,16 @@ int g_separation = 0;
 bool g_anim_log = false;  // animation sync diagnostic lines in the log (session only)
 // Which player each other character in our world belongs to (kept while both exist, see update_remote_players).
 std::map<uint32_t, uint64_t> g_chr_peer;
+// Key items a co-op guest gained in the host's world. Keys picked up there were missing from the guest's own
+// inventory later (the Asylum's F2 East Key and Big Pilgrim's Key, 2026-10-16: both used or received in the
+// host's world, absent from the save; the Estus from the same talk stayed). Where they are lost is not known yet,
+// so the key items are logged at every step, and keys gained there that are gone after the trip home are given
+// back.
+std::vector<int32_t> g_keys_arrival;  // held when we arrived in the host's world
+std::vector<int32_t> g_keys_seen;     // as last logged there
+std::vector<int32_t> g_keys_carried;  // gained there and held when we left
+double g_keys_polled = 0;
+double g_keys_home_at = 0;            // when we were first home again with keys to check (0 not yet)
 // Our gait as last sent (motion sync).
 int g_sent_gait = -1;
 double g_last_gait = 0;
@@ -1362,8 +1372,26 @@ void warp_home() {
     if (own >= 0) *ptr<int>(game::game_data_man() + 0x60) = own;
 }
 
+std::string key_text(const std::vector<int32_t>& v) {
+    std::string s;
+    for (int32_t id : v) s += (s.empty() ? "" : " ") + std::to_string(id);
+    return s.empty() ? "none" : s;
+}
+
+bool holds(const std::vector<int32_t>& v, int32_t id) { return std::find(v.begin(), v.end(), id) != v.end(); }
+
 void guest_go_home(const std::wstring& why, const char* reason) {
     LOG_INFO("[coop] Going home (%s; session state %d, step %d)", reason, game::session_state(), game::join_step());
+    if (!g_invade && g_step == Step::InWorld) {
+        const std::vector<int32_t> now_keys = items::key_items();
+        g_keys_carried.clear();
+        for (int32_t id : now_keys) {
+            if (!holds(g_keys_arrival, id)) g_keys_carried.push_back(id);
+        }
+        g_keys_home_at = 0;
+        LOG_INFO("[coop] Key items as we leave: %s (gained here: %s)", key_text(now_keys).c_str(),
+                 key_text(g_keys_carried).c_str());
+    }
     if (!why.empty()) say(why);
     auto& st = rules::state();
     st.leaving = true;
@@ -1384,6 +1412,12 @@ void guest_go_home(const std::wstring& why, const char* reason) {
 
 void guest_arrived() {
     set_step(Step::InWorld);
+    if (!g_invade) {
+        g_keys_arrival = items::key_items();
+        g_keys_seen = g_keys_arrival;
+        g_keys_polled = now();
+        LOG_INFO("[coop] Key items on arrival: %s", key_text(g_keys_arrival).c_str());
+    }
     if (g_invade) {
         int defeat = g_host_coop_players;
         say(fmt(kMsgBreakInMission, std::to_wstring(defeat)));
@@ -1480,6 +1514,15 @@ void guest_tick() {
             }
             break;
         case Step::InWorld:
+            if (!g_invade && now() - g_keys_polled >= 2.0 && !game::loading()) {
+                g_keys_polled = now();
+                const std::vector<int32_t> k = items::key_items();
+                if (k != g_keys_seen && !k.empty()) {
+                    LOG_INFO("[coop] Key items here now: %s (on arrival: %s)", key_text(k).c_str(),
+                             key_text(g_keys_arrival).c_str());
+                    g_keys_seen = k;
+                }
+            }
             if (g_host_heard > 0 && now() >= g_quiet_grace_until) {
                 const double quiet = now() - g_host_heard;
                 const auto f = g_p2p_failed.find(g_host);
@@ -2473,6 +2516,7 @@ void tick() {
             if (g_own_curse) LOG_INFO("[coop] Another character: the curse on the world is dropped");
             g_own_curse = false;
             g_curse_owner = name;
+            LOG_INFO("[coop] Key items of this character: %s", key_text(items::key_items()).c_str());
             if (rules::disasters_active() && rules::end_disasters(false) > 0) say(kMsgCurseFaded);
         }
     }
@@ -2531,6 +2575,22 @@ void tick() {
     if (g_role == Role::Host) host_tick();
     if (g_role == Role::Guest) guest_tick();
     text::set_seamless_active(g_role != Role::None);
+    // Back home with keys gained in the host's world: three seconds in, any of them that is gone is given back.
+    if (!g_keys_carried.empty() && g_role == Role::None && game::in_game() && !game::loading() && game::own_world()) {
+        if (g_keys_home_at == 0) g_keys_home_at = now();
+        if (now() - g_keys_home_at >= 3.0) {
+            const std::vector<int32_t> k = items::key_items();
+            LOG_INFO("[coop] Key items back home: %s", key_text(k).c_str());
+            for (int32_t id : g_keys_carried) {
+                if (holds(k, id)) continue;
+                items::give(id, 1);
+                LOG_INFO("[coop] Key item %d, gained in the host's world, was gone after the trip home: given back (%s)",
+                         id, items::count(id) > 0 ? "now held" : "could not be given");
+            }
+            g_keys_carried.clear();
+            g_keys_home_at = 0;
+        }
+    }
     g_invader_bars = g_role == Role::Guest && g_invade && g_step == Step::InWorld ? 1 : 0;
     text::tick();
     // Characters of the other players: rebuilt after loads and after a death (co-op only; invaders keep the

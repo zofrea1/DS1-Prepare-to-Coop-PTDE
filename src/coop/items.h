@@ -8,6 +8,7 @@
 // item: equipped to a quick slot, used with the item animation, refused (greyed out) when not usable.
 
 #include <cstdint>
+#include <vector>
 
 namespace coop::items {
 
@@ -32,6 +33,8 @@ bool install();
 
 // Inventory (the local player's).
 int count(int32_t goods_id);
+// The key items held (goods in the inventory's key range, ids in slot order).
+std::vector<int32_t> key_items();
 // Straight into the inventory, without the "items obtained" box (see kInventoryAdd).
 void give(int32_t goods_id, int n);
 void remove_all(int32_t goods_id);

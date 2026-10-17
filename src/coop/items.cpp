@@ -245,6 +245,23 @@ int count(int32_t goods_id) {
     return 0;
 }
 
+std::vector<int32_t> key_items() {
+    std::vector<int32_t> out;
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return out;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t keys = 0, a = 0;
+    if (!read32(inv + 0x118, &keys) || !read32(inv + 0x120, &a) || a < 0x10000) return out;
+    for (uint32_t i = 0; i < keys && i < 256; ++i) {
+        const uint32_t e = a + i * 0x1C;
+        uint32_t cat = 0, id = 0;
+        uint8_t used = 0;
+        if (!read32(e, &cat) || !read32(e + 4, &id) || !read8(e + 0x10, &used)) break;
+        if (used == 1 && cat == kGoodsCategory) out.push_back(static_cast<int32_t>(id));
+    }
+    return out;
+}
+
 void give(int32_t goods_id, int n) {
     if (!game::in_game() || n <= 0) return;
     const uint32_t pgd = game::player_game_data();

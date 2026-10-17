@@ -774,6 +774,8 @@ bool shared_flag(int id) {
 constexpr uint32_t kEventStep = 0x00BC3AB0;
 void* g_event_step_orig = nullptr;
 uint32_t g_cur_event = 0;
+// Map events whose run mirrored a flag into a co-op guest's own world (see after_set_flag, mirror_event_done).
+std::set<uint32_t> g_mirroring_events;
 
 __declspec(naked) void hk_event_step() {
     __asm {
@@ -845,6 +847,7 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
     call_set_flag(efm, id, value & 0xFF);
     *ptr<uint32_t>(efm + 0x10C) = active;
+    if (g_cur_event && g_mirroring_events.size() < 4096) g_mirroring_events.insert(g_cur_event);
 }
 
 __declspec(naked) void hk_set_flag() {
@@ -1179,6 +1182,11 @@ constexpr uint32_t kWorldChrManAddr = 0x0137D644;
 constexpr uint32_t kWorldResetField = 0x2CC;     // WorldChrMan: 0 idle, 1..5 a rest's world reset (0xE40D50)
 using CondTest = void(__thiscall*)(uint8_t*, int, int);
 uint32_t g_hp_rate_orig = 0;
+// The host's NPCs that the host's own report killed in our game (its HP sync, or its list of the dead; see
+// set_hp_value). Their death test passes: the host's game has seen the death, and our copy of the death event
+// may finish as the host's did (Oscar's 11810520, whose end turns him into his corpse on later loads). Cleared
+// on every load (the characters are freed).
+std::set<uint32_t> g_host_killed;
 ULONGLONG g_world_reset_at = 0;
 int g_hp_holds = 0;
 
@@ -1223,6 +1231,13 @@ void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
     const bool death_test = ratio <= 0.0f && (cmp == 0 || cmp == 5);
     const bool npc = !missing && (team == 8 || team == 9);
     const bool resetting = world_resetting();
+    if (npc && death_test && g_host_killed.count(chr)) {
+        static std::set<int> told;
+        if (told.size() < 20 && told.insert(entity).second) {
+            LOG_INFO("[coop] HP test on character %d passes: the host's game reported its death", entity);
+        }
+        return;
+    }
     const char* why = missing ? "the character is not here"
                       : npc && death_test ? "the host's game decides its NPCs' deaths"
                       : resetting ? "the world is resetting"
@@ -1303,7 +1318,11 @@ int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
         }
         return 1;
     }
-    if (ret == kRetHpSync || ret == kRetHostDeadList || !host_in_our_map()) return hp;
+    if (ret == kRetHpSync || ret == kRetHostDeadList) {
+        g_host_killed.insert(chr);  // alive until now: the host's own report kills it here
+        return hp;
+    }
+    if (!host_in_our_map()) return hp;
     const int reported = host_reported_hp(chr);
     if (reported <= 0) return hp;
     if (++g_hp_kept <= 20) {
@@ -1336,6 +1355,48 @@ __declspec(naked) void hk_kill_chr() {
     held:
         ret 4
     }
+}
+
+// ---------------------------------------------------------------- a finished event is finished at home too
+// When a map event ends (not restarts), the event's finish (FrpgEmkEventIns vt+0x14, 0x528C50) marks it done in
+// 0xBBEEB0 (ecx = the event): the flag "event id + slot" is set straight in the active store, not through the
+// flag setter, so neither the flag sharing nor the progress mirror (after_set_flag) ever sees it. Events test that
+// flag on later loads ("SKIP IF Event ID And Slot Number"): Oscar's death event 11810520 turns him into his corpse
+// with his loot once it is done. A co-op guest who saw Oscar die in the host's world brought his death state home
+// (1073, mirrored) but not the end of the event, so at home Oscar sat in his cell alive with nothing left to say
+// (2026-10-16 tests). A map event (id 10000000 and up; common events work from each player's own state) finished
+// in the host's world in a guest's game is now marked done in the guest's own world as well, when its run there
+// mirrored flags home: its work reached the guest's world, so its end does too. An event that only ended (many
+// start with "END IF this event is done" or "END IF the boss is dead", which the host's world can answer
+// differently from the guest's) changed nothing at home and stays undone there.
+constexpr uint32_t kEventDone = 0x00BBEEB0;
+void* g_event_done_orig = nullptr;
+int g_done_lines = 0;
+
+void mirror_event_done(uint32_t ev) {
+    if (!g_state.guest || g_state.invader || !seamless_rules() || !ev) return;
+    uint32_t id = 0, slot_word = 0;
+    if (!read32(ev + 0x28, &id) || !read32(ev + 0x2C, &slot_word)) return;
+    const int slot = static_cast<int16_t>(slot_word & 0xFFFF);
+    if (static_cast<int>(id) < 10000000 || slot < 0) return;
+    if (!g_mirroring_events.erase(ev)) return;
+    const uint32_t efm = game::event_flag_man();
+    uint32_t active = 0;
+    if (!efm || !read32(efm + 0x10C, &active) || active != efm + 0x90) return;
+    const int flag = static_cast<int>(id) + slot;
+    ++g_flag_quiet;
+    *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
+    call_set_flag(efm, flag, 1);
+    *ptr<uint32_t>(efm + 0x10C) = active;
+    --g_flag_quiet;
+    if (++g_done_lines <= 40) {
+        LOG_INFO("[coop] Event %d (slot %d) finished in the host's world: done in our own world too", id, slot);
+    }
+}
+
+void __fastcall hk_event_done(uint32_t ev) {
+    reinterpret_cast<void(__fastcall*)(uint32_t)>(g_event_done_orig)(ev);
+    mirror_event_done(ev);
 }
 
 // ---------------------------------------------------------------- why a throw did not happen (diagnostic)
@@ -3089,6 +3150,12 @@ int install() {
         failed += install_one("the host's NPCs live through a guest's rest (kills)", g_kill_orig != nullptr);
     }
     {
+        // mov eax,[ecx+28h] ; cmp eax,63h (the flags of the cmp reach the jl after the jump back)
+        static const uint8_t k[6] = {0x8B, 0x41, 0x28, 0x83, 0xF8, 0x63};
+        g_event_done_orig = detour(kEventDone, k, sizeof(k), reinterpret_cast<void*>(&hk_event_done));
+        failed += install_one("finished events are finished at home too", g_event_done_orig != nullptr);
+    }
+    {
         // sub esp,0Ch ; lea edx,[esp] (a diagnostic: its failure does not stop the co-op)
         static const uint8_t k[6] = {0x83, 0xEC, 0x0C, 0x8D, 0x14, 0x24};
         g_throw_try_orig = detour(kThrowTry, k, sizeof(k), reinterpret_cast<void*>(&hk_throw_try));
@@ -3329,6 +3396,8 @@ void tick() {
     g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;
     world_resetting();
     cut_wait_tick();
+    if (game::loading() && !g_host_killed.empty()) g_host_killed.clear();
+    if (game::loading() && !g_mirroring_events.empty()) g_mirroring_events.clear();
     if (!g_state.active && !g_flag_churn.empty()) {
         g_flag_churn.clear();
         g_contested.clear();

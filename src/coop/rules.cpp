@@ -1513,6 +1513,87 @@ int __cdecl hk_multiwall_num() {
     return g_multiwall_orig();
 }
 
+// The walls are map objects that stand by default (entity area * 100000 + block * 10000 + 1974..1998, their SFX at
+// id + 1). Each map's event 0 takes them down unless the game is a client ("SKIP IF Multiplayer State Client"; m10_01
+// skips 22 lines), and the host's OnSessionJustIn raises them again. A co-op guest's events see no client
+// (hk_multiplay_test) and take them down too; an invader's game keeps the vanilla answer, so for the invader alone
+// the walls stood, and the host and guests could stay behind one the invader could not pass (2026-10-16, Undead
+// Burg). In some maps that event-0 test also guards host-only flags (401, 404, 405, the Asylum's item events), so
+// the answer stays as it is: the invader's game takes down every wall standing in a loaded map itself, as
+// Lua_InvalidMultiWall does (collision off, drawing off, InvalidSfx(id + 1, true)).
+struct MapWalls {
+    int map;    // area << 24 | block << 16
+    int count;  // walls the map's event 0 takes down (the first of kWallOffsets)
+};
+constexpr MapWalls kMapWalls[] = {{0x0A000000, 2}, {0x0A010000, 11}, {0x0C000000, 5}, {0x0C010000, 5},
+                                  {0x0D000000, 1}, {0x0D010000, 1},  {0x0D020000, 1}, {0x0E000000, 3},
+                                  {0x0E010000, 7}, {0x0F000000, 1},  {0x0F010000, 1}, {0x10000000, 3},
+                                  {0x11000000, 2}, {0x12000000, 1}};
+constexpr int kWallOffsets[] = {1994, 1996, 1998, 1988, 1986, 1984, 1982, 1980, 1978, 1976, 1974};  // the Lua order
+constexpr uint32_t kObjByEntity = 0x00D6B830;   // eax = entity -> map object or 0 (ecx, edx clobbered)
+constexpr uint32_t kSetColiEnable = 0x00D60090;  // stdcall(entity, on): bit 0x04 of object+0x2E
+constexpr uint32_t kSetDrawEnable = 0x00D600B0;  // stdcall(entity, on)
+constexpr uint32_t kInvalidSfx = 0x00D5F780;     // stdcall(entity, flag)
+ULONGLONG g_walls_at = 0;
+int g_walls_lines = 0;
+
+uint32_t obj_by_entity(int entity) {
+    uint32_t obj = 0;
+    __try {
+        __asm {
+            mov eax, entity
+            mov edx, kObjByEntity
+            call edx
+            mov obj, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        obj = 0;
+    }
+    return obj;
+}
+
+bool lower_wall(int id) {
+    __try {
+        reinterpret_cast<bool(__stdcall*)(int, int)>(kSetColiEnable)(id, 0);
+        reinterpret_cast<bool(__stdcall*)(int, int)>(kSetDrawEnable)(id, 0);
+        reinterpret_cast<bool(__stdcall*)(int, int)>(kInvalidSfx)(id + 1, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+// Once a second while we invade: the standing walls of every loaded map come down.
+void invader_walls_tick() {
+    if (!g_state.active || !g_state.invader || g_state.leaving || game::loading() || !game::in_game() ||
+        game::own_world()) {
+        return;
+    }
+    const ULONGLONG t = GetTickCount64();
+    if (t - g_walls_at < 1000) return;
+    g_walls_at = t;
+    uint32_t lua = 0;
+    if (!read32(game::kLuaEventsVar, &lua) || !lua) return;  // the natives need the event system
+    int lowered = 0, first = 0;
+    for (const MapWalls& m : kMapWalls) {
+        const int area = (m.map >> 24) & 0xFF, block = (m.map >> 16) & 0xFF;
+        for (int i = 0; i < m.count; ++i) {
+            const int id = area * 100000 + block * 10000 + kWallOffsets[i];
+            const uint32_t obj = obj_by_entity(id);
+            uint8_t flags = 0;
+            if (!obj || !read8(obj + 0x2E, &flags) || !(flags & 0x04)) continue;
+            if (lower_wall(id)) {
+                if (!lowered) first = id;
+                ++lowered;
+            }
+        }
+    }
+    if (lowered && g_walls_lines < 20) {
+        ++g_walls_lines;
+        LOG_INFO("[coop] Multiplayer walls taken down for us (invader): %d (first %d)", lowered, first);
+    }
+}
+
 // ---------------------------------------------------------------- bonfire travel and lighting
 // WarpNextStage_Bonfire (0xD62CA0, stdcall(bonfire), ret 4) is the bonfire menu's warp. In a seamless session
 // only the host travels by bonfire; the guests follow to the same bonfire, and a guest's own bonfire warp does
@@ -3270,6 +3351,7 @@ void tick() {
     }
     track_bloodstain();
     track_watched_enemies();
+    invader_walls_tick();
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();
 }

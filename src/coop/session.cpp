@@ -344,6 +344,8 @@ double g_last_gait = 0;
 double g_close_at = 0;
 bool g_close_left = false;
 bool g_close_forced = false;  // a guest was still in the game session when it was ended
+// We invade and the host died: the invasion is won, and our own death a moment later (both fell) is no defeat.
+bool g_invade_won = false;
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
 bool g_hidden = false;
@@ -662,6 +664,7 @@ void finish(const std::wstring& why) {
     g_close_at = 0;
     g_close_left = false;
     g_close_forced = false;
+    g_invade_won = false;
     g_away_since = 0;
     g_hidden = false;
     g_worlds.clear();
@@ -1823,6 +1826,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             // The host fell while we invade: the game's own invader victory (HostDead) runs here.
             if (m.who == g_host && g_invade && g_step == Step::InWorld) {
                 LOG_INFO("[coop] The host died: invasion victory");
+                g_invade_won = true;
                 say(kMsgBreakInSuccess);
                 game::call_lua("HostDead");
             }
@@ -1991,7 +1995,7 @@ void send_rest() {
 
 void send_death() {
     if (g_role == Role::None || !g_lobby) return;
-    if (g_invade && g_step == Step::InWorld) say(kMsgBreakInFailed);
+    if (g_invade && g_step == Step::InWorld && !g_invade_won) say(kMsgBreakInFailed);
     // The death debuff (Remastered Seamless Co-op): a Crimson Blossom per death in a session, up to five.
     if (g_cfg.death_debuffs && !g_invade && items::count(items::kBlossom) < 5) items::give(items::kBlossom, 1);
     PlayerEvent e = player_event(kDead, steam::self(), g_invade, utf8(own_name()));

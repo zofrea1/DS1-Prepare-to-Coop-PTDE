@@ -4,7 +4,8 @@
 
 // World rules of seamless co-op that are not about the session itself: bonfire rests (the world resets for
 // every player), limbo (when spectate.cpp cannot hold a death during a boss fight or an invasion, the respawn
-// waits for the fight to end), enemy scaling per player and the optional death debuff (Crimson Blossoms). The
+// waits for the fight to end), the respawn after a team wipe (it waits until every game can reload at once:
+// session::team_respawn_wait), enemy scaling per player and the optional death debuff (Crimson Blossoms). The
 // SpEffects these use are Remastered Seamless Co-op's extra SpEffectParam rows, served by the SpEffect param getter.
 
 #include <cstdint>

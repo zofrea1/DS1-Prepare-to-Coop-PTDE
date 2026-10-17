@@ -33,6 +33,7 @@ struct PeerState {
     uint64_t id = 0;        // their Steam id
     bool invader = false;
     bool alive = false;     // reports being alive and has done so for a moment
+    bool dead = false;      // reports being dead, or loading after a death (no respawned character yet)
     int deaths = -1;        // their death count as they report it (-1 unknown)
     int death_events = -1;  // deaths they told the session about (kDead), -1 unknown
     int map = -1;           // the map they report being in (-1 unknown)

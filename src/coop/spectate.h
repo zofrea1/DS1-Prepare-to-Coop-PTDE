@@ -7,7 +7,8 @@
 // yet: the game's death event (the global Lua OnEvent_4000: "YOU DIED", the lost souls, the trip to the bonfire) is
 // held back, and the camera follows a living teammate. The death goes ahead once the fight is decided: the boss is
 // gone and no invader is left, every co-op player has fallen (a team wipe), someone rests at a bonfire, the session
-// ends, or after ten minutes. Invaders keep the game's own rules.
+// ends, or after ten minutes. After a team wipe the respawns wait for each other, so that every game reloads its
+// world at once (session::team_respawn_wait, world.cpp). Invaders keep the game's own rules.
 
 #include <cstdint>
 #include <string>

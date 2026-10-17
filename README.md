@@ -2,7 +2,7 @@
 
 # Prepare to Co-op Edition
 
-Play all of **Dark Souls: Prepare to Die Edition** together with up to three friends, from the Undead Asylum to the Kiln, without the limits of the game's own co-op. Guests keep their own body and progress, deaths respawn at a bonfire, a player who falls during a boss fight or an invasion spectates the others until the team wins or wipes, boss kills and area changes no longer end the session, multiplayer fog walls are gone, a bonfire rest resets everyone's world, progress made together carries home, and enemies scale with the number of players. Evil spirits can invade a session too.
+Play all of **Dark Souls: Prepare to Die Edition** together with up to three friends, from the Undead Asylum to the Kiln, without the limits of the game's own co-op. Guests keep their own body and progress, deaths respawn at a bonfire, a player who falls during a boss fight or an invasion spectates the others until the team wins or wipes (a wipe respawns everyone together in a world that starts over), boss kills and area changes no longer end the session, multiplayer fog walls are gone, a bonfire rest resets everyone's world, progress made together carries home, and enemies scale with the number of players. Evil spirits can invade a session too.
 
 It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of that mod is used: its behaviour was studied and written again for Prepare to Die Edition's engine, with the same items, rules and session behaviour wherever the engine allows.
 

@@ -81,6 +81,7 @@ enum MsgType : uint8_t {
     kWorldFlags = 18,  // host -> a guest who arrived: the map flags of the host's world (rules::world_flag_snapshot)
     kCutFollow = 19,   // anyone -> all (through the host): a cutscene took me into this map, follow me there
     kDropped = 20,     // host -> a player it dropped for silence who is talking again: go home
+    kTeamRespawn = 21, // a team wipe (1.1.0): guest -> host "my respawn waits", host -> guests "reload now"
 };
 
 // kBossFight (1.1.0): a co-op guest waits for the host's or a guest's boss fight to end (1.0.0 takes it as a refusal).
@@ -143,8 +144,9 @@ struct Info {
 // and an older player's shorter Info leaves these at their defaults.
 struct InfoMore {
     Info info;
-    uint8_t boss_fight;  // a boss gauge is shown in this player's game (the host keeps invaders out meanwhile)
-    uint8_t reserved[7];
+    uint8_t boss_fight;    // a boss gauge is shown in this player's game (the host keeps invaders out meanwhile)
+    uint8_t team_respawn;  // this player's respawn after a team wipe waits for the others' (kTeamRespawn)
+    uint8_t reserved[6];
 };
 struct BonfireMsg {
     Header h;
@@ -232,6 +234,7 @@ constexpr const wchar_t* kMsgReturnHome = L"Returning to your world...";
 constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returning to your world...";
 constexpr const wchar_t* kMsgWorldClosed = L"Your world is closed. Guests return to their worlds";
 constexpr const wchar_t* kMsgWorldOpen = L"Your world is open";
+constexpr const wchar_t* kMsgTeamRespawn = L"Waiting for the other players...";  // a team wipe (1.1.0)
 
 // ---------------------------------------------------------------- state
 enum class Role { None, Host, Guest };
@@ -700,6 +703,69 @@ void invasion_won() {
     game::call_lua("HostDead");  // the game's own invader victory
 }
 
+// ---------------------------------------------------------------- a team wipe reloads every game at once
+// When every co-op player has fallen, each game reloads its world as a death alone does, and the boss and the
+// enemies start over as in single player. One after another, a game already in its new world took the boss from a
+// game still in the old one: the guest's death had waited (spectate.cpp) and went ahead the moment the host fell, so
+// the guest woke at the bonfire about three seconds before the host's death got there. In those seconds the host's
+// game, still in the old world with the Asylum Demon standing on the hall floor, was the one the network followed
+// for the demon, and the guest's new world sent its boss flags into the host's old one. When the guest walked in
+// again, the demon was already on the floor, jumped down from there and fell through it in both games (2026-10-17
+// test). The guest's game also asked for the host's character while the host was loading (see party.cpp). So
+// after a team wipe the respawn warps wait for each other
+// (world.cpp holds WarpNextStageKick after "YOU DIED", as limbo does): a guest tells the host its warp waits, and the
+// host sends "go" once every guest that can say so is waiting, or after kHostWait. Every game then loads at once.
+constexpr uint32_t kRespawnReady = 1, kRespawnGo = 2;
+constexpr double kHostWait = 15.0;    // the host waits this long for the guests' deaths to reach their warp
+constexpr double kGuestWait = 25.0;   // a guest waits this long for the host's "go"
+constexpr double kReadyFresh = 3.0;  // a waiting guest says "ready" every second; older, it went without us
+constexpr double kGoFresh = 10.0;    // the host's "go": a guest whose warp starts this soon after goes at once
+bool g_respawn_waiting = false;
+double g_respawn_since = 0;
+std::map<uint64_t, double> g_respawn_ready;  // host: guests whose warp waits, and since when
+double g_respawn_go_at = -100;               // guest: when the host's "go" came
+double g_respawn_told = 0;                   // guest: when we last told the host our warp waits
+
+// Every other co-op player has fallen (and there is one). The dead stay dead in their reports until their
+// respawned character exists (send_info), so a wipe lasts through the loads.
+bool team_wiped() {
+    const std::vector<party::Remote> members = party::remotes();
+    int n = 0;
+    for (const auto& p : g_peers) {
+        if (!coop_member(p, members)) continue;
+        if (!p.dead) return false;
+        ++n;
+    }
+    return n > 0;
+}
+
+bool respawn_ready(uint64_t id) {
+    const auto it = g_respawn_ready.find(id);
+    return it != g_respawn_ready.end() && now() - it->second < kReadyFresh;
+}
+
+// Host: the fallen co-op guests that will say when their warp waits and have not yet.
+std::vector<const PeerInfo*> respawn_not_ready() {
+    std::vector<const PeerInfo*> out;
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (coop_member(p, members) && p.team_respawn && p.dead && !respawn_ready(p.id)) out.push_back(&p);
+    }
+    return out;
+}
+
+void respawn_signal(uint32_t value) {
+    Simple m{};
+    fill_header(&m, kTeamRespawn);
+    m.value = value;
+    if (value == kRespawnGo) {
+        broadcast(m);
+    } else {
+        send_to(g_host, m);
+        g_respawn_told = now();
+    }
+}
+
 // The world we stand in decides which curse the tendency tests see: ours at home, the host's in another player's
 // world. Deciding by the world and not by the role keeps the host's curse out of a joiner's own world in the
 // seconds between the host's answer and the warp, and ours out of the host's world on the way home.
@@ -740,6 +806,9 @@ void finish(const std::wstring& why) {
     g_close_forced = false;
     g_invade_won = false;
     g_invade_lost = false;
+    g_respawn_waiting = false;
+    g_respawn_ready.clear();
+    g_respawn_go_at = -100;
     g_away_since = 0;
     g_hidden = false;
     g_worlds.clear();
@@ -1750,6 +1819,7 @@ void send_info() {
     wcsncpy_s(i.char_name, party::local_name().c_str(), _TRUNCATE);
     i.ceremony = motion::local_loop_anim();
     more.boss_fight = world::boss_fight() ? 1 : 0;
+    more.team_respawn = 1;
     broadcast(more, false);
 }
 
@@ -1936,7 +2006,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             p->char_name = m.char_name;
             p->ceremony = motion::synced_anim(m.ceremony) ? m.ceremony : 0;
             InfoMore more{};
-            p->boss_fight = as(&more) && more.boss_fight != 0;
+            const bool more_ok = as(&more);
+            p->boss_fight = more_ok && more.boss_fight != 0;
+            p->team_respawn = more_ok && more.team_respawn != 0;
             p->last_seen = now();
             break;
         }
@@ -2010,6 +2082,19 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             say(fmt(m.invader ? kMsgInvaderDied : kMsgDied, event_name(m)));
             // We invade and the last co-op player fell (the host alone is not enough while a guest stands).
             if (invasion_undecided() && coop_team_down()) invasion_won();
+            break;
+        }
+        case kTeamRespawn: {
+            Simple m;
+            if (!as(&m)) return;
+            if (g_role == Role::Host && m.value == kRespawnReady) {
+                if (!respawn_ready(from)) LOG_INFO("[coop] Team wipe: %s's respawn waits", steam::persona(from).c_str());
+                g_respawn_ready[from] = now();
+            } else if (g_role == Role::Guest && from == g_host && m.value == kRespawnGo && !g_invade) {
+                // Sent after every death of the host's (team_respawn_wait); it matters only to a wipe.
+                if (g_respawn_waiting) LOG_INFO("[coop] Team wipe: the host's game reloads");
+                g_respawn_go_at = now();
+            }
             break;
         }
         case kBonfireWarp: {
@@ -2259,15 +2344,29 @@ const PeerInfo* peer_by_chr(uint32_t chr) {
     return nullptr;
 }
 
+// A session member's record holds the Steam name, cut to 16 characters (see coop_member): a member whose character
+// is missing is known only by that.
+const PeerInfo* peer_by_member_name(const std::wstring& name) {
+    if (name.empty()) return nullptr;
+    for (const auto& p : g_peers) {
+        if (now() - p.last_seen > 10.0) continue;
+        const std::wstring steam_name = text::widen(p.name);
+        if (name == steam_name || (name.size() >= 16 && steam_name.compare(0, name.size(), name) == 0)) return &p;
+    }
+    return nullptr;
+}
+
 party::PeerState peer_state(uint32_t chr, const std::wstring& name) {
     party::PeerState s;
     const PeerInfo* p = chr ? peer_by_chr(chr) : nullptr;
     if (!p) p = peer_by_char_name(name);
+    if (!p) p = peer_by_member_name(name);
     if (!p) return s;
     s.known = true;
     s.id = p->id;
     s.invader = p->invader;
     s.alive = !p->dead && p->alive_since > 0 && now() - p->alive_since >= 2.0 && now() - p->last_seen <= 5.0;
+    s.dead = p->dead;
     s.deaths = p->deaths;
     s.death_events = p->death_events;
     s.map = p->map;
@@ -3040,6 +3139,76 @@ void note_guest_rest(int object_id) {
 }
 
 int guest_respawn_bonfire() { return (g_role == Role::Guest && !g_invade) ? g_guest_bonfire : -1; }
+
+bool team_respawn_wait() {
+    if (g_role == Role::None || g_invade || !g_lobby) return false;
+    const bool wiped = team_wiped();
+    if (g_role == Role::Guest) {
+        if (!wiped || g_step != Step::InWorld) return false;
+        const PeerInfo* host = nullptr;
+        for (const auto& p : g_peers) host = p.id == g_host ? &p : host;
+        if (!host || !host->team_respawn) return false;  // a host from before 1.1.0 would never answer
+        if (now() - g_respawn_go_at < kGoFresh) {
+            LOG_INFO("[coop] Team wipe: the host's game already reloads; ours follows at once");
+            return false;
+        }
+        respawn_signal(kRespawnReady);
+        LOG_INFO("[coop] Team wipe: our respawn waits for the host's, so that every game reloads at once");
+    } else {
+        int able = 0;
+        const std::vector<party::Remote> members = party::remotes();
+        for (const auto& p : g_peers) able += coop_member(p, members) && p.team_respawn && p.dead ? 1 : 0;
+        // Players from before 1.1.0 never say their warp waits: nobody to wait for.
+        const size_t left = wiped && able ? respawn_not_ready().size() : 0;
+        if (!left) {
+            // Our world reloads now. Said after every death of ours, wipe or not: a guest whose death reaches its
+            // warp a moment later (outside a fight nothing holds ours) then follows at once instead of waiting.
+            respawn_signal(kRespawnGo);
+            g_respawn_ready.clear();
+            if (wiped && able) LOG_INFO("[coop] Team wipe: every player's respawn already waits; every game reloads now");
+            return false;
+        }
+        LOG_INFO("[coop] Team wipe: our respawn waits for %u player(s), so that every game reloads at once",
+                 static_cast<unsigned>(left));
+    }
+    g_respawn_waiting = true;
+    g_respawn_since = now();
+    say(kMsgTeamRespawn);
+    return true;
+}
+
+bool team_respawn_go() {
+    if (!g_respawn_waiting) return true;
+    const double waited = now() - g_respawn_since;
+    std::string why;
+    if (g_role == Role::None || !g_lobby) {
+        why = "the session ended";
+    } else if (g_role == Role::Host) {
+        const std::vector<const PeerInfo*> left = respawn_not_ready();
+        if (left.empty()) {
+            why = "every player's respawn waits";
+        } else if (waited >= kHostWait) {
+            why = "no word from";
+            for (const PeerInfo* p : left) why += " " + utf8(shown_name(*p));
+        }
+        if (!why.empty()) {
+            respawn_signal(kRespawnGo);
+            g_respawn_ready.clear();
+        }
+    } else if (g_respawn_go_at >= g_respawn_since) {
+        why = "the host's game reloads";
+    } else if (!team_wiped()) {
+        why = "another player is up again";
+    } else if (waited >= kGuestWait) {
+        why = "no word from the host";
+    } else if (now() - g_respawn_told >= 1.0) {
+        respawn_signal(kRespawnReady);  // again, in case it was missed
+    }
+    if (why.empty()) return false;
+    g_respawn_waiting = false;
+    LOG_INFO("[coop] Team wipe: our world reloads after %.1f s (%s)", waited, why.c_str());
+    return true;
+}
 
 // FrpgMenuDlgFloatingPCGauge::update (0xFA8C90, vtable 0x011CAFEC) reads the companion's name from the
 // menu slot and sets it on both name widgets (0xFA8BAB and 0xFA8BDF call 0x789050). That helper is also

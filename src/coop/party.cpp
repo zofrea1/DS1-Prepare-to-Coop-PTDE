@@ -175,6 +175,7 @@ std::vector<Node> slot_nodes() {
 }
 
 double g_queued_at[3] = {-100, -100, -100};
+bool g_deferred[3] = {};  // a missing character waits for its player to be back in the world (logged once)
 bool g_was_loading = true;
 double g_loaded_at = 0;
 double g_last_check = 0;
@@ -260,6 +261,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
         g_was_loading = true;
         g_removed.clear();
         for (Made& m : g_made) m = Made{};
+        for (bool& d : g_deferred) d = false;
         return;
     }
     if (g_was_loading) {
@@ -287,6 +289,17 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
         if (!r.chr || g_removed.count(r.chr) || being_removed(r.chr)) {
             if (r.chr) continue;  // the old character is on its way out
             if (waiting(member)) continue;
+            // Only once they stand in the world again. After a team wipe the guest's game asked for the host's
+            // character while the host was still loading after its own death: it came out invisible and could be
+            // walked through, and stayed so after the host was back (2026-10-17 test).
+            if (ps.known && !ps.invader && !ps.alive) {
+                if (!g_deferred[r.slot]) {
+                    g_deferred[r.slot] = true;
+                    LOG_INFO("[coop] %s's character is missing: it is created once they are back in the world", name);
+                }
+                continue;
+            }
+            g_deferred[r.slot] = false;
             if (push_waiting(member)) {
                 g_queued_at[r.slot] = now();
                 LOG_INFO("[coop] %s's character is missing: asked the game to create it again", name);
@@ -304,6 +317,9 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
             made.peer = ps.known ? ps.id : 0;
             made.deaths = ps.deaths;
             made.death_events = ps.death_events;
+            // Made while its player was dead or loading, it shows them as they were then: rebuilt once they are
+            // back, as after a death.
+            made.seen_dead = ps.known && ps.dead;
         }
         if (hp(r.chr) <= 0) made.seen_dead = true;
         // A death shows as 0 HP here, a higher death count, or the player's own death message (the copy's HP is

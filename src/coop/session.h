@@ -43,6 +43,7 @@ struct PeerInfo {
     double anim_at = 0;      // when one of their event animations last arrived
     int death_events = 0;    // kDead messages about them this session
     bool boss_fight = false; // a boss gauge is shown in their game (1.1.0 players report it)
+    bool team_respawn = false;  // their respawn after a team wipe waits for the others' (kTeamRespawn)
 };
 
 void configure(const Config& cfg);
@@ -92,5 +93,11 @@ void note_guest_rest(int object_id);
 // The same, with an id that is already a respawn bonfire (the host's, on join or when following a Homeward Bone).
 void note_guest_respawn(int bonfire);
 int guest_respawn_bonfire();
+
+// A team wipe (every co-op player has fallen): the respawn warps wait for each other, so that every game reloads
+// its world at once. Asked when our respawn warp starts while we are dead: true holds the warp (world.cpp). Then
+// asked every frame: true lets it go.
+bool team_respawn_wait();
+bool team_respawn_go();
 
 }  // namespace coop::session

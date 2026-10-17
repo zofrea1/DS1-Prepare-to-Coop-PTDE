@@ -69,6 +69,8 @@ using CharFn = char(__cdecl*)();
 CharFn g_warp_orig = nullptr;
 bool g_bypass = false;
 bool g_limbo = false;
+bool g_team_hold = false;   // a team wipe: our respawn waits for the other players' (session::team_respawn_wait)
+bool g_team_asked = false;  // asked once per death: a second warp of the same death does not wait again
 bool g_rest_heard = false;
 double g_limbo_since = 0;
 std::map<uint32_t, int> g_scaled;  // EnemyIns -> applied effect id
@@ -354,6 +356,15 @@ char __cdecl hk_warp_kick() {
         LOG_INFO("[coop] Limbo: the respawn waits until the fight ends, everyone falls or someone rests");
         return 1;
     }
+    // Every co-op player has fallen: the respawn waits until every game can reload at once (released in tick).
+    if (!g_bypass && g_team_hold) return 1;
+    if (!g_bypass && !g_limbo && !g_team_asked && g_active && !g_invader && local_dead()) {
+        g_team_asked = true;
+        if (session::team_respawn_wait()) {
+            g_team_hold = true;
+            return 1;
+        }
+    }
     // Before the original body sets the warp request. A death is aimed at the bonfire; the empty map is not loaded.
     if (!g_bypass && rules::prepare_warp_kick(local_dead())) return 1;
     return g_warp_orig();
@@ -409,14 +420,19 @@ bool install_boss_fog() {
     return patch(kBossFogTest, k, code, sizeof(code));
 }
 
-void release_limbo(const char* why) {
-    if (!g_limbo) return;
-    g_limbo = false;
-    LOG_INFO("[coop] Limbo ends (%s)", why);
+// The respawn warp that waited (limbo, a team wipe) goes ahead.
+void respawn_now() {
     if (rules::prepare_warp_kick(local_dead())) return;
     g_bypass = true;
     g_warp_orig();
     g_bypass = false;
+}
+
+void release_limbo(const char* why) {
+    if (!g_limbo) return;
+    g_limbo = false;
+    LOG_INFO("[coop] Limbo ends (%s)", why);
+    respawn_now();
 }
 
 // Boss gauges on screen (limbo waits for a boss fight to end).
@@ -781,6 +797,15 @@ void tick() {
             release_limbo("the session ended");
         } else if (now() - g_limbo_since > 600.0) {
             release_limbo("time limit");
+        }
+    }
+    if (!local_dead()) g_team_asked = false;  // alive again, or loading (no character)
+    if (g_team_hold) {
+        if (!local_dead()) {
+            g_team_hold = false;  // a load took over (the trip home) or we live again
+        } else if (session::team_respawn_go()) {
+            g_team_hold = false;
+            respawn_now();
         }
     }
     if (!game::loading()) scale_tick();

@@ -672,12 +672,16 @@ bool coop_member(const PeerInfo& p, const std::vector<party::Remote>& members) {
 bool coop_team_down() {
     const std::vector<party::Remote> members = party::remotes();
     bool host_down = false;
+    int down = 0;
     for (const auto& p : g_peers) {
         if (!coop_member(p, members)) continue;
         if (!p.dead) return false;
+        ++down;
         if (p.id == g_host) host_down = true;
     }
-    return host_down;
+    // As many fallen as the host counts co-op players (its state: the host and its co-op guests): a guest this game
+    // has not matched to anyone yet (just after we arrived) counts as standing, not as gone.
+    return host_down && down >= g_host_coop_players;
 }
 
 void invasion_won() {
@@ -881,8 +885,11 @@ void host_answer(const Pending& p) {
         LOG_INFO("[coop] %s knocked during a boss fight: %s", p.invade ? "An invader" : "A guest",
                  p.invade ? "refused" : "told to come back after it");
     }
-    // Between maps or at the title screen there is no world to arrive in yet: the joiner asks again.
-    if (w.status == kOk && (!game::in_game() || game::loading() || !game::own_world())) w.status = kBusy;
+    // Between maps or at the title screen there is no world to arrive in yet, and none while our death waits
+    // (spectating): the joiner asks again.
+    if (w.status == kOk && (!game::in_game() || game::loading() || !game::own_world() || world::local_dead())) {
+        w.status = kBusy;
+    }
     std::vector<uint8_t> inv;
     if (w.status == kOk) {
         // join type: -1 white (co-op, own body kept by the guest's rules), -2 black (invader)
@@ -2776,25 +2783,30 @@ void tick() {
         const auto& st = rules::state();
         world::set_session(st.active, st.invader, st.invader_present);
         int coop = 1;
-        bool all_dead = true;
-        int others = 0;
         if (g_role == Role::Host || (g_role == Role::Guest && g_step == Step::InWorld)) coop = g_host_coop_players;
-        std::vector<spectate::Teammate> team;
-        if (g_role != Role::None && !g_invade && !game::loading()) {
-            const std::vector<party::Remote> members = party::remotes();
-            for (const auto& p : g_peers) {
-                if (!coop_member(p, members)) continue;
-                ++others;
-                all_dead &= p.dead;
-                spectate::Teammate t;
-                t.id = p.id;
-                t.name = shown_name(p);
-                t.chr = chr_of_peer(p.id);
-                t.alive = !p.dead;
-                team.push_back(t);
+        world::set_players(coop);
+        // The other co-op players, five times a second (the list asks the game for each member's character).
+        static double team_at = 0;
+        if (now() - team_at >= 0.2) {
+            team_at = now();
+            std::vector<spectate::Teammate> team;
+            bool all_dead = true;
+            if (g_role != Role::None && !g_invade && !game::loading()) {
+                const std::vector<party::Remote> members = party::remotes();
+                for (const auto& p : g_peers) {
+                    if (!coop_member(p, members)) continue;
+                    all_dead &= p.dead;
+                    spectate::Teammate t;
+                    t.id = p.id;
+                    t.name = shown_name(p);
+                    t.chr = chr_of_peer(p.id);
+                    t.alive = !p.dead;
+                    team.push_back(t);
+                }
             }
+            spectate::set_teammates(team);
+            world::set_everyone_dead(!team.empty() && all_dead);
         }
-        spectate::set_teammates(team);
         if (g_invade && g_step == Step::InWorld && !g_invade_won) {
             static double last_down = 0;
             if (now() - last_down > 0.5) {
@@ -2802,8 +2814,6 @@ void tick() {
                 if (coop_team_down()) invasion_won();  // also a last guest who left instead of falling
             }
         }
-        world::set_players(coop);
-        world::set_everyone_dead(others > 0 && all_dead);
         static double last_light = 0;
         if (g_role != Role::None && now() - last_light > 0.5 && !game::loading()) {
             last_light = now();

@@ -263,12 +263,20 @@ int switch_input() {
         was_left = was_right = false;
         return 0;
     }
+    // An empty controller slot is slow to ask (XInput looks for the device each time): the slots in use are read
+    // every 30 ms, the others every 2 s.
+    static bool connected[4] = {};
+    static double scanned = -100;
     if (now() - polled >= 0.03) {
         polled = now();
+        const bool scan = now() - scanned >= 2.0;
+        if (scan) scanned = now();
         buttons = 0;
         for (DWORD i = 0; i < 4; ++i) {
+            if (!connected[i] && !scan) continue;
             uint8_t st[16] = {};
-            if (xinput_get_state(i, st) == 0) {
+            connected[i] = xinput_get_state(i, st) == 0;
+            if (connected[i]) {
                 uint16_t b = 0;
                 std::memcpy(&b, st + 4, 2);
                 buttons |= b;

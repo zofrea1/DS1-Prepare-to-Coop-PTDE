@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <map>
@@ -2029,7 +2030,26 @@ void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t ty
     const int map = event_map(id);
     if (map == -1) return;
     const int theirs = remote_player_map(by);
-    if (theirs == -1 || (static_cast<uint32_t>(theirs) & 0xFFFF0000) == static_cast<uint32_t>(map)) return;
+    if (theirs == -1) {
+        // remote_player_map compares PlayerIns+0x410 with the run's slot, but +0x410 holds a player id in
+        // 10000000..10000039 (PlayerIns vt+0xA8, 0xE46E80), so it never matches and every run is taken (2026-10-17
+        // review). Logged a few times to learn how the run's player (10001 + slot) maps to those ids.
+        static int told = 0;
+        if (told < 5) {
+            ++told;
+            char ids[160] = "";
+            size_t used = 0;
+            for (const RemotePlayer& r : g_remote) {
+                uint32_t pid = 0;
+                if (!r.known || !r.chr || !read32(r.chr + 0x410, &pid) || used + 32 >= sizeof(ids)) continue;
+                used += std::snprintf(ids + used, sizeof(ids) - used, "%s%u (map %08X)", used ? ", " : "", pid, r.map);
+            }
+            LOG_INFO("[coop] Event %d: a run from player %d taken (map not known); remote player ids: %s", id, by,
+                     used ? ids : "none");
+        }
+        return;
+    }
+    if ((static_cast<uint32_t>(theirs) & 0xFFFF0000) == static_cast<uint32_t>(map)) return;
     *ptr<uint16_t>(pc) = at;
     *ptr<uint32_t>(e + 0x44) = who;
     *ptr<uint32_t>(e + 0x38) = seq;

@@ -321,11 +321,12 @@ void view_tick() {
     // A first target, or the last one fell or left: the nearest one standing.
     game::Vec3 me{};
     const bool have_me = game::position(&me, nullptr);
-    const Teammate* best = can.front();
+    const Teammate* best = can.front();  // when no distance can be read
     float best_d = 3.4e38f;
     for (const Teammate* t : can) {
         game::Vec3 p{};
-        if (!have_me || !game::chr_position(t->chr, &p)) break;
+        if (!have_me) break;
+        if (!game::chr_position(t->chr, &p)) continue;  // one unreadable character does not end the search
         const float d = (p.x - me.x) * (p.x - me.x) + (p.y - me.y) * (p.y - me.y) + (p.z - me.z) * (p.z - me.z);
         if (d < best_d) {
             best_d = d;

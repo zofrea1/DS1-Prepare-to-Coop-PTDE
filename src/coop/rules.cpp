@@ -680,7 +680,7 @@ void __cdecl hk_lock_session() {
 // ---------------------------------------------------------------- progress carries home
 // The event flag setter (0xD38CB0: eax = EventFlagMan, cl, push value, push id; ret 8). While a co-op guest is
 // in the host's world (active store = the other-world store at +0x90), every flag it sets is written to the
-// guest's own world store (+0x14) too, except the maps' disaster flags (see kDisasterFlags).
+// guest's own world store (+0x14) too, except the flags of the host's world's disasters (see kDisasterFlags).
 constexpr uint32_t kSetFlag = 0x00D38CB0;
 void* g_set_flag_orig = nullptr;
 
@@ -695,7 +695,7 @@ void call_set_flag(uint32_t efm, int id, uint32_t value) {
     }
 }
 
-bool disaster_flag(int id);  // a map's disaster flag (see kDisasterFlags)
+bool host_disaster_flag(int id);  // a flag of the host's world's disaster (see kDisasterFlags)
 
 // Shared progress: flags changed in the host's world travel to the other players (guest -> host -> guests).
 void (*g_flag_listener)(int, bool) = nullptr;
@@ -724,6 +724,9 @@ int g_old_value = -1;
 //     and forth dozens of times a second from the moment the guest arrived (2026-10-12 test)
 //   600-603 a counter each game raises itself from the boss flags; 721, 723-728, 730-735 worked out from
 //     other flags in each game
+//   5000, 5001 the notices of a disaster starting and ending: each game's own disaster events set them and its
+//     own notice clears them (see kDisasterEndFlags). Shared, a guest's 5001 arrived after the host's game had
+//     shown and cleared its own and showed the host the notice again.
 //   6000-8999: the visited world's store has no block of its own for these; the engine points it at the
 //     player's own world (0xD384E7), so another player's value would be written into this player's save.
 bool personal_flag(int id) {
@@ -737,7 +740,8 @@ bool personal_flag(int id) {
     }
     return (id >= 280 && id <= 290) || (id >= 600 && id <= 603) || (id >= 711 && id <= 714) ||
            (id >= 720 && id <= 735) || (id >= 750 && id <= 755) || (id >= 757 && id <= 765) ||
-           (id >= 780 && id <= 793) || (id >= 840 && id <= 859) || (id >= 6000 && id <= 8999);
+           (id >= 780 && id <= 793) || (id >= 840 && id <= 859) || id == 5000 || id == 5001 ||
+           (id >= 6000 && id <= 8999);
 }
 
 // Item flags (5xxxxxxx: item lots and treasure taken) and conversation flags (7xxxxxxx) belong to each player:
@@ -842,7 +846,7 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
         note_flag_change(id);
         if (!g_contested.count(id)) g_flag_listener(id, on);
     }
-    if (!g_state.guest || disaster_flag(id)) return;
+    if (!g_state.guest || host_disaster_flag(id)) return;
     uint32_t active = 0;
     if (!read32(efm + 0x10C, &active) || active != efm + 0x90) return;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
@@ -1925,6 +1929,21 @@ constexpr int kDisasterEnd = 735;
 constexpr int kDisasterEndMaps[] = {0x0A000000, 0x0A010000, 0x0B000000, 0x0C000000, 0x0C010000,
                                     0x0D000000, 0x0D010000, 0x0E000000, 0x0E010000, 0x0F000000,
                                     0x0F010000, 0x10000000, 0x11000000, 0x12000000};
+
+// The rest of a disaster stays in the host's world as well: each map's "ended" flag (1xx15075 above; the id
+// differs per map), 735, and 5000 / 5001, which the events set when a disaster starts and ends. The game shows
+// "Disasters are gone after the defeat of the Gravelord Servant" whenever 5001 is on (0xD78E85), then clears
+// 4300, 5000 and 5001 straight in the active store (0xD60190, not through the flag setter). Copied into a guest's
+// own world, 5001 was never cleared there and showed that notice at home; lifting a host's curse (735 -> the end
+// event -> 5001) did it every time. A 735 copied home and not cleared by the end event here (it had already run on
+// this load) ended the guest's own next disaster at once.
+constexpr int kDisasterEndFlags[] = {11005085, 11015075, 11105075, 11205085, 11215095, 11305069, 11315045,
+                                     11405095, 11415095, 11505095, 11515045, 11605095, 11705085, 11805095};
+
+bool host_disaster_flag(int id) {
+    return disaster_flag(id) || id == kDisasterEnd || id == 5000 || id == 5001 ||
+           std::find(std::begin(kDisasterEndFlags), std::end(kDisasterEndFlags), id) != std::end(kDisasterEndFlags);
+}
 
 // ---------------------------------------------------------------- world events run in every player's game
 // Map events (EMEVD) test the session with EcTestMultiplayState::Test (0xBB3130, thiscall(cond, dt, event),

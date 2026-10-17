@@ -245,6 +245,7 @@ int count(int32_t goods_id) {
     return 0;
 }
 
+// +0x10 is the slot's "in use" byte (see mark_key_item_removable): every key held in the co-op save has it.
 std::vector<int32_t> key_items() {
     std::vector<int32_t> out;
     const uint32_t pgd = game::player_game_data();
@@ -326,9 +327,11 @@ void tick() {
     text::show(L"Prepare to Co-op items added to your inventory");
 }
 
-// A key item (goodsType 1, the Crimson Blossom) sits in the key range and its slot byte at +0x10 is 0.
-// The game's erase (0xC09770) refuses that byte, so a rest never withered the stack. Marking the slot
-// lets the same erase clear it, including the key-item counter at inventory+0x12C.
+// A key item (goodsType 1, the Crimson Blossom) sits in the key range. The slot byte at +0x10 is "in use":
+// the insert (0xC09860, also behind kInventoryAdd) sets it on every slot it fills, key items included, and
+// the erase (0xC09770) refuses a slot without it (0xC08F80). Early tests read the Blossom's as 0 when a rest
+// failed to wither the stack; the marking stays so the erase can clear such a slot, including the key-item
+// counter at inventory+0x12C, and blank_matching_slots clears whatever copy remains.
 void mark_key_item_removable(int32_t goods_id) {
     const uint32_t pgd = game::player_game_data();
     if (!pgd) return;

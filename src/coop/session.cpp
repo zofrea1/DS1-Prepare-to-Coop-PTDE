@@ -365,8 +365,10 @@ double g_last_gait = 0;
 double g_close_at = 0;
 bool g_close_left = false;
 bool g_close_forced = false;  // a guest was still in the game session when it was ended
-// We invade and the host died: the invasion is won, and our own death a moment later (both fell) is no defeat.
+// We invade and the co-op team fell: the invasion is won, and our own death a moment later (both fell) is no
+// defeat. Or we fell first (g_invade_lost): a wipe reported a moment later is no victory.
 bool g_invade_won = false;
+bool g_invade_lost = false;
 bool g_invade_open = false;  // host: our lobby tells invaders' searches we take invaders (ptdesc_invade)
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
@@ -684,7 +686,14 @@ bool coop_team_down() {
     return host_down && down >= g_host_coop_players;
 }
 
+// An invasion has one outcome, whichever comes first: the co-op team's wipe (invasion_won) or our own death
+// (send_death). Our death is noticed in world::tick, after the messages, so the last co-op player's kDead or the
+// half-second check could come first in a mutual kill and announce victory after the failure.
+bool invasion_undecided() { return g_invade && g_step == Step::InWorld && !g_invade_won && !g_invade_lost; }
+
 void invasion_won() {
+    // Fallen already, with the report of it still to come this frame (send_death): that is the outcome.
+    if (world::local_dead()) return;
     LOG_INFO("[coop] Every co-op player of this world has fallen: invasion victory");
     g_invade_won = true;
     say(kMsgBreakInSuccess);
@@ -730,6 +739,7 @@ void finish(const std::wstring& why) {
     g_close_left = false;
     g_close_forced = false;
     g_invade_won = false;
+    g_invade_lost = false;
     g_away_since = 0;
     g_hidden = false;
     g_worlds.clear();
@@ -799,10 +809,14 @@ void host_ensure_game_session() {
     LOG_INFO("[coop] Game session %s (map %08X)", ok ? "starting" : "could not start", game::map_id());
 }
 
+// Host: the co-op guests in our world, the ones host_answer admitted. A joiner's hello puts them in g_peers before
+// the answer, and one told kBusy (we spectate, or we are between maps) knocks again every few seconds without
+// getting in: counted, they kept an invasion from ending after every co-op player had fallen (coop_team_down
+// needs this many) and enemies scaled for a player who was not here.
 int coop_guest_count() {
     int n = 0;
     for (const auto& p : g_peers) {
-        if (!p.invader && now() - p.last_seen <= 10.0) ++n;
+        if (!p.invader && admitted(p.id) && now() - p.last_seen <= 10.0) ++n;
     }
     return n;
 }
@@ -867,11 +881,10 @@ void host_answer(const Pending& p) {
     Welcome w{};
     fill_header(&w, kWelcome);
     w.status = kOk;
-    int players = 1;
-    for (const auto& peer_info : g_peers) players += peer_info.invader || peer_info.id == p.from ? 0 : 1;
-    if (!p.invade && players >= g_cfg.max_players) w.status = kFull;
     // The game's limit for guests and invaders together (it keeps three remote players). Steam's lobby has more
-    // room (kLobbyRoom), so this is what keeps the count; it used to be the lobby's size.
+    // room (kLobbyRoom), so this is what keeps the count; it used to be the lobby's size. Until 1.1.0 a second
+    // check counted every non-invader in g_peers: that held players still knocking, and turned a joiner away as
+    // full while there was room.
     int in_session = 1;
     for (uint64_t id : g_admitted) in_session += id == p.from ? 0 : 1;
     if (in_session >= g_cfg.max_players) w.status = kFull;
@@ -929,7 +942,9 @@ void host_answer(const Pending& p) {
         w.world_rules = static_cast<uint8_t>(st.world_rules);
         w.infection = st.infection ? 1 : 0;
         w.taunt = st.taunt ? 1 : 0;
-        w.coop_players = static_cast<uint8_t>(1 + coop_guest_count());
+        // The host, the admitted guests, and a joining guest (admitted just below).
+        const int joining = !p.invade && !admitted(p.from) ? 1 : 0;
+        w.coop_players = static_cast<uint8_t>(1 + coop_guest_count() + joining);
         w.invitation_size = static_cast<uint32_t>(inv.size());
         std::memcpy(w.invitation, inv.data(), inv.size());
     }
@@ -1994,7 +2009,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             }
             say(fmt(m.invader ? kMsgInvaderDied : kMsgDied, event_name(m)));
             // We invade and the last co-op player fell (the host alone is not enough while a guest stands).
-            if (g_invade && g_step == Step::InWorld && !g_invade_won && coop_team_down()) invasion_won();
+            if (invasion_undecided() && coop_team_down()) invasion_won();
             break;
         }
         case kBonfireWarp: {
@@ -2160,7 +2175,11 @@ void send_rest() {
 
 void send_death() {
     if (g_role == Role::None || !g_lobby) return;
-    if (g_invade && g_step == Step::InWorld && !g_invade_won) say(kMsgBreakInFailed);
+    if (invasion_undecided()) {
+        g_invade_lost = true;
+        LOG_INFO("[coop] We fell while invading: invasion failed");
+        say(kMsgBreakInFailed);
+    }
     // The death debuff (Remastered Seamless Co-op): a Crimson Blossom per death in a session, up to five.
     if (g_cfg.death_debuffs && !g_invade && items::count(items::kBlossom) < 5) items::give(items::kBlossom, 1);
     PlayerEvent e = player_event(kDead, steam::self(), g_invade, utf8(own_name()));
@@ -2807,7 +2826,7 @@ void tick() {
             spectate::set_teammates(team);
             world::set_everyone_dead(!team.empty() && all_dead);
         }
-        if (g_invade && g_step == Step::InWorld && !g_invade_won) {
+        if (invasion_undecided()) {
             static double last_down = 0;
             if (now() - last_down > 0.5) {
                 last_down = now();

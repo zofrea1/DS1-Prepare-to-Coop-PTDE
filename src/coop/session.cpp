@@ -83,7 +83,8 @@ enum MsgType : uint8_t {
     kDropped = 20,     // host -> a player it dropped for silence who is talking again: go home
 };
 
-enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4 };
+// kBossFight (1.1.0): a co-op guest waits for the host's or a guest's boss fight to end (1.0.0 takes it as a refusal).
+enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4, kBossFight = 5 };
 
 #pragma pack(push, 1)
 struct Header {
@@ -225,6 +226,7 @@ constexpr const wchar_t* kMsgJoinTimeout = L"Failed to find session";
 constexpr const wchar_t* kMsgBreakInTimeout = L"Failed to find session to invade";
 constexpr const wchar_t* kMsgConnectTimeout = L"Failed to connect";
 constexpr const wchar_t* kMsgNoOne = L"No sessions found";
+constexpr const wchar_t* kMsgBossFight = L"That world is in a boss fight. Try again when it is over";
 constexpr const wchar_t* kMsgTryAnother = L"Trying another world...";
 constexpr const wchar_t* kMsgReturnHome = L"Returning to your world...";
 constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returning to your world...";
@@ -870,11 +872,14 @@ void host_answer(const Pending& p) {
     for (uint64_t id : g_admitted) in_session += id == p.from ? 0 : 1;
     if (in_session >= g_cfg.max_players) w.status = kFull;
     if (p.invade && !g_cfg.allow_invaders) w.status = kRefused;
-    // No invader joins a boss fight (ours or a guest's): it tries another world. Remastered Seamless Co-op also
-    // keeps invaders out of the Undead Asylum and Firelink Shrine; Prepare to Co-op lets them in (1.1.0).
-    if (p.invade && w.status == kOk && boss_fight_in_world()) {
-        w.status = kRefused;
-        LOG_INFO("[coop] An invader knocked during a boss fight: refused");
+    // Nobody joins a boss fight (ours or a guest's). An invader tries another world. A guest is told to come back
+    // after it: one who arrived mid-fight ran the boss's opening in its own game on a boss already fighting (the
+    // Asylum Demon's jump from its perch, from wherever it stood, through the floor; 2026-10-17 test). Remastered
+    // Seamless Co-op also keeps invaders out of the Undead Asylum and Firelink Shrine; Prepare to Co-op lets them in.
+    if (w.status == kOk && boss_fight_in_world()) {
+        w.status = p.invade ? kRefused : kBossFight;
+        LOG_INFO("[coop] %s knocked during a boss fight: %s", p.invade ? "An invader" : "A guest",
+                 p.invade ? "refused" : "told to come back after it");
     }
     // Between maps or at the title screen there is no world to arrive in yet: the joiner asks again.
     if (w.status == kOk && (!game::in_game() || game::loading() || !game::own_world())) w.status = kBusy;
@@ -1405,6 +1410,12 @@ void guest_on_welcome(const Welcome& w) {
         g_last_busy = true;
         set_step(Step::Hello);
         g_step_since = now() - 17.0;  // retry in 3 s
+        return;
+    }
+    if (w.status == kBossFight) {
+        LOG_INFO("[coop] The host's world is in a boss fight");
+        if (try_next_world("in a boss fight")) return;
+        finish(kMsgBossFight);
         return;
     }
     if (w.status == kVersion || (w.status != kOk && g_mismatch.active)) {

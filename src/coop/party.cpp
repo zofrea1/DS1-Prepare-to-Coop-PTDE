@@ -282,7 +282,6 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
         }
         if (!member) continue;
         const PeerState ps = peer ? peer(r.chr, r.name) : PeerState{};
-        if (ps.invader) continue;  // invaders keep the game's own rules
         char name[64];
         WideCharToMultiByte(CP_UTF8, 0, r.name.c_str(), -1, name, sizeof(name), nullptr, nullptr);
         if (!r.chr || g_removed.count(r.chr) || being_removed(r.chr)) {
@@ -294,6 +293,10 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
             }
             continue;
         }
+        // An invader's character missing after our own load (we died and respawned) is asked for like anyone's:
+        // the host and the guests saw no invader after their respawn (2026-10-16/17 invasions, 1.0.0 players). An
+        // invader who dies goes home, so nothing below (the rebuild after a death) is for them.
+        if (ps.invader) continue;
         Made& made = g_made[r.slot];
         if (made.chr != r.chr || (ps.known && made.peer != ps.id)) {
             made = Made{};

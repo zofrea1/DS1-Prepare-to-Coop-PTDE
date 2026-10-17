@@ -1188,7 +1188,6 @@ uint32_t g_hp_rate_orig = 0;
 // on every load (the characters are freed).
 std::set<uint32_t> g_host_killed;
 ULONGLONG g_world_reset_at = 0;
-int g_hp_holds = 0;
 
 uint32_t chr_by_entity(int entity) {
     uint32_t chr = 0;
@@ -1244,7 +1243,8 @@ void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
                                   : nullptr;
     if (!why) return;
     cond[8] &= 0xFE;
-    if (++g_hp_holds <= 30) {
+    static std::set<std::pair<int, const char*>> told;  // once per character and reason (the test runs every frame)
+    if (told.size() < 30 && told.insert({entity, why}).second) {
         LOG_INFO("[coop] HP test on character %d held back: %s (HP %d/%d, team %u)", entity, why,
                  static_cast<int>(hp), static_cast<int>(max_hp), team);
     }
@@ -3026,6 +3026,59 @@ void track_watched_enemies() {
     }
 }
 
+// The boss fight's characters (the boss gauges: handles at MenuMan+0xF64 / +0xF78, -1 none): which game moves them,
+// whether their AI is on in this game (Set Character AI State: ChrCtrl+0xC0 bit 0, 0xD6C3F0) and what this game bids,
+// for the 2026-10-17 report. After a team wipe the guest walked into the Asylum Demon's hall first, and the demon
+// then fought only while the host stood close to it and paused when the host walked away. Logged when that changes
+// and every 10 s during the fight.
+constexpr uint32_t kMenuManVar = 0x013786D0;
+
+uint32_t chr_of_handle(uint32_t handle) {
+    uint32_t wcm = 0, table = 0, count = 0, entries = 0, chr = 0;
+    if (handle == 0xFFFFFFFF || !read32(game::kWorldChrManVar, &wcm) || !wcm) return 0;
+    const uint32_t index = (handle >> 14) & 0x3F, slot = handle & 0x3FFF;
+    if (!read32(wcm + 0x240 + index * 4, &table) || !table || !read32(table, &count) || slot >= count ||
+        !read32(table + 4, &entries) || !read32(entries + slot * 0x20, &chr)) {
+        return 0;
+    }
+    return chr;
+}
+
+void track_boss_control() {
+    static double last = 0;
+    static int lines = 0;
+    const double t = seconds();
+    if (t - last < 0.5 || lines > 300 || !g_state.active || game::loading()) return;
+    last = t;
+    static std::map<uint32_t, std::pair<int, double>> seen;  // gauge handle -> (state, last line)
+    uint32_t mm = 0;
+    if (!read32(kMenuManVar, &mm) || !mm) return;
+    for (uint32_t off : {0xF64u, 0xF78u}) {
+        uint32_t h = 0xFFFFFFFF, current = 0, own_ai = 0, net_ai = 0, ctrl = 0, engage = 0, authority = 0;
+        uint8_t ai = 0;
+        game::Vec3 at{}, me{};
+        if (!read32(mm + off, &h) || h == 0xFFFFFFFF) continue;
+        const uint32_t chr = chr_of_handle(h);
+        if (!chr || !read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai) ||
+            !read32(chr + 0x28, &ctrl) || !read8(ctrl + 0xC0, &ai) || !game::chr_position(chr, &at)) {
+            continue;
+        }
+        read32(chr + 0xF4, &engage);
+        read32(chr + 0x204, &authority);
+        const int control = current == own_ai ? 1 : current == net_ai ? 2 : 0;
+        const int state = control * 2 + (ai & 1);
+        auto& s = seen[h];
+        if (state == s.first && t - s.second < 10.0) continue;
+        s = {state, t};
+        game::position(&me, nullptr);
+        ++lines;
+        LOG_INFO("[coop] Boss %08X: moved by %s, its AI %s in this game (engagement %u, authority %u), at (%.1f, %.1f, "
+                 "%.1f), %.0f m from us",
+                 h, control == 1 ? "this game (own AI)" : control == 2 ? "another game (network)" : "neither (?)",
+                 (ai & 1) ? "on" : "off", engage, authority, at.x, at.y, at.z, dist3(me, at));
+    }
+}
+
 int install() {
     int failed = 0;
     {
@@ -3420,6 +3473,7 @@ void tick() {
     }
     track_bloodstain();
     track_watched_enemies();
+    track_boss_control();
     invader_walls_tick();
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();

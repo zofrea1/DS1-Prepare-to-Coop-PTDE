@@ -40,6 +40,20 @@ constexpr uint32_t kCamChrSite = 0x00EFDB1F;   // mov edx,[0x137D648] ; mov ecx,
 constexpr uint32_t kCamDeadSite = 0x00F1457A;  // mov al,[esi+0x40] ; setne [esp+0x6F]  (esi = WorldChrMan)
 constexpr uint32_t kDebugChrVar = 0x0137D648;
 constexpr uint32_t kWorldChrManVar = 0x0137D644;  // +0x24 player characters, +0x28 their array (0x20 each)
+// The cameras turn by the followed character's controller input (ChrCtrl+0x244, else +0x54: the vector at +0x40),
+// as Remastered Seamless Co-op's camera hook (DSR 0x140237517) shows. A remote player's controller is the network's,
+// so the camera kept turning by itself while spectating (2026-10-17 test; locking on stopped it). While a teammate
+// is followed these three reads take the local player's controller instead, as Remastered does:
+constexpr uint32_t kCamInputFollow = 0x00F04B2C;  // ChrExFollowCam 0xF02720: mov eax,[ebp+10h]; mov eax,[eax+28h]; cmp [eax+244h],0
+constexpr uint32_t kCamInputAim = 0x00F18AFA;     // the aim camera 0xF18860: mov eax,[edi+28h]; mov ecx,[eax+244h]; test ecx,ecx
+constexpr uint32_t kCamInputBack = 0x00F1B2AE;    // its end writes its direction back: mov edi,[edi+28h]; mov eax,[edi+244h]
+// The picture greys out while the local player is dead: the in-game step (0xEFE74B) fades FadeMan's channel 6
+// ([0x13786B8]+0x130, 7 channels of 0x30 bytes from +0x10) to 1 whenever the player's dead flag (chr+0xC -> +0x1C
+// -> +0x14 bit 0, the same the death event tests) is set, and the tone correction (0xEAE930) takes that much
+// saturation away. While our death waits the test reads "alive" and the channel is cleared; the death that goes
+// ahead fades to grey as usual.
+constexpr uint32_t kDeathTintTest = 0x00EFE76B;   // mov al,[eax+14h]; and al,1 (je 0xEFE7E4 follows)
+constexpr uint32_t kFadeManVar = 0x013786B8;
 
 constexpr double kViewDelay = 3.0;      // the death animation plays before the camera moves on
 constexpr double kFightOffFor = 1.5;    // the fight counts as over once it has been over this long
@@ -49,6 +63,7 @@ constexpr uint16_t kPadLeft = 0x0004, kPadRight = 0x0008;  // XINPUT_GAMEPAD_DPA
 // ---------------------------------------------------------------- state
 bool g_installed = false;
 bool g_view = false;          // the camera patches are in
+uint8_t g_no_tint = 0;        // the picture keeps its colour (our death waits)
 uint32_t g_dispatch = kLuaDispatch;
 bool g_hold = false;          // our death event is held
 bool g_passed = false;        // this death went ahead; it is not held again until we live
@@ -140,6 +155,93 @@ __declspec(naked) void hk_cam_dead() {
     }
 }
 
+// The local player's character, else the one the camera follows.
+__declspec(naked) void hk_cam_input_follow() {
+    __asm {
+        mov eax, dword ptr [ebp + 0x10]
+        cmp eax, g_followed
+        jne keep
+        mov eax, 0x0137D644
+        mov eax, [eax]
+        mov eax, [eax + 0x3C]
+        test eax, eax
+        jnz keep
+        mov eax, dword ptr [ebp + 0x10]
+    keep:
+        mov eax, [eax + 0x28]
+        cmp dword ptr [eax + 0x244], 0
+        ret
+    }
+}
+
+__declspec(naked) void hk_cam_input_aim() {
+    __asm {
+        mov eax, edi
+        cmp eax, g_followed
+        jne keep
+        mov eax, 0x0137D644
+        mov eax, [eax]
+        mov eax, [eax + 0x3C]
+        test eax, eax
+        jnz keep
+        mov eax, edi
+    keep:
+        mov eax, [eax + 0x28]
+        mov ecx, [eax + 0x244]
+        test ecx, ecx
+        ret
+    }
+}
+
+__declspec(naked) void hk_cam_input_back() {
+    __asm {
+        cmp edi, g_followed
+        jne keep
+        push eax
+        mov eax, 0x0137D644
+        mov eax, [eax]
+        mov eax, [eax + 0x3C]
+        test eax, eax
+        jz none
+        mov edi, eax
+    none:
+        pop eax
+    keep:
+        mov edi, [edi + 0x28]
+        mov eax, [edi + 0x244]
+        ret
+    }
+}
+
+// The je after the patch takes ZF: set = alive (no grey).
+__declspec(naked) void hk_death_tint() {
+    __asm {
+        mov al, byte ptr [eax + 0x14]
+        and al, 1
+        jz done
+        cmp g_no_tint, 0
+        je dead
+        xor al, al
+        ret
+    dead:
+        test al, al
+    done:
+        ret
+    }
+}
+
+// Channel 6 back to nothing, as the map load does (0xEFC77B).
+void clear_death_tint() {
+    uint32_t fm = 0;
+    if (!read32(kFadeManVar, &fm) || !fm) return;
+    __try {
+        std::memset(ptr<uint8_t>(fm + 0x130), 0, 0x24);  // value, its pair, target, its pair, time
+        *ptr<uint8_t>(fm + 0x154) = 0;
+        *ptr<uint8_t>(fm + 0x155) = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void follow(const Teammate* t) {
     g_target = t ? t->chr : 0;
     g_target_id = t ? t->id : 0;
@@ -228,6 +330,8 @@ void view_tick() {
 // ---------------------------------------------------------------- the death event
 void start_hold() {
     g_hold = true;
+    g_no_tint = 1;
+    clear_death_tint();
     g_hold_since = now();
     g_fight_off_since = 0;
     g_rested = false;
@@ -239,6 +343,7 @@ void start_hold() {
 
 void release(const char* why) {
     g_hold = false;
+    g_no_tint = 0;
     g_passed = true;
     follow(nullptr);
     LOG_INFO("[coop] Our death goes ahead (%s)", why);
@@ -290,9 +395,22 @@ bool install() {
     }
     static const uint8_t dead_k[8] = {0x8A, 0x46, 0x40, 0x0F, 0x95, 0x44, 0x24, 0x6F};
     static const uint8_t chr_k[12] = {0x8B, 0x15, 0x48, 0xD6, 0x37, 0x01, 0x8B, 0x8A, 0xEC, 0x00, 0x00, 0x00};
-    g_view = patch_call(kCamDeadSite, dead_k, sizeof(dead_k), reinterpret_cast<void*>(&hk_cam_dead)) &&
+    static const uint8_t follow_k[13] = {0x8B, 0x45, 0x10, 0x8B, 0x40, 0x28, 0x83, 0xB8, 0x44, 0x02, 0x00, 0x00, 0x00};
+    static const uint8_t aim_k[11] = {0x8B, 0x47, 0x28, 0x8B, 0x88, 0x44, 0x02, 0x00, 0x00, 0x85, 0xC9};
+    static const uint8_t back_k[9] = {0x8B, 0x7F, 0x28, 0x8B, 0x87, 0x44, 0x02, 0x00, 0x00};
+    // The input patches first: the camera never follows a teammate without them.
+    g_view = bytes_match(kCamInputFollow, follow_k, sizeof(follow_k)) && bytes_match(kCamInputAim, aim_k, sizeof(aim_k)) &&
+             bytes_match(kCamInputBack, back_k, sizeof(back_k)) &&
+             patch_call(kCamInputFollow, follow_k, sizeof(follow_k), reinterpret_cast<void*>(&hk_cam_input_follow)) &&
+             patch_call(kCamInputAim, aim_k, sizeof(aim_k), reinterpret_cast<void*>(&hk_cam_input_aim)) &&
+             patch_call(kCamInputBack, back_k, sizeof(back_k), reinterpret_cast<void*>(&hk_cam_input_back)) &&
+             patch_call(kCamDeadSite, dead_k, sizeof(dead_k), reinterpret_cast<void*>(&hk_cam_dead)) &&
              patch_call(kCamChrSite, chr_k, sizeof(chr_k), reinterpret_cast<void*>(&hk_cam_chr));
     if (!g_view) LOG_ERROR("[coop] Spectating: the camera code did not match this build (the camera stays on us)");
+    static const uint8_t tint_k[5] = {0x8A, 0x40, 0x14, 0x24, 0x01};
+    if (!patch_call(kDeathTintTest, tint_k, sizeof(tint_k), reinterpret_cast<void*>(&hk_death_tint))) {
+        LOG_ERROR("[coop] Spectating: the death tint test did not match this build (the picture greys while spectating)");
+    }
     return true;
 }
 
@@ -303,6 +421,7 @@ void tick() {
     if (game::player() && !world::local_dead()) {
         if (g_hold) {
             g_hold = false;
+            g_no_tint = 0;
             follow(nullptr);
             LOG_INFO("[coop] We live again while our death waited");
         }

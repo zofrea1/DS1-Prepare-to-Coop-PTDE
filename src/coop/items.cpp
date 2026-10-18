@@ -332,19 +332,20 @@ bool keep_key_for_home(int32_t goods_id) {
     return key_array_holds(own, keys, goods_id);
 }
 
-void give(int32_t goods_id, int n) {
-    if (!game::in_game() || n <= 0) return;
+bool give(int32_t goods_id, int n) {
+    if (!game::in_game() || n <= 0) return false;
     const uint32_t pgd = game::player_game_data();
-    if (!pgd) return;
+    if (!pgd) return false;
     int slot = -1;
     __try {
         using Fn = int(__stdcall*)(uint32_t, uint32_t, int32_t, int32_t, int32_t, int32_t);
         slot = reinterpret_cast<Fn>(kInventoryAdd)(pgd + 0x1B8, kGoodsCategory, goods_id, n, 1, 0);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LOG_ERROR("[coop] Giving item %d failed", goods_id);
-        return;
+        return false;
     }
     if (slot == -1) LOG_INFO("[coop] Item %d did not fit in the inventory", goods_id);
+    return slot != -1;
 }
 
 namespace {

@@ -3185,8 +3185,8 @@ void track_watched_enemies() {
 // whether their AI is on in this game (Set Character AI State: ChrCtrl+0xC0 bit 0, 0xD6C3F0) and what this game bids,
 // for the 2026-10-17 report. After a team wipe the guest walked into the Asylum Demon's hall first, and the demon
 // then fought only while the host stood close to it and paused when the host walked away. Logged when that changes
-// and every 10 s during the fight. The bosses an event woke in this game are followed too, gauge or not: a player who
-// waits outside the fight has no gauge, but their game still runs the boss (2026-10-18).
+// and every 10 s during the fight. The bosses an event woke in this game are followed too, gauge or not: a player
+// waiting outside the fight has no gauge, but their game still runs the boss.
 constexpr uint32_t kMenuManVar = 0x013786D0;
 
 uint32_t chr_of_handle(uint32_t handle) {
@@ -3326,9 +3326,8 @@ __declspec(naked) void hk_set_ai() {
 // Event animations forced on a boss or a watched enemy (EMEVD 2003[18] -> 0xD719C0 -> the ChrIns event animation
 // 0xE69590, which motion.cpp's hook passes on): the event that ran it here and whether another player's game started
 // that run, then four times a second for 8 s which game moves the character, where it is, whether the animation
-// still plays in this game (the request at [chr+0x10]+4) and what this game bids for it. For the 2026-10-18 report:
-// the Asylum Demon played its leap from the perch (9060) in both games and stayed on the perch, with the host at the
-// bonfire and control passing between the games; the Hellkite's flights go astray the same way.
+// still plays in this game (the request at [chr+0x10]+4) and what this game bids for it (diagnostic: a scripted
+// leap or flight that goes astray in co-op, docs "World events").
 constexpr double kAnimWatchTime = 8.0;
 int g_watch_entity = 0;
 int g_watch_anim = 0;

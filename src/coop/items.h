@@ -41,8 +41,9 @@ std::string key_layout();
 // In another player's world: writes a key item into the own world's key array too, so the trip home keeps it.
 // True when it is there (already or now); false at home (nothing to do) or when it could not be added.
 bool keep_key_for_home(int32_t goods_id);
-// Straight into the inventory, without the "items obtained" box (see kInventoryAdd).
-void give(int32_t goods_id, int n);
+// Straight into the inventory, without the "items obtained" box (see kInventoryAdd). False when nothing was added
+// (no character, or the inventory refused the stack).
+bool give(int32_t goods_id, int n);
 void remove_all(int32_t goods_id);
 // A bonfire rest: every co-op item except the Crimson Blossom that is not in the inventory (one each). Checked
 // at every rest, so a character brought over from an earlier save gets them too.

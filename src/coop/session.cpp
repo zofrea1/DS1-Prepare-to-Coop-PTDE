@@ -147,8 +147,7 @@ struct InfoMore {
     uint8_t boss_fight;    // a boss gauge is shown in this player's game (the host keeps invaders out meanwhile)
     uint8_t team_respawn;  // this player's respawn after a team wipe waits for the others' (kTeamRespawn)
     uint8_t respawn;       // where that respawn is for the death this player reports (kRespawnNone ...)
-    uint8_t reset_wait;    // this player's world reloads after a lost boss fight once the fallen are at their
-                           // respawn (world.cpp), and the fallen's respawns wait for it
+    uint8_t reset;         // this player's world's reload after a lost boss fight (kResetNone ..., world.cpp)
     uint8_t reserved[4];
 };
 struct BonfireMsg {
@@ -721,13 +720,31 @@ void invasion_won() {
     }
 }
 
+// The reward counts what reached the inventory: a full stack takes none (or only some, one at a time), and the rest
+// is tried again later.
 void reward_tick() {
+    static double retry_at = 0;
     if (g_reward <= 0 || !game::in_game() || game::loading() || !game::player() || world::local_dead()) return;
     if (g_reward_home && (!game::own_world() || g_role != Role::None)) return;
-    items::give(kHumanity, g_reward);
-    say(fmt(g_reward_text, std::to_wstring(g_reward)));
-    g_reward = 0;
-    g_reward_home = false;
+    if (now() < retry_at) return;
+    const int before = items::count(kHumanity);
+    if (!items::give(kHumanity, g_reward)) {
+        for (int i = 0; i < g_reward; ++i) {
+            if (!items::give(kHumanity, 1)) break;
+        }
+    }
+    const int given = std::clamp(items::count(kHumanity) - before, 0, g_reward);
+    if (given < g_reward) {
+        retry_at = now() + 30.0;
+        LOG_INFO("[coop] Reward: %d of %d Humanity fit in the inventory; the rest is tried again in 30 s", given,
+                 g_reward);
+    }
+    if (given > 0) say(fmt(g_reward_text, std::to_wstring(given)));
+    g_reward -= given;
+    if (g_reward <= 0) {
+        g_reward = 0;
+        g_reward_home = false;
+    }
 }
 
 // ---------------------------------------------------------------- a team wipe reloads every game at once
@@ -749,11 +766,12 @@ double g_respawn_told = 0;  // guest: when we last told the host our warp waits
 // Guest: when the host last said its warp went (message or player report). Kept apart from the host's phase, which
 // its first report after standing up sets back to none: both can arrive in one poll, after a stall.
 double g_host_went_at = -100;
-// A rest after a lost boss fight (world.cpp): a living player's world reloads at its bonfire, as the fallen's do. It
-// waits until every fallen co-op player is at their respawn warp, and their warps wait for it (reset_wait in the
-// player report), so the reloads start together, as after a team wipe.
-bool g_reset_wait = false;  // our world's reload waits for the fallen
-bool g_reset_hold = false;  // our respawn waits for a teammate's reload
+// A rest after a lost boss fight (world.cpp): living players' worlds reload at their bonfires, as the fallen's do,
+// all at once (set_reset_phase). A fallen player waits as long as a teammate who reports a pending reload is heard
+// from: that teammate may be leveling at the bonfire. kResetHoldCap only ends a wait on one who is away for good.
+constexpr double kResetHoldCap = 120.0;
+uint8_t g_reset = kResetNone;  // our reload
+bool g_reset_hold = false;     // our respawn waits for teammates' reloads
 
 // Every other co-op player has fallen (and there is one). The dead stay dead in their reports until their
 // respawned character exists (send_info), so a wipe lasts through the loads.
@@ -768,11 +786,11 @@ bool team_wiped() {
     return n > 0;
 }
 
-// A living co-op teammate whose world reloads after a lost boss fight once the fallen are at their respawn.
-const PeerInfo* resetting_mate() {
+// A living co-op teammate whose world's reload after a lost boss fight is at least at `phase`.
+const PeerInfo* resetting_mate(uint8_t phase) {
     const std::vector<party::Remote> members = party::remotes();
     for (const auto& p : g_peers) {
-        if (coop_member(p, members) && !p.dead && p.reset_wait) return &p;
+        if (coop_member(p, members) && !p.dead && p.reset >= phase) return &p;
     }
     return nullptr;
 }
@@ -848,7 +866,7 @@ void finish(const std::wstring& why) {
     g_invade_lost = false;
     g_respawn_waiting = false;
     g_reset_hold = false;
-    g_reset_wait = false;
+    g_reset = kResetNone;
     g_respawn = kRespawnNone;
     g_host_went_at = -100;
     g_away_since = 0;
@@ -1874,7 +1892,7 @@ void send_info() {
     more.boss_fight = world::boss_fight() ? 1 : 0;
     more.team_respawn = 1;
     more.respawn = static_cast<uint8_t>(dead ? g_respawn : kRespawnNone);
-    more.reset_wait = g_reset_wait ? 1 : 0;
+    more.reset = g_reset;
     broadcast(more, false);
 }
 
@@ -2068,7 +2086,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (more_ok && more.respawn == kRespawnWent && g_role == Role::Guest && from == g_host) g_host_went_at = now();
             if (!dead) p->respawn = kRespawnNone;
             if (more_ok) note_peer_respawn(p, more.respawn);
-            p->reset_wait = more_ok && more.reset_wait != 0;
+            p->reset = more_ok && more.reset <= kResetReady ? more.reset : kResetNone;
             p->last_seen = now();
             break;
         }
@@ -3239,7 +3257,7 @@ const PeerInfo* host_peer() {
 
 bool team_respawn_wait() {
     if (g_role == Role::None || g_invade || !g_lobby) return false;
-    const PeerInfo* mate = resetting_mate();
+    const PeerInfo* mate = resetting_mate(kResetWaiting);
     if (mate && (g_role == Role::Host || g_step == Step::InWorld)) {
         respawn_signal(kRespawnWaiting);
         g_respawn_waiting = true;
@@ -3287,10 +3305,10 @@ bool team_respawn_go() {
         const char* why = nullptr;
         if (g_role == Role::None || !g_lobby) {
             why = "the session ended";
-        } else if (!resetting_mate()) {
-            why = "the teammate's world reloads";
-        } else if (waited >= kGuestWait) {
-            why = "no word from the teammate";
+        } else if (!resetting_mate(kResetWaiting)) {
+            why = "no teammate's reload is pending any more";
+        } else if (waited >= kResetHoldCap) {
+            why = "a teammate stays at the bonfire";
         }
         if (!why) return false;
         g_respawn_waiting = false;
@@ -3333,10 +3351,18 @@ bool team_respawn_go() {
     return true;
 }
 
-void set_reset_wait(bool on) {
-    if (g_reset_wait == on) return;
-    g_reset_wait = on;
-    if (g_role != Role::None && g_lobby) send_info();  // at once: a fallen player's warp may be close
+void set_reset_phase(uint8_t phase) {
+    if (g_reset == phase) return;
+    g_reset = phase;
+    if (g_role != Role::None && g_lobby) send_info();  // at once: the others' reloads or warps may be waiting on it
+}
+
+bool resets_ready() {
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (coop_member(p, members) && !p.dead && p.reset == kResetWaiting) return false;
+    }
+    return true;
 }
 
 bool fallen_at_respawn() {

@@ -231,11 +231,13 @@ who fell to the Asylum Demon: in the host's game the demon stayed awake on the f
 the guest's reloaded game (where it slept on its perch with its AI off) and walked into it without a health bar or
 music. Now each game notes the bosses (the 32 with a health bar) that an event woke in it since its last load (Set
 Character AI State on, `0xD6C3F0`; off puts one back to sleep). A rest, ours or another player's, while such a boss
-still lives reloads that game at its bonfire. It is decided at the rest, before the rest restarts the events. The
-reload waits for the bonfire menu to close and for the fallen to be at their respawn warp (up to 15 s), and their
-warps wait for it (`reset_wait` in the 1.1.0 player report; up to 25 s), so every game reloads at once, as after a
-wipe. A guest's reload stays in the host's world and starts its copy of the host's temporary flags over, as a death
-reload does.
+still lives reloads that game at its bonfire. It is decided at the rest, before the rest restarts the events. Each
+such game reports its reload in the 1.1.0 player report (`reset`): waiting while its menus are open or a fallen
+player is not at their respawn warp yet (up to 15 s), then ready. The reloads go once none of them is still
+waiting, and the fallen's respawn warps go once none is pending, so every game reloads at once, as after a wipe. A
+fallen player waits as long as such a teammate is heard from (leveling at the bonfire can take a while), up to two
+minutes. A guest's reload stays in the host's world and starts its copy of the host's temporary flags over, as a
+death reload does.
 
 **A death that does not reach its respawn.** A death is the global script's chain `OnEvent_4000` ("YOU DIED") ->
 `SoloPlayDeath` -> `SoloPlayDeath_TextWait` -> `SoloPlayDeath_1` -> `SoloPlayDeath_2`, which asks for the respawn
@@ -279,7 +281,8 @@ invader's game decides it: its victory gives it one Humanity per co-op player th
 handed over once it is home; a death of its that lost the invasion is flagged in its death message (`lost`, a byte
 the 1.0.0 message already had and leaves 0 for deaths), and every host and guest that hears it gets one Humanity,
 fallen players included. An invader who leaves or drops gives nobody anything. Any death that loses the invasion
-counts, a fall included, as the invasion's outcome already did.
+counts, a fall included, as the invasion's outcome already did. Only what reaches the inventory is counted and
+announced: Humanity that does not fit (a full stack) is tried again every 30 s.
 
 ### When a player leaves
 
@@ -400,6 +403,13 @@ as they were: the Asylum Demon's "AI on" event (11815392) saw its condition (118
 load ahead of the intro that switches the AI off, and the guest's copy fought the retry with its AI off. At a
 guest's death reload the visited world's temporary blocks (group 1, sub-block 5 of every map) are cleared, as the
 host's own reload clears them at home.
+
+A scripted animation that moves an enemy (the Asylum Demon's leap from its perch, 9060; the Hellkite's flights)
+moves it only in the game that runs it. In the 2026-10-18 test the guest alone walked into the hall with the host at
+the bonfire, some 40 m off and so still bidding: the leap played in both games, control passed between them, and the
+demon stayed on its perch. Whether the move is lost when control changes during the animation is not proven yet:
+each event animation on a boss or the Hellkite is followed in the log for 8 s (which game moves it, where it is,
+whether the animation still plays, this game's bid).
 
 In a guest's game the host's NPCs (teams 8 and 9) die only when the host's game says so (its HP report or its list
 of the dead) while the host is in the same map, also while the host's game is loading and has not reported them

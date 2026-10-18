@@ -46,7 +46,7 @@ struct PeerInfo {
     bool boss_fight = false; // a boss gauge is shown in their game (1.1.0 players report it)
     bool team_respawn = false;  // their respawn after a team wipe waits for the others' (kTeamRespawn)
     uint32_t respawn = 0;       // where that respawn is for their current death (session.cpp, kRespawnNone ...)
-    bool reset_wait = false;    // their world reloads after a lost boss fight once the fallen are at their respawn
+    uint8_t reset = 0;          // their world's reload after a lost boss fight (kResetNone ...)
 };
 
 void configure(const Config& cfg);
@@ -104,9 +104,14 @@ bool team_respawn_wait();
 bool team_respawn_go();
 // Our respawn warp goes now (every death, wipe or not): the others stop waiting for it.
 void note_respawn_went();
-// A rest after a lost boss fight (world.cpp): our world's reload waits for the fallen, whose respawn warps wait for
-// it in turn (team_respawn_wait), so that every game reloads at once. The others hear it at once.
-void set_reset_wait(bool on);
+// A rest after a lost boss fight (world.cpp): our world's reload is pending, waiting (our menu is open, or a fallen
+// player is not at their respawn warp yet) or ready. Every living player whose reload is pending goes once none of
+// them still waits (resets_ready), and the fallen's respawn warps wait until none is pending (team_respawn_wait),
+// so that every game reloads at once. The others hear each change at once.
+constexpr uint8_t kResetNone = 0, kResetWaiting = 1, kResetReady = 2;
+void set_reset_phase(uint8_t phase);
+// No other living co-op player's reload after a lost boss fight still waits (each is ready, gone, or none).
+bool resets_ready();
 // Every fallen co-op player (from 1.1.0 on) is at their respawn warp or past it.
 bool fallen_at_respawn();
 

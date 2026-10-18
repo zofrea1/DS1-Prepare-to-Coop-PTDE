@@ -813,19 +813,13 @@ static void death_watch_tick() {
 }
 
 // ---------------------------------------------------------------- a rest after a lost boss fight
-// Only a load puts a boss fight back to its start: the boss, its fog and its flags. A rest restarts some of the
-// fight's events, but they end at once when the fight has begun (the Asylum Demon's 11810310 while 11810314 is on,
-// the Taurus Demon's 11015382 while its own flag is on), and the flags they test are cleared only by a load. In
-// vanilla nobody rests during a fight, and a lost fight always ends in a load. In a session every game in the map
-// runs the fight's events, so a teammate who waited outside keeps the fight going in their game after the fighters
-// fell: the boss stays awake there, wins the network's bids against the games that reloaded (where it sleeps again)
-// and walks into them without its health bar or its music (2026-10-18: the host rested to bring back the guest who
-// fell to the Asylum Demon). So a rest while a boss that woke in this game still lives (rules::awake_boss) reloads
-// this game at its bonfire, as the fighters' deaths reload theirs. It is decided at the rest: most bosses' setup
-// events put the boss to sleep again when the rest restarts them (Gaping Dragon 11005392, Ornstein and Smough
-// 11515392), but the fight's other state (the boss-room flag 11xx5393, where the boss stands, its fog) stays. The
-// reloads start together (the fallen's respawn warps and ours wait for each other: session::set_reset_wait), so that
-// no game's old world feeds another's new one, and ours waits for the bonfire menu to close.
+// Only a load puts a boss fight back to its start (the boss, its fog, its flags): a rest's restarted events end at
+// once or put the boss to sleep where it stands, and the boss-room flags stay. Every game in the map runs a fight's
+// events, so a teammate who waited outside still has the fight going after the fighters fell (docs: "A rest after a
+// lost boss fight reloads too"). A rest while a boss that woke in this game still lives (rules::awake_boss) reloads
+// this game at its bonfire. It is decided at the rest, before the rest restarts the events. Every pending reload and
+// the fallen's respawns start together (session::set_reset_phase), so no game's old world feeds another's new one,
+// and ours waits for our menus to close (a load is not started from one).
 constexpr double kResetWait = 15.0;  // our reload waits this long for the fallen to reach their respawn warp
 static int g_reset_boss = 0;         // the boss whose lost fight our reload starts over (0 none)
 static double g_reset_since = 0;
@@ -833,7 +827,7 @@ static double g_reset_since = 0;
 static void drop_reset(const char* why) {
     LOG_INFO("[coop] Lost boss fight: our world does not reload (%s)", why);
     g_reset_boss = 0;
-    session::set_reset_wait(false);
+    session::set_reset_phase(session::kResetNone);
 }
 
 static void reset_after_rest(const char* who) {
@@ -842,7 +836,7 @@ static void reset_after_rest(const char* who) {
     if (!boss) return;
     g_reset_boss = boss;
     g_reset_since = now();
-    session::set_reset_wait(true);
+    session::set_reset_phase(session::kResetWaiting);
     LOG_INFO("[coop] %s rested while boss %d is awake in this game: its fight was lost, our world reloads at our "
              "bonfire with the fallen",
              who, boss);
@@ -862,9 +856,11 @@ static void reset_tick() {
         drop_reset(drop);
         return;
     }
-    if (menu_open() || rules::cutscene_playing()) return;
     const double waited = now() - g_reset_since;
-    if (!session::fallen_at_respawn() && waited < kResetWait) return;
+    const bool ready = !menu_open() && !rules::cutscene_playing() &&
+                       (session::fallen_at_respawn() || waited >= kResetWait);
+    session::set_reset_phase(ready ? session::kResetReady : session::kResetWaiting);
+    if (!ready || !session::resets_ready()) return;
     const int bonfire = session::guest() ? session::guest_respawn_bonfire() : game::last_bonfire();
     const int map = game::bonfire_map(bonfire);
     if (map == -1) {
@@ -874,7 +870,7 @@ static void reset_tick() {
     LOG_INFO("[coop] Lost boss fight: our world reloads at bonfire %d after %.1f s (boss %d)", bonfire, waited,
              g_reset_boss);
     g_reset_boss = 0;
-    session::set_reset_wait(false);
+    session::set_reset_phase(session::kResetNone);
     text::show(L"The boss fight was lost: the world starts over");
     *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
     rules::arm_reset_reload();

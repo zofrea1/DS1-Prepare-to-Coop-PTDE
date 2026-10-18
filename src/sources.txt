@@ -17,3 +17,4 @@ src\coop\spectate.cpp
 src\coop\overlay.cpp
 src\coop\party.cpp
 src\coop\motion.cpp
+src\coop\deadlist.cpp

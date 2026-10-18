@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "session.h"
 
+#include "deadlist.h"
 #include "game.h"
 #include "hook.h"
 #include "items.h"
@@ -82,6 +83,7 @@ enum MsgType : uint8_t {
     kCutFollow = 19,   // anyone -> all (through the host): a cutscene took me into this map, follow me there
     kDropped = 20,     // host -> a player it dropped for silence who is talking again: go home
     kTeamRespawn = 21, // a team wipe (1.1.0): where my respawn is (guest -> host, host -> guests)
+    kDeadList = 22,    // 1.1.0: my world's dead characters, to a fallen teammate (host -> guest, guest -> host)
 };
 
 // kBossFight (1.1.0): a co-op guest waits for the host's or a guest's boss fight to end (1.0.0 takes it as a refusal).
@@ -745,6 +747,47 @@ void reward_tick() {
     if (g_reward <= 0) {
         g_reward = 0;
         g_reward_home = false;
+    }
+}
+
+// ---------------------------------------------------------------- a death keeps the world's dead
+// While a co-op teammate is down (fallen, on the way to their bonfire, or loading there), the host sends a fallen
+// guest its list of the world's dead characters, and a guest sends a fallen host its own, each time it changes: the
+// reload of the one who fell keeps them dead (deadlist.cpp). Older versions ignore the message (their reload then
+// brings the world's dead back in their game, as before).
+uint32_t list_hash(const std::vector<uint8_t>& v) {
+    uint32_t h = 2166136261u;
+    for (uint8_t b : v) h = (h ^ b) * 16777619u;
+    return h ? h : 1;
+}
+
+void share_dead_lists() {
+    static double at = 0;
+    if (now() - at < 0.5) return;
+    at = now();
+    if (g_role == Role::None || g_invade || !g_lobby || game::loading() || !game::player() || world::local_dead()) {
+        return;
+    }
+    if (g_role == Role::Guest && g_step != Step::InWorld) return;
+    const std::vector<party::Remote> members = party::remotes();
+    std::vector<uint8_t> msg;
+    uint32_t hash = 0;
+    for (auto& p : g_peers) {
+        if (!coop_member(p, members) || !p.dead || (g_role == Role::Guest && p.id != g_host)) {
+            p.dead_list_sent = 0;
+            continue;
+        }
+        if (msg.empty()) {
+            const std::vector<uint8_t> list = deadlist::build();
+            if (list.empty()) return;
+            Header h{kMagic, kDeadList};
+            msg.resize(sizeof(h) + list.size());
+            std::memcpy(msg.data(), &h, sizeof(h));
+            std::memcpy(msg.data() + sizeof(h), list.data(), list.size());
+            hash = list_hash(list);
+        }
+        if (p.dead_list_sent == hash) continue;
+        if (steam::send(p.id, msg.data(), static_cast<uint32_t>(msg.size()), true)) p.dead_list_sent = hash;
     }
 }
 
@@ -2114,6 +2157,14 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             on_world_flags(data + sizeof(Header), size - static_cast<uint32_t>(sizeof(Header)));
             break;
         }
+        case kDeadList: {
+            if (g_invade || size <= sizeof(Header)) return;
+            const bool from_host = g_role == Role::Guest && from == g_host;
+            if (from_host || (g_role == Role::Host && !peer_is_invader(from))) {
+                deadlist::note_list(from, from_host, data + sizeof(Header), size - sizeof(Header));
+            }
+            break;
+        }
         case kRest: {
             if (g_role == Role::None) return;
             if (g_role == Role::Host) {
@@ -2841,6 +2892,7 @@ void configure(const Config& cfg) {
 void tick() {
     flash_tick();
     reward_tick();
+    share_dead_lists();
     // The first time a character stands at home (after the game starts or another character is loaded), a curse
     // laid on another character is dropped, and disasters still on in the saved flags (the game was closed while the
     // world was cursed) end, as the phantoms would otherwise roam for up to 600 s more in each such map.
@@ -3009,12 +3061,14 @@ void tick() {
             team_at = now();
             std::vector<spectate::Teammate> team;
             bool all_dead = true;
+            bool all_down = true;  // and none on the way back from a death of their own (world: a team wipe)
             const PeerInfo* boss_mate = nullptr;  // a living teammate with a boss gauge up (rules: bonfires wait)
             if (g_role != Role::None && !g_invade && !game::loading()) {
                 const std::vector<party::Remote> members = party::remotes();
                 for (const auto& p : g_peers) {
                     if (!coop_member(p, members)) continue;
                     all_dead &= p.dead;
+                    all_down &= p.dead && p.respawn != kRespawnWent;
                     if (!boss_mate && !p.dead && p.boss_fight && now() - p.last_seen <= 5.0) boss_mate = &p;
                     spectate::Teammate t;
                     t.id = p.id;
@@ -3026,6 +3080,7 @@ void tick() {
             }
             spectate::set_teammates(team);
             world::set_everyone_dead(!team.empty() && all_dead);
+            world::set_team_down(!team.empty() && all_down);
             if (!game::loading()) {
                 auto& st = rules::state();
                 if (boss_mate && !st.teammate_boss_fight) {

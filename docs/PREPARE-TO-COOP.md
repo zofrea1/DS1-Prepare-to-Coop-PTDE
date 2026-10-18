@@ -76,7 +76,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | --- | --- |
 | Guests | Keep their own body (human or hollow), level, items and progress. They pick up items, get their own enemy drops and boss rewards, rest at bonfires, level up and talk to NPCs. |
 | Joining | A guest arrives at the host's last bonfire (where the host last rested). |
-| Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. Every death is announced. After any load (a death, bonfire travel) each player's game builds the other players' characters again, and a player who died is rebuilt for the others as soon as they are back on their feet. |
+| Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. A death keeps the world as it is: the enemies killed since the last rest stay dead in your reload, as they are for everyone else, host or guest. They come back at a rest, or for everyone after a team wipe. Every death is announced. After any load (a death, bonfire travel) each player's game builds the other players' characters again, and a player who died is rebuilt for the others as soon as they are back on their feet. |
 | Messages | Joins, departures, deaths and the like appear in the box at the bottom of the screen that the game uses for "Phantom X summoned", and fade by themselves. The game's own summon texts and its "phantom returned home" / "sent home" boxes, which wait for a button, are not shown during a session. |
 | Bosses and areas | Defeating a boss or crossing into another area no longer ends the session. Joining is never locked. Players roam the host's world freely. |
 | Fog walls | The white walls that keep phantoms in the host's area are gone (boss fog stays). |
@@ -235,6 +235,29 @@ or are waited for. A player who fell counts as dead in their reports until their
 wipe lasts through the loads. Another player's character that a load threw away is asked for again only once that player reports standing in the world: asked
 for during their load, it came out invisible and could be walked through. A character first seen while its player
 reports being dead or loading is rebuilt once they are back.
+
+**A death keeps the world.** In vanilla a death reloads the world with every enemy back. In a session only the
+game of the player who fell reloads, so the enemies the team had killed came back in that game alone: after the
+host's death the host's game decided their HP for the others (`0xE40FE0`), and in the guests' games their bodies
+got HP again and could be locked on to without moving or taking damage (2026-10-18); after a guest's death they
+stood up in the guest's game, and the host's game, where they stayed dead, never sent anything that put them down.
+The game already has what a summoned phantom needs: a list of the world's dead characters ("CHR " list, built by
+WorldChrMan `0xE3E540`: per character set of a map block a key, the count and a bit per character, dead when its HP
+is at most 0 and its param does not leave it out), which the host sends a joining phantom once (`0xD30910`,
+packet 15) and a map load applies (`0xE40EC0` from `0xEFCE7A`: GameMan's own-world copy at `+0xBCC` in one's own
+world, `GameMan+0xB4F`, else the host's copy at `+0xBC4`; each marked character is killed in its dead pose, `0xE44150`
+-> `0xE6B4E0`), and then frees (`0xEB9580`). The phantom's arrival uses the host's copy up, and a death clears the
+own world's (`ClearMyWorldState`, right before `WarpNextStageKick` in `SoloPlayDeath_2` and `PartyGhostDeath_2`).
+Now, in a session with a co-op teammate, an individual death's respawn warp hands the game a list for the reload
+(the game's own setter, `0xEB9910`, so the load frees it with the game's heap): the host's game gets its own list
+merged with the guests' (dead in any game is dead), and a guest's the host's list, with its own for the map blocks
+the host does not have loaded. While a co-op teammate is down, the host sends a fallen guest its list, and a guest
+a fallen host its own, each time it changes (message 22, every 0.5 s at most); a list that comes during the load,
+before the load takes it, replaces the one given at the warp, so a kill during the load is kept too. A team wipe
+(every co-op player down at once at some point of the death, a teammate whose own respawn warp had already gone
+not counted: that one reloaded keeping the dead) and a rest during the death start the world over as before, and a
+load that did not take the list drops it. A player from before this gets no list and brings the world's
+dead back in their own game, as before.
 
 **A rest after a lost boss fight reloads too.** Only a load puts a boss fight back to its start: the boss, its fog
 and its flags. A rest restarts some of the fight's events, but they end at once when the fight has begun (the Asylum

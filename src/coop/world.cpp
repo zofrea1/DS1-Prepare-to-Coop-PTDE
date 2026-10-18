@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "world.h"
 
+#include "deadlist.h"
 #include "game.h"
 #include "hook.h"
 #include "log.h"
@@ -62,6 +63,8 @@ int row_index(int id) {
 bool g_active = false, g_invader = false, g_invader_present = false;
 int g_players = 1;
 bool g_everyone_dead = false;
+bool g_team_down = false;    // every other co-op player is down, none on the way back already (session)
+bool g_death_wiped = false;  // so it was at some point of our current death: a team wipe
 bool g_was_alive = true;
 void (*g_rest_fn)() = nullptr;
 void (*g_death_fn)() = nullptr;
@@ -290,6 +293,7 @@ void __stdcall before_rest(int object_id) {
 
 void __stdcall after_rest() {
     if (g_rest_fn && g_active && !g_invader) g_rest_fn();
+    deadlist::note_rest();
     reset_after_rest("We");
 }
 
@@ -313,6 +317,18 @@ __declspec(naked) void hk_regene() {
 bool limbo_wanted() {
     return g_active && !g_invader && local_dead() && g_players >= 2 && !g_everyone_dead &&
            (boss_fight() || rules::state().teammate_boss_fight || g_invader_present);
+}
+
+// Our death's respawn warp goes. In a session with a co-op teammate the reload keeps the world's dead characters
+// dead, as they are in the other games (deadlist.cpp): a death costs a Crimson Blossom, not the world. A team wipe
+// starts the world over in every game, and so does a rest (deadlist::note_rest).
+void keep_dead_on_reload() {
+    if (!g_active || g_invader || !local_dead() || g_players < 2) return;
+    if (g_death_wiped) {
+        LOG_INFO("[coop] Team wipe: our reload starts the world over");
+        return;
+    }
+    deadlist::arm(game::own_world());
 }
 
 // The game's own ways of sending a summoned player home (the host left or died, the room is gone, a kick) end
@@ -376,7 +392,10 @@ char __cdecl hk_warp_kick() {
     }
     // Before the original body sets the warp request. A death is aimed at the bonfire; the empty map is not loaded.
     if (!g_bypass && rules::prepare_warp_kick(local_dead())) return 1;
-    if (!g_bypass && g_active && local_dead()) session::note_respawn_went();
+    if (!g_bypass && g_active && local_dead()) {
+        session::note_respawn_went();
+        keep_dead_on_reload();
+    }
     return g_warp_orig();
 }
 
@@ -434,6 +453,7 @@ bool install_boss_fog() {
 void respawn_now() {
     if (rules::prepare_warp_kick(local_dead())) return;
     if (g_active) session::note_respawn_went();
+    keep_dead_on_reload();
     g_bypass = true;
     g_warp_orig();
     g_bypass = false;
@@ -963,6 +983,12 @@ void tick() {
         }
     }
     if (!local_dead()) g_team_asked = false;  // alive again, or loading (no character)
+    if (!local_dead()) {
+        g_death_wiped = false;
+    } else if (g_team_down) {
+        g_death_wiped = true;
+    }
+    deadlist::tick();
     death_watch_tick();
     reset_tick();
     if (g_team_hold) {
@@ -989,11 +1015,14 @@ void set_session(bool active, bool invader, bool invader_present) {
     if (!active) {
         g_players = 1;
         g_everyone_dead = false;
+        g_team_down = false;
     }
 }
 
 void set_players(int coop_players) { g_players = std::max(1, coop_players); }
 void set_everyone_dead(bool all_dead) { g_everyone_dead = all_dead; }
+
+void set_team_down(bool down) { g_team_down = down; }
 void set_rest_handler(void (*fn)()) { g_rest_fn = fn; }
 void set_before_rest_handler(void (*fn)()) { g_before_rest_fn = fn; }
 void set_death_handler(void (*fn)()) { g_death_fn = fn; }
@@ -1023,6 +1052,7 @@ void remote_rest() {
         LOG_INFO("[coop] Another player rested: the world resets");
     }
     g_rest_heard = true;
+    deadlist::note_rest();
     spectate::someone_rested();
     reset_after_rest("Another player");
     // A death that is not waiting for the fight but is stuck before its respawn goes ahead too.

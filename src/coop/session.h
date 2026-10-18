@@ -47,6 +47,7 @@ struct PeerInfo {
     bool team_respawn = false;  // their respawn after a team wipe waits for the others' (kTeamRespawn)
     uint32_t respawn = 0;       // where that respawn is for their current death (session.cpp, kRespawnNone ...)
     uint8_t reset = 0;          // their world's reload after a lost boss fight (kResetNone ...)
+    uint32_t dead_list_sent = 0;  // the list of our world's dead last sent them while they were down (0 none)
 };
 
 void configure(const Config& cfg);

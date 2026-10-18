@@ -446,7 +446,10 @@ session host's game hands each enemy to the highest bid; the others follow it ov
 an enemy's AI on or off in each game by that game's own player (Set Character AI State, `ChrCtrl+0xC0` bit 0), so
 the copies can differ: a game whose copy has its AI off bids the least while another player is near the enemy (a
 player who fell and spectates counts: their game still runs it), and a game whose player is more than 64 m away
-does not bid while another player is nearer. Without the first rule the Asylum Demon, its AI off in the guest's
+does not bid while another player is nearer. A game whose player fell bids the least but one while a standing
+player is near the enemy: the nearness term counts from the fallen player's body, so a guest who fell in the Taurus
+Demon's arena outbid the host fighting the demon 9 m away, and the demon walked back to the body until the host came
+closer (2026-10-18). A standing player's game then wins, unless its copy sleeps, which still bids the least. Without the first rule the Asylum Demon, its AI off in the guest's
 game after a retry, stood idle once the guest's game took it over. The AI-off copy still bids, so an enemy whose
 copies all sleep is still some game's to move: at first such a game did not bid at all, and the sleeping demon on
 its perch was nobody's until the session host next handed enemies out.

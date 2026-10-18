@@ -3147,6 +3147,13 @@ bool ai_off_here(uint32_t chr) {
     return read32(chr + 0x28, &ctrl) && ctrl && read8(ctrl + 0xC0, &ai) && !(ai & 1);
 }
 
+// A player who fell is no one for an enemy to fight, but the bid's nearness term counts from their body: a guest
+// who fell in the Taurus Demon's arena outbid the host fighting it 9 m away, and the demon walked back to the body
+// until the host came closer (2026-10-18). While a standing player is near the enemy, a fallen player's game bids
+// the least but one (2): a standing player's game wins, unless its copy sleeps (1), when the fallen player's game,
+// whose copy runs, keeps the enemy.
+constexpr uint32_t kBidFallen = 2;
+
 // The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
 uint32_t g_watch_chr = 0;
 uint32_t g_watch_bid = 0;
@@ -3158,6 +3165,17 @@ uint32_t net_priority(uint32_t chr) {
     if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
     game::Vec3 at{}, me{};
     if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return bid;
+    if (world::local_dead()) {
+        for (const PeerSpot& p : g_peer_spots) {
+            if (p.dead || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
+            static std::set<uint32_t> logged;
+            if (logged.size() < 30 && logged.insert(chr).second) {
+                LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): we fell; a low bid from here while a standing "
+                         "player is near it", chr, at.x, at.y, at.z);
+            }
+            return kBidFallen;
+        }
+    }
     if (ai_off_here(chr)) {
         for (const PeerSpot& p : g_peer_spots) {
             if (dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;

@@ -392,10 +392,12 @@ event id is `FrpgEventIns+0x28` (constructor `0xBC4150`). `GuestWorldEvents = fa
 Each game bids for the enemies around it (`0xE6D250`: authority, engagement, nearness to its player) and the
 session host's game hands each enemy to the highest bid; the others follow it over the network. The events switch
 an enemy's AI on or off in each game by that game's own player (Set Character AI State, `ChrCtrl+0xC0` bit 0), so
-the copies can differ: a game whose copy has its AI off does not bid while another player is near the enemy (a
+the copies can differ: a game whose copy has its AI off bids the least while another player is near the enemy (a
 player who fell and spectates counts: their game still runs it), and a game whose player is more than 64 m away
 does not bid while another player is nearer. Without the first rule the Asylum Demon, its AI off in the guest's
-game after a retry, stood idle once the guest's game took it over.
+game after a retry, stood idle once the guest's game took it over. The AI-off copy still bids, so an enemy whose
+copies all sleep is still some game's to move: at first such a game did not bid at all, and the sleeping demon on
+its perch was nobody's until the session host next handed enemies out.
 
 A load at home starts every map's temporary flags (`xxxx5000`-`xxxx5999`: timers, who stands where, which runs of
 the map's events are done) over. A guest's death reload stays in the host's world, whose flags the game then left
@@ -405,11 +407,13 @@ guest's death reload the visited world's temporary blocks (group 1, sub-block 5 
 host's own reload clears them at home.
 
 A scripted animation that moves an enemy (the Asylum Demon's leap from its perch, 9060; the Hellkite's flights)
-moves it only in the game that runs it. In the 2026-10-18 test the guest alone walked into the hall with the host at
-the bonfire, some 40 m off and so still bidding: the leap played in both games, control passed between them, and the
-demon stayed on its perch. Whether the move is lost when control changes during the animation is not proven yet:
-each event animation on a boss or the Hellkite is followed in the log for 8 s (which game moves it, where it is,
-whether the animation still plays, this game's bid).
+moves it only in the game that moves the enemy; the others follow over the network. In the 2026-10-18 tests the
+demon slept on its perch with its AI off in both games, so neither bid and it was nobody's. When the guest walked
+in, the leap began in both games while neither moved the demon; the session host's next hand-out gave it to the
+host's game 0.25 s, 0.5 s and, the third time, 2.5 s into the leap. That time the host's game played only the end
+of the leap, from the perch, and the demon stayed up there (at height 213; the floor is at 198). The AI-off copies now
+bid the least instead (above). Each event animation on a boss or the Hellkite is still followed in the log for 8 s
+(which game moves it, where it is, whether the animation still plays, this game's bid).
 
 In a guest's game the host's NPCs (teams 8 and 9) die only when the host's game says so (its HP report or its list
 of the dead) while the host is in the same map, also while the host's game is loading and has not reported them

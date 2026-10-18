@@ -3091,9 +3091,12 @@ float dist3(const game::Vec3& a, const game::Vec3& b) {
 }
 
 // The world's events switch an enemy's AI on and off in each game by that game's own player (Set Character AI State,
-// ChrCtrl+0xC0 bit 0), so the copies can differ. A game whose copy has its AI off does not bid while another player
-// is near enough to take the enemy, so it stays with a game where its AI runs; a player who fell counts too (their
-// game still runs the enemy while they spectate).
+// ChrCtrl+0xC0 bit 0), so the copies can differ. A game whose copy has its AI off bids the least (1) while another
+// player is near enough to take the enemy, so it goes to a game where its AI runs; a player who fell counts too
+// (their game still runs the enemy while they spectate). It still bids: a boss whose copies all sleep (the Asylum
+// Demon on its perch, AI off in every game) must still be moved by some game. With no bid at all it was nobody's
+// until the session host next handed enemies out, up to 2.5 s into its scripted leap, whose move only the game
+// that moves it plays; the rest of the leap then started from the perch and ended on it (2026-10-18).
 bool ai_off_here(uint32_t chr) {
     uint32_t ctrl = 0;
     uint8_t ai = 1;
@@ -3116,10 +3119,10 @@ uint32_t net_priority(uint32_t chr) {
             if (dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
             static std::set<uint32_t> logged;
             if (logged.size() < 30 && logged.insert(chr).second) {
-                LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): its AI is off in this game; no bid from here while "
-                         "another player is near it", chr, at.x, at.y, at.z);
+                LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): its AI is off in this game; the lowest bid from here "
+                         "while another player is near it", chr, at.x, at.y, at.z);
             }
-            return 0;
+            return 1;  // the bid's high word (0xE56270 packs bid << 16 | index); the highest wins
         }
     }
     const float mine = dist3(me, at);

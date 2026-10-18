@@ -2178,8 +2178,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             const uint32_t was = p->respawn;
             note_peer_respawn(p, m.value);
             if (p->respawn != was && (p->respawn == kRespawnWaiting || g_respawn_waiting)) {
-                LOG_INFO("[coop] Team wipe: %s's respawn %s", steam::persona(from).c_str(),
-                         p->respawn == kRespawnWaiting ? "waits" : "went");
+                LOG_INFO("[coop] %s: %s's respawn %s",
+                         g_reset != kResetNone || g_reset_hold ? "Lost boss fight" : "Team wipe",
+                         steam::persona(from).c_str(), p->respawn == kRespawnWaiting ? "waits" : "went");
             }
             break;
         }

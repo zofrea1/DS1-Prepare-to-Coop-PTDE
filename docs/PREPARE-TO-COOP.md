@@ -86,7 +86,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. A disaster of the host's world (the black phantoms of black World Tendency or the Cursed Pendant) stays there. |
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency (a player can also curse their own world without a session), and lifts the curse when used again: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster. Each area with black phantoms starts its own disaster when a player enters it; the game checks every 600 s whether the world is still black and ends the disaster only if not, so in a cursed world the phantoms stay. The curse lasts through sessions but is not saved: after the game is restarted, or another character is loaded, the world is no longer cursed and disasters left from the curse end; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
-| Spectating | Bosses and invaders are fought as one team. Falling during a boss fight or while an invader is in the world, with another co-op player (host or guest) still standing, you do not die yet: after your fall the camera follows a living teammate in full colour, turned with your own stick (D-pad left/right or the arrow keys switch between teammates). Your death ("YOU DIED", the lost souls, the respawn) goes ahead once the fight is decided: the boss is gone and no invader is left, every co-op player has fallen, someone rests at a bonfire, or after ten minutes. When every co-op player has fallen (a team wipe), each respawn waits after "YOU DIED" until everyone's death has got there, and then every game reloads at once: the boss and the enemies start over for everyone, as after a death in single player. |
+| Spectating | Bosses and invaders are fought as one team. Falling during a boss fight or while an invader is in the world, with another co-op player (host or guest) still standing, you do not die yet: after your fall the camera follows a living teammate in full colour, turned with your own stick (D-pad left/right or the arrow keys switch between teammates). While you watch, your game draws the world around that teammate and updates their character every frame, so a teammate far away is seen in full detail and moves smoothly. Your death ("YOU DIED", the lost souls, the respawn) goes ahead once the fight is decided: the boss is gone and no invader is left, every co-op player has fallen, someone rests at a bonfire, or after ten minutes. When every co-op player has fallen (a team wipe), each respawn waits after "YOU DIED" until everyone's death has got there, and then every game reloads at once: the boss and the enemies start over for everyone, as after a death in single player. |
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Boss fogs stay shut for the host and the guests while an invader is in the world, and nobody joins while anyone in the world is in a boss fight: an invader tries another world (such a world is also hidden from invaders' searches), a co-op guest is told to come back when the fight is over. An invader arrives at the game's own black invasion point for the play region the host stands in, else at the nearest one within 50 m, else on the host (Firelink Shrine and the Undead Asylum have none; invasions are allowed there). The invader wins when every co-op player has fallen (the host's death alone does not end an invasion while a guest stands; with a 1.0.0 invader it still does); when the invader dies the invasion fails. With `InvasionRewards`, the winning side gets Humanity: the invader one per co-op player defeated (once home), or, when the invader falls, the host and every guest one each. |
 | Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |
 | Shared light | Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game. |
@@ -200,6 +200,17 @@ picture greys while the local player is dead: the in-game step (`0xEFE74B`) fade
 much saturation away; while a death waits the test reads alive and the channel is cleared. A boss gauge is EMEVD's (`2003[11]`): the
 Asylum Demon's goes off when the boss dies or when the local player leaves the arena, and a dead body stays.
 
+**The view around a far teammate.** A game draws the world as from the floor its own player stands on: FieldArea's
+update (`0xDE85D0`) takes that floor (`+0x30`, from the local player's `chr+0x29C`) and from it every block's draw
+and display groups (`0xDE2C60`: map pieces, objects, characters), the area's light and the connected blocks. A
+spectator's body stays where it fell, so a teammate far away was seen in the far area's low-detail models and was
+not drawn at all, and the game updated that character less often (its update rate `chr+0xF4`, lower far from the
+local player), so it moved in jerks (2026-10-18). While a teammate is followed, the floor they stand on goes into
+FieldArea's one-update slot (`+0x34`) every frame, when it is a collision of a block loaded and in use here
+(checked every frame: the pointer can outlive its block), and their update rate is fixed at "always", as the event
+command "Set Network Update Rate" (2004[34], `0xD6D780`: `chr+0x1FD` bit 0, `+0xF4` = 0) does; both stop when the
+view does. The map we are in still follows our own floor.
+
 **A team wipe reloads every game at once.** Each game reloads its own world after a death, so a wipe starts the
 world over in every game, but only if the games reload together. With each death going ahead on its own, the
 first game to wake in its new world met the boss and the enemies from a game still in the old one: the network
@@ -229,9 +240,13 @@ session every game in the map runs the fight's events (the runs are shared), so 
 the fight going in their game after the fighters fell. In the 2026-10-18 test the host rested to bring back the guest
 who fell to the Asylum Demon: in the host's game the demon stayed awake on the floor, won the network's bids against
 the guest's reloaded game (where it slept on its perch with its AI off) and walked into it without a health bar or
-music. Now each game notes the bosses (the 32 with a health bar) that an event woke in it since its last load (Set
-Character AI State on, `0xD6C3F0`; off puts one back to sleep). A rest, ours or another player's, while such a boss
-still lives reloads that game at its bonfire. It is decided at the rest, before the rest restarts the events. Each
+music. Now each game notes the bosses (the 32 with a health bar) whose fight began in it since its last load: an
+event switched the boss's AI on (Set Character AI State, `0xD6C3F0`; off puts it back to sleep), an event played an
+animation on it (every one in the maps' events belongs to a fight), our own boss gauge shows it, or a standing
+teammate reports it on theirs (`boss` in the 1.1.0 player report). The last two came from a second test: the guest
+fought the Taurus Demon far from the host, whose copy of the fight's run stopped at "wait for the leap to end" (an
+animation does not end on a copy the network moves), so the switch never came there and the host's rest left its
+fight going. A rest, ours or another player's, while such a boss still lives reloads that game at its bonfire. It is decided at the rest, before the rest restarts the events. Each
 such game reports its reload in the 1.1.0 player report (`reset`): waiting while its menus are open or a fallen
 player is not at their respawn warp yet (up to 15 s), then ready. The reloads go once none of them is still
 waiting, and the fallen's respawn warps go once none is pending, so every game reloads at once, as after a wipe. A

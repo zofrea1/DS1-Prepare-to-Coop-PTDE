@@ -55,6 +55,13 @@ constexpr uint32_t kCamInputBack = 0x00F1B2AE;    // its end writes its directio
 constexpr uint32_t kDeathTintTest = 0x00EFE76B;   // mov al,[eax+14h]; and al,1 (je 0xEFE7E4 follows)
 constexpr uint32_t kFadeManVar = 0x013786B8;
 
+// The world around a teammate we follow: drawn as from their floor (rules::draw_from), and their character updated
+// every frame. Far from the local player the game updates a character less often (its rate chr+0xF4, set by
+// WorldChrMan's update at 0xE3F8D7 unless chr+0x1FD bit 0 fixes it), so a far teammate moved in jerks; the event
+// command "Set Network Update Rate" (2004[34], 0xD6D780) fixes it at 0 (always), as here while we follow them.
+constexpr uint32_t kChrRateFlags = 0x1FD;  // bit 0: the rate is fixed
+constexpr uint32_t kChrRate = 0xF4;
+
 constexpr double kViewDelay = 3.0;      // the death animation plays before the camera moves on
 constexpr double kFightOffFor = 1.5;    // the fight counts as over once it has been over this long
 constexpr double kHoldLimit = 600.0;
@@ -77,6 +84,10 @@ uint64_t g_target_id = 0;
 double g_view_at = 0;
 bool g_told_waiting = false;
 uint32_t g_followed = 0;      // what the camera follows this frame instead of us (0 = us)
+uint32_t g_rate_chr = 0;      // the teammate whose update rate we fixed (0 none)
+bool g_rate_was_fixed = false;
+uint32_t g_drawn_for = 0;     // the teammate the view's last "drawn from" line was about
+const char* g_drawn_why = "";
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -239,6 +250,43 @@ void clear_death_tint() {
         *ptr<uint8_t>(fm + 0x154) = 0;
         *ptr<uint8_t>(fm + 0x155) = 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Puts back the update rate of the teammate we stop following (if they are still here) and fixes the new one's.
+void fix_rate(uint32_t chr) {
+    if (chr == g_rate_chr) return;
+    if (g_rate_chr && !g_rate_was_fixed && player_character(g_rate_chr)) {
+        uint8_t flags = 0;
+        if (read8(g_rate_chr + kChrRateFlags, &flags)) *ptr<uint8_t>(g_rate_chr + kChrRateFlags) = flags & ~1;
+    }
+    g_rate_chr = 0;
+    uint8_t flags = 0;
+    if (!chr || !read8(chr + kChrRateFlags, &flags)) return;
+    g_rate_was_fixed = (flags & 1) != 0;
+    *ptr<uint8_t>(chr + kChrRateFlags) = flags | 1;
+    *ptr<int32_t>(chr + kChrRate) = 0;
+    g_rate_chr = chr;
+}
+
+// Every frame while we follow a teammate: the world is drawn from their floor (the reason when not is logged once
+// per change).
+void view_extras() {
+    const uint32_t chr = g_hold && g_target && player_character(g_target) ? g_target : 0;
+    fix_rate(chr);
+    if (!chr) {
+        g_drawn_for = 0;
+        return;
+    }
+    const char* why = rules::draw_from(chr);
+    if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why)) {
+        g_drawn_for = chr;
+        g_drawn_why = why ? why : "";
+        if (why) {
+            LOG_INFO("[coop] Spectating: the world stays drawn from our own floor (%s)", why);
+        } else {
+            LOG_INFO("[coop] Spectating: the world is drawn from the followed teammate's floor");
+        }
     }
 }
 
@@ -430,6 +478,7 @@ void set_teammates(const std::vector<Teammate>& teammates) { g_team = teammates;
 
 void tick() {
     if (!g_installed) return;
+    view_extras();
     if (game::player() && !world::local_dead()) {
         if (g_hold) {
             g_hold = false;

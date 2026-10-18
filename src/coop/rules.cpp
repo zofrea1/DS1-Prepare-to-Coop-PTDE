@@ -509,14 +509,16 @@ bool kick_prepare(bool dead) {
 
 int clear_visited_temporary_flags();  // the death reload's reset of the maps' xxxx5xxx flags (below)
 constexpr int kDeathLatch = 4000;     // OnEvent_4000 starts a death only while it is off; a load at home clears it
-// The bosses an event woke in this game since its last load (note_ai_state); every load puts them back to sleep.
+// The bosses whose fight began in this game since its last load (mark_awake); every load puts them back to sleep.
 std::set<int> g_awake_bosses;
+std::map<uint32_t, int> g_boss_of_chr;  // character -> its gauge boss entity, until the next load
 bool g_reset_reload = false;  // this load is a living guest's reload after a lost boss fight (arm_reset_reload)
 
 void __cdecl before_map_load() {
     g_marked = false;
     g_bonfire_spawn = false;
     g_awake_bosses.clear();
+    g_boss_of_chr.clear();
     // A walk, a follow, or the trip home did not come from the death warp. Drop a stale request so the
     // next placement is not pulled onto the bonfire. The death load itself still has the flag, because
     // the warp set it and this constructor is the first step of that load.
@@ -2271,6 +2273,29 @@ int block_state(uint32_t wr, int index) {
     return static_cast<int>(state);
 }
 
+// The floor a character stands on (chr+0x29C, a HitIns) if its block is loaded and in use, else 0 with the reason. The
+// pointer outlives its block's unload (world.cpp's param row guard met one after a map change), so the block is
+// checked every time.
+constexpr uint32_t kHitInsVtable = 0x01192494;
+uint32_t loaded_floor(uint32_t chr, const char** why) {
+    uint32_t hit = 0, vt = 0, n = 0;
+    uint8_t block = 0xFF;
+    const uint32_t wr = world_res();
+    if (!read32(chr + 0x29C, &hit) || !hit) {
+        *why = "no floor under them";
+    } else if (!read32(hit, &vt) || vt != kHitInsVtable || !read8(hit + 0xF, &block)) {
+        *why = "their floor is not a collision";
+    } else if (!wr || !read32(wr + kWrBlockCount, &n) || static_cast<int8_t>(block) < 0 ||
+               static_cast<uint32_t>(static_cast<int8_t>(block)) >= n) {
+        *why = "their floor's block is unknown";
+    } else if (block_state(wr, static_cast<int8_t>(block)) != static_cast<int>(kBlockInUse)) {
+        *why = "their floor's block is not loaded here";
+    } else {
+        return hit;
+    }
+    return 0;
+}
+
 // 0xD6C490 as the request calls it.
 bool point_found(int point) {
     float pos[4] = {}, rot[4] = {};
@@ -2913,6 +2938,25 @@ int install_one(const char* what, bool ok) {
 
 bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
 
+// FieldArea's update (0xDE85D0) takes the floor at +0x30 (ours: 0xEE28B4 reads the local player's chr+0x29C), or
+// for one update the one at +0x34, and from it every block's draw and display group masks (0xDE2C60: map pieces,
+// objects, characters), the area's light and the connected blocks to load. The map we are in (+0x7E8) follows
+// +0x30 only.
+constexpr uint32_t kFaFloorOnce = 0x34;
+const char* draw_from(uint32_t chr) {
+    const char* why = nullptr;
+    const uint32_t hit = loaded_floor(chr, &why);
+    uint32_t fa = 0;
+    if (!hit) return why;
+    if (!read32(kFieldAreaVar, &fa) || !fa) return "no field";
+    __try {
+        *ptr<uint32_t>(fa + kFaFloorOnce) = hit;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "the field could not be written";
+    }
+    return nullptr;
+}
+
 void arm_reset_reload() {
     if (!seamless_rules() || !g_state.guest || g_state.invader) return;
     g_death_respawn = true;
@@ -3270,9 +3314,13 @@ void track_boss_control() {
 // Set Character AI State (0xD6C3F0: eax = entity, stdcall(state); from EMEVD 2004[01] at 0xBC299A and from Lua at
 // 0xD5FDA4) on a boss (team 7): logged with the event that ran it and whether another player's game started that
 // run (event sync), to see which run decides a boss's AI in each game (diagnostic).
-// The same calls tell which bosses are awake in this game (awake_boss): a boss fight's events wake the boss when the
-// fight begins (all but four of the bosses below: 1410802, 1510801, 1510811 and 1600800 are never switched on) and
-// put it to sleep when it starts over.
+// Which bosses' fights began in this game (awake_boss): a boss fight's events wake the boss when the fight begins
+// (all but four of the bosses below: 1410802, 1510801, 1510811 and 1600800 are never switched on) and put it to
+// sleep when it starts over. A run another game started can stop short of the switch in ours: a "wait for the
+// animation to end" (the Taurus Demon's leap, 11015382) does not end on a copy the network moves, so a player far
+// from the fight never got there and kept its fight going through a rest (2026-10-18). So the fight also counts as
+// begun at an event animation on the boss (every one in the maps' events belongs to a fight), at our own boss gauge,
+// and at a teammate's report of their gauge's boss.
 constexpr uint32_t kSetAiState = 0x00D6C3F0;
 constexpr uint32_t kBossTeam = 7;  // chr+0x74 of a boss
 void* g_set_ai_orig = nullptr;
@@ -3287,10 +3335,55 @@ bool gauge_boss(int entity) {
     return std::find(std::begin(kGaugeBosses), std::end(kGaugeBosses), entity) != std::end(kGaugeBosses);
 }
 
+void mark_awake(int entity, const char* why) {
+    if (!gauge_boss(entity) || !g_awake_bosses.insert(entity).second) return;
+    LOG_INFO("[coop] Boss %d: its fight began in this game (%s)", entity, why);
+}
+
+// A rest rebuilds characters, so a remembered answer is checked again before it is used.
+int gauge_boss_of(uint32_t chr) {
+    if (!chr) return 0;
+    const auto it = g_boss_of_chr.find(chr);
+    if (it != g_boss_of_chr.end() && chr_by_entity(it->second) == chr) return it->second;
+    for (int e : kGaugeBosses) {
+        if (chr_by_entity(e) != chr) continue;
+        g_boss_of_chr[chr] = e;
+        return e;
+    }
+    return 0;
+}
+
+// The boss of our first boss gauge (0 none), checked twice a second.
+int g_own_gauge_boss = 0;
+
+void own_gauge_tick() {
+    static double last = 0;
+    const double t = seconds();
+    if (t - last < 0.5) return;
+    last = t;
+    g_own_gauge_boss = 0;
+    uint32_t mm = 0;
+    if (game::loading() || !read32(kMenuManVar, &mm) || !mm) return;
+    for (uint32_t off : {0xF64u, 0xF78u}) {
+        uint32_t h = 0xFFFFFFFF;
+        if (!read32(mm + off, &h) || h == 0xFFFFFFFF) continue;
+        const int entity = gauge_boss_of(chr_of_handle(h));
+        if (!entity) continue;
+        if (!g_own_gauge_boss) g_own_gauge_boss = entity;
+        mark_awake(entity, "our boss gauge");
+    }
+}
+
+int own_gauge_boss() { return g_own_gauge_boss; }
+
+void note_teammate_boss(int entity) {
+    if (gauge_boss(entity) && chr_by_entity(entity)) mark_awake(entity, "a teammate's boss gauge");
+}
+
 void __stdcall note_ai_state(int entity, int state) {
     if (gauge_boss(entity)) {
         if (state) {
-            g_awake_bosses.insert(entity);
+            g_awake_bosses.insert(entity);  // the AI line below says so
         } else {
             g_awake_bosses.erase(entity);
         }
@@ -3369,10 +3462,14 @@ void anim_watch_tick() {
 }
 
 void note_event_anim(uint32_t chr, int anim) {
-    if (!g_state.active || GetCurrentThreadId() != g_main_thread || g_anim_lines >= 600 || !chr ||
-        chr == game::player()) {
-        return;
+    if (!g_state.active || GetCurrentThreadId() != g_main_thread || !chr || chr == game::player()) return;
+    if (g_cur_event) {
+        uint32_t team = 0;
+        if (read32(chr + 0x74, &team) && team == kBossTeam) {
+            if (const int boss = gauge_boss_of(chr)) mark_awake(boss, "an event animation on it");
+        }
     }
+    if (g_anim_lines >= 600) return;
     uint32_t id = 0, slot = 0, by = 0;
     if (g_cur_event) {
         read32(g_cur_event + 0x28, &id);
@@ -3816,6 +3913,7 @@ void tick() {
     track_bloodstain();
     track_watched_enemies();
     track_boss_control();
+    own_gauge_tick();
     anim_watch_tick();
     invader_walls_tick();
     if (!seamless_rules()) return;

@@ -148,7 +148,8 @@ struct InfoMore {
     uint8_t team_respawn;  // this player's respawn after a team wipe waits for the others' (kTeamRespawn)
     uint8_t respawn;       // where that respawn is for the death this player reports (kRespawnNone ...)
     uint8_t reset;         // this player's world's reload after a lost boss fight (kResetNone ..., world.cpp)
-    uint8_t reserved[4];
+    int32_t boss;          // the boss on this player's gauge (its entity), 0 none: its fight began in every game
+                           // that holds it, also where the fight's own runs stop short (rules::note_teammate_boss)
 };
 struct BonfireMsg {
     Header h;
@@ -1893,6 +1894,7 @@ void send_info() {
     more.team_respawn = 1;
     more.respawn = static_cast<uint8_t>(dead ? g_respawn : kRespawnNone);
     more.reset = g_reset;
+    more.boss = rules::own_gauge_boss();
     broadcast(more, false);
 }
 
@@ -2087,6 +2089,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!dead) p->respawn = kRespawnNone;
             if (more_ok) note_peer_respawn(p, more.respawn);
             p->reset = more_ok && more.reset <= kResetReady ? more.reset : kResetNone;
+            // A fallen player's gauge can outlast our own reload: only a standing teammate's fight is news here.
+            if (more_ok && more.boss && !p->invader && !dead && !game::loading()) rules::note_teammate_boss(more.boss);
             p->last_seen = now();
             break;
         }

@@ -343,7 +343,6 @@ void start_hold() {
     clear_death_tint();
     g_hold_since = now();
     g_fight_off_since = 0;
-    g_rested = false;
     g_view_at = now() + kViewDelay;
     g_told_waiting = false;
     LOG_INFO("[coop] We fell during %s with %d teammate(s) still standing: our death waits",
@@ -362,6 +361,10 @@ bool __stdcall death_event_passes(int kind, int entity) {
     if (kind != kKindDead || entity != kLocalPlayer) return true;
     if (g_hold) return false;
     if (g_passed) return true;
+    if (g_rested) {  // a rest came between our fall and this event (about 3 s): the world has reset already
+        release("someone rested at a bonfire");
+        return true;
+    }
     if (!hold_wanted()) {
         g_passed = true;
         return true;
@@ -435,6 +438,7 @@ void tick() {
             LOG_INFO("[coop] We live again while our death waited");
         }
         g_passed = false;
+        g_rested = false;
         return;
     }
     if (!g_hold) return;
@@ -466,7 +470,7 @@ void tick() {
 }
 
 void someone_rested() {
-    if (g_hold) g_rested = true;
+    if (g_hold || (world::local_dead() && !g_passed)) g_rested = true;
 }
 
 bool holding() { return g_hold; }

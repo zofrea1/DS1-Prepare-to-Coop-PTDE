@@ -809,32 +809,8 @@ static void death_watch_tick() {
     if (g_active && !g_invader && !g_death_warp && now() - g_death_at > kDeathStall) finish_death("15 s");
 }
 
-// Lua's print (luaB_print, 0x65AA80) writes each argument with fputs (0xAC2751) to a stdout nobody reads; the call
-// for the text (0x65AB01: push stdout; push text) is redirected, and in a session the death script's lines reach
-// the log.
-constexpr uint32_t kLuaPrintPut = 0x0065AB01;
-constexpr uint32_t kFputs = 0x00AC2751;
-
-static int __cdecl hk_lua_print(const char* text, void* file) {
-    static int lines = 0;
-    if (g_active && text && lines < 300) {
-        static const char* const kWatched[] = {"Death", "4000", "HostDead", "BossArea", "ChrType", "Mission",
-                                               "DEATH_STATE", "SetRestart", "TextWait"};
-        bool show = std::strcmp(text, "Normal") == 0;
-        for (const char* w : kWatched) show = show || std::strstr(text, w) != nullptr;
-        if (show) {
-            ++lines;
-            LOG_INFO("[coop] Lua: %s", text);
-        }
-    }
-    return reinterpret_cast<int(__cdecl*)(const char*, void*)>(kFputs)(text, file);
-}
-
 bool install() {
     int failed = 0;
-    if (!redirect_call(kLuaPrintPut, kFputs, reinterpret_cast<void*>(&hk_lua_print))) {
-        LOG_ERROR("[coop] Death diagnostic: Lua's print did not match this build (the death script is not logged)");
-    }
     if (!install_param_guard()) {
         ++failed;
         LOG_ERROR("[coop] Player param lookup guard did not match this build");

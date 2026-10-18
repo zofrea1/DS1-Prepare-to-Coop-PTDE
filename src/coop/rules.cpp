@@ -508,6 +508,7 @@ bool kick_prepare(bool dead) {
 }
 
 int clear_visited_temporary_flags();  // the death reload's reset of the maps' xxxx5xxx flags (below)
+constexpr int kDeathLatch = 4000;     // OnEvent_4000 starts a death only while it is off; a load at home clears it
 
 void __cdecl before_map_load() {
     g_marked = false;
@@ -533,8 +534,10 @@ void __cdecl before_map_load() {
         LOG_INFO("[coop] Map load stays in the host's world");
         if (g_place_bonfire) {
             const int n = clear_visited_temporary_flags();
+            const bool latch = game::flag(kDeathLatch);
+            if (latch) game::set_flag(kDeathLatch, false);
             LOG_INFO("[coop] Death reload: the host's world's temporary flags (xxxx5xxx) start over, as a load at home "
-                     "does (%d block(s))", n);
+                     "does (%d block(s)%s)", n, latch ? "; death flag 4000 cleared" : "");
         }
     }
 }
@@ -3499,7 +3502,8 @@ void track_bloodstain() {
             dead = true;
             died_at = here;
             died_known = true;
-            log_line("[coop] We died at (%.1f, %.1f, %.1f) map %08X", here.x, here.y, here.z, game::map_id());
+            log_line("[coop] We died at (%.1f, %.1f, %.1f) map %08X%s", here.x, here.y, here.z, game::map_id(),
+                     game::flag(kDeathLatch) ? " (death flag 4000 was already on: this death will not start)" : "");
         } else if (static_cast<int>(hp) > 0) {
             dead = false;
         }

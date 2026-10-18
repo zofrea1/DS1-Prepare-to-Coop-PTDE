@@ -223,12 +223,16 @@ reports being dead or loading is rebuilt once they are back.
 **A death that does not reach its respawn.** A death is the global script's chain `OnEvent_4000` ("YOU DIED") ->
 `SoloPlayDeath` -> `SoloPlayDeath_TextWait` -> `SoloPlayDeath_1` -> `SoloPlayDeath_2`, which asks for the respawn
 warp and clears flag 4000; `OnEvent_4000` ignores the death while a return to the title is asked for
-(`GetReturnState`, `[[0x13784A4]]` > 0). A guest who fell after the host once never got to the warp: no respawn for
-the rest of the session, and a rest changed nothing. The script's own lines are logged (Lua's `print`, whose
-`fputs` call at `0x65AB01` is redirected). A death that has not asked for its warp 15 s after it went ahead (not
-counting a wait for the fight, limbo, the team or an open menu such as the indictment menu) first has a return to
-the title that never happened dropped, then is finished with `SoloPlayDeath_2`; another player's rest finishes one
-that has waited over 10 s.
+(`GetReturnState`, `[[0x13784A4]]` > 0) and starts it only while flag 4000 is off. A guest who fell after the host
+once never got to the warp: no respawn for the rest of the session, and a rest changed nothing. In the 2026-10-17
+evening test every guest death after a death reload stalled with flag 4000 on and no return to the title: a load at
+home clears flag 4000, a guest's death reload stays in the host's world and kept it, so the next death never started.
+That reload now clears it with the temporary flags, and a death that begins with it still on says so in the log. A
+death that has not asked for its warp 15 s after it went ahead (not counting a wait for the fight, limbo, the team or
+an open menu such as the indictment menu) first has a return to the title that never happened dropped, then is
+finished with `SoloPlayDeath_2`; another player's rest finishes one that has waited over 10 s. A rest heard between
+a fall and its death event (about 3 s) counts as well: the death goes ahead instead of starting to wait for the
+fight that the rest has already reset.
 
 ### Invasions: arrival, boss fogs
 

@@ -769,8 +769,7 @@ double g_respawn_told = 0;  // guest: when we last told the host our warp waits
 double g_host_went_at = -100;
 // A rest after a lost boss fight (world.cpp): living players' worlds reload at their bonfires, as the fallen's do,
 // all at once (set_reset_phase). A fallen player waits as long as a teammate who reports a pending reload is heard
-// from: that teammate may be leveling at the bonfire. kResetHoldCap only ends a wait on one who is away for good.
-constexpr double kResetHoldCap = 120.0;
+// from (coop_member: within 10 s), however long that teammate stays in the bonfire menu; that teammate is told so.
 uint8_t g_reset = kResetNone;  // our reload
 bool g_reset_hold = false;     // our respawn waits for teammates' reloads
 
@@ -3312,8 +3311,6 @@ bool team_respawn_go() {
             why = "the session ended";
         } else if (!resetting_mate(kResetWaiting)) {
             why = "no teammate's reload is pending any more";
-        } else if (waited >= kResetHoldCap) {
-            why = "a teammate stays at the bonfire";
         }
         if (!why) return false;
         g_respawn_waiting = false;
@@ -3366,6 +3363,14 @@ bool resets_ready() {
     const std::vector<party::Remote> members = party::remotes();
     for (const auto& p : g_peers) {
         if (coop_member(p, members) && !p.dead && p.reset == kResetWaiting) return false;
+    }
+    return true;
+}
+
+bool heard_since(double t) {
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (coop_member(p, members) && p.last_seen <= t) return false;  // the hello or a player report
     }
     return true;
 }

@@ -112,6 +112,8 @@ constexpr uint8_t kResetNone = 0, kResetWaiting = 1, kResetReady = 2;
 void set_reset_phase(uint8_t phase);
 // No other living co-op player's reload after a lost boss fight still waits (each is ready, gone, or none).
 bool resets_ready();
+// Every co-op player has sent a player report since `t` (now()'s clock): their reload phase is as of then.
+bool heard_since(double t);
 // Every fallen co-op player (from 1.1.0 on) is at their respawn warp or past it.
 bool fallen_at_respawn();
 // Someone waits on our pending reload: a fallen co-op player held at their respawn warp, or a living one whose own

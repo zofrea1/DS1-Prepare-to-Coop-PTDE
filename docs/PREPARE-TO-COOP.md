@@ -246,14 +246,16 @@ animation on it (every one in the maps' events belongs to a fight), our own boss
 teammate reports it on theirs (`boss` in the 1.1.0 player report). The last two came from a second test: the guest
 fought the Taurus Demon far from the host, whose copy of the fight's run stopped at "wait for the leap to end" (an
 animation does not end on a copy the network moves), so the switch never came there and the host's rest left its
-fight going. A rest, ours or another player's, while such a boss still lives reloads that game at its bonfire. It is decided at the rest, before the rest restarts the events. Each
-such game reports its reload in the 1.1.0 player report (`reset`): waiting while its menus are open or a fallen
-player is not at their respawn warp yet (up to 15 s), then ready. The reloads go once none of them is still
-waiting, and the fallen's respawn warps go once none is pending, so every game reloads at once, as after a wipe. A
-fallen player waits as long as such a teammate is heard from (leveling at the bonfire can take a while), up to two
-minutes; the teammate is told every 8 s that the others are waiting for them to leave the bonfire (or close the
-menu). A guest's reload stays in the host's world and starts its copy of the host's temporary flags over, as a
-death reload does.
+fight going. A rest, ours or another player's, while such a boss still lives reloads that game at its bonfire. It is
+decided at the rest, before the rest restarts the events. Each such game reports its reload in the 1.1.0 player
+report (`reset`): waiting while its menus are open, until every teammate has sent a report since the rest (the rest's
+message is reliable and can arrive ahead of the rester's report that it waits), or while a fallen player is not at
+their respawn warp yet (up to 15 s), then ready. The reloads go once none of them is still waiting, and the fallen's
+respawn warps go once none is pending, so every game reloads at once, as after a wipe. A fallen player waits as long
+as such a teammate is heard from, with no time limit (leveling at the bonfire can take a while, and a fallen player
+who reloaded first would meet the old world's boss); the teammate is told every 8 s that the others are waiting for
+them to leave the bonfire (or close the menu). A guest's reload stays in the host's world and starts its copy of the
+host's temporary flags over, as a death reload does.
 
 **A death that does not reach its respawn.** A death is the global script's chain `OnEvent_4000` ("YOU DIED") ->
 `SoloPlayDeath` -> `SoloPlayDeath_TextWait` -> `SoloPlayDeath_1` -> `SoloPlayDeath_2`, which asks for the respawn

@@ -861,7 +861,9 @@ static void reset_tick() {
         return;
     }
     const double waited = now() - g_reset_since;
-    const bool ready = !menu_open() && !rules::cutscene_playing() &&
+    // The rest's message is reliable and can arrive ahead of the rester's report that its reload waits: until every
+    // teammate has reported since the rest, a reload phase of none is from before it.
+    const bool ready = !menu_open() && !rules::cutscene_playing() && session::heard_since(g_reset_since) &&
                        (session::fallen_at_respawn() || waited >= kResetWait);
     session::set_reset_phase(ready ? session::kResetReady : session::kResetWaiting);
     // The others' respawns and reloads wait while we sit in the bonfire menu (or another): we are told so, as they

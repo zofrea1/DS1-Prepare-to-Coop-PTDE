@@ -84,6 +84,7 @@ enum MsgType : uint8_t {
     kDropped = 20,     // host -> a player it dropped for silence who is talking again: go home
     kTeamRespawn = 21, // a team wipe (1.1.0): where my respawn is (guest -> host, host -> guests)
     kDeadList = 22,    // 1.1.0: my world's dead characters, to a fallen teammate (host -> guest, guest -> host)
+    kResetPhase = 23,  // 1.1.0, everyone -> everyone: my reload after a lost boss fight, for this rest (ResetPhase)
 };
 
 // kBossFight (1.1.0): a co-op guest waits for the host's or a guest's boss fight to end (1.0.0 takes it as a refusal).
@@ -160,6 +161,13 @@ struct BonfireMsg {
 struct Simple {
     Header h;
     uint32_t value;
+};
+// kRest's value is the rest's id (1.1.0: random, set by the one who rests and passed on by the host; 1.0.0: their
+// bonfire, or 0 passed on by a 1.0.0 host). Each player's reload phase is sent for the rest it answers.
+struct ResetPhase {
+    Header h;
+    uint32_t rest;
+    uint8_t phase;
 };
 struct PlayerEvent {
     Header h;
@@ -801,9 +809,13 @@ void share_dead_lists() {
 // waits for every fallen guest still at kRespawnNone; a guest waits for the host's kRespawnWent. Each change is a
 // message (kTeamRespawn), and the player report repeats it every second, also through the load.
 constexpr uint32_t kRespawnNone = 0, kRespawnWaiting = 1, kRespawnWent = 2;
+// With "went" (message and report): that reload keeps the world's dead (deadlist.cpp); without, it starts the world
+// over. A later death's reload follows it (wipe_reload).
+constexpr uint32_t kRespawnKept = 0x10, kRespawnPhase = 0x0F;
 constexpr double kHostWait = 15.0;   // the host waits this long for the guests' deaths to reach their warp
 constexpr double kGuestWait = 25.0;  // a guest waits this long for the host's warp (a host gone silent)
 uint32_t g_respawn = kRespawnNone;   // ours, for our current death
+bool g_respawn_kept = false;         // our current death's reload keeps the world's dead
 bool g_respawn_waiting = false;
 double g_respawn_since = 0;
 double g_respawn_told = 0;  // guest: when we last told the host our warp waits
@@ -814,6 +826,7 @@ double g_host_went_at = -100;
 // all at once (set_reset_phase). A fallen player waits as long as a teammate who reports a pending reload is heard
 // from (coop_member: within 10 s), however long that teammate stays in the bonfire menu; that teammate is told so.
 uint8_t g_reset = kResetNone;  // our reload
+uint32_t g_rest_id = 0;        // the last rest this game took (ours or another player's): kRest's value
 bool g_reset_hold = false;     // our respawn waits for teammates' reloads
 
 // Every other co-op player has fallen (and there is one). The dead stay dead in their reports until their
@@ -839,8 +852,13 @@ const PeerInfo* resetting_mate(uint8_t phase) {
 }
 
 // A player's report for their current death: it only moves forward (None -> Waiting -> Went) until they live again.
-void note_peer_respawn(PeerInfo* p, uint32_t phase) {
-    if (p && p->dead && phase > p->respawn && phase <= kRespawnWent) p->respawn = phase;
+void note_peer_respawn(PeerInfo* p, uint32_t value) {
+    const uint32_t phase = value & kRespawnPhase;
+    if (!p || !p->dead || phase <= p->respawn || phase > kRespawnWent) return;
+    p->respawn = phase;
+    if (phase != kRespawnWent) return;
+    p->went_kept = (value & kRespawnKept) != 0;
+    if (!p->went_kept) p->went_over_at = now();
 }
 
 // Host: the fallen co-op guests that will say where their respawn is, and the ones of them not at their warp yet.
@@ -858,7 +876,7 @@ void respawn_signal(uint32_t phase) {
     g_respawn = phase;
     Simple m{};
     fill_header(&m, kTeamRespawn);
-    m.value = phase;
+    m.value = phase | (phase == kRespawnWent && g_respawn_kept ? kRespawnKept : 0);
     if (g_role == Role::Host) {
         broadcast(m);
     } else if (g_host) {
@@ -1934,8 +1952,9 @@ void send_info() {
     i.ceremony = motion::local_loop_anim();
     more.boss_fight = world::boss_fight() ? 1 : 0;
     more.team_respawn = 1;
-    more.respawn = static_cast<uint8_t>(dead ? g_respawn : kRespawnNone);
-    more.reset = g_reset;
+    more.respawn = static_cast<uint8_t>(
+        dead ? g_respawn | (g_respawn == kRespawnWent && g_respawn_kept ? kRespawnKept : 0) : kRespawnNone);
+    more.reset = g_reset;  // not read from 1.1.0 on: kResetPhase carries it, reliably and for its rest
     more.boss = rules::own_gauge_boss();
     broadcast(more, false);
 }
@@ -2118,7 +2137,10 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             p->invader = m.invader != 0;
             const bool dead = m.dead != 0;
             if (!dead && (p->dead || p->alive_since == 0)) p->alive_since = now();
-            if (dead && !p->dead) p->respawn = kRespawnNone;  // a death we had not heard of
+            if (dead && !p->dead) {  // a death we had not heard of
+                p->respawn = kRespawnNone;
+                p->went_kept = false;
+            }
             p->dead = dead;
             p->light = m.light;
             p->char_name = m.char_name;
@@ -2127,10 +2149,16 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             const bool more_ok = as(&more);
             p->boss_fight = more_ok && more.boss_fight != 0;
             p->team_respawn = more_ok && more.team_respawn != 0;
-            if (more_ok && more.respawn == kRespawnWent && g_role == Role::Guest && from == g_host) g_host_went_at = now();
-            if (!dead) p->respawn = kRespawnNone;
+            if (more_ok && (more.respawn & kRespawnPhase) == kRespawnWent && g_role == Role::Guest && from == g_host) {
+                g_host_went_at = now();
+            }
+            if (!dead) {
+                p->respawn = kRespawnNone;
+                p->went_kept = false;
+            }
             if (more_ok) note_peer_respawn(p, more.respawn);
-            p->reset = more_ok && more.reset <= kResetReady ? more.reset : kResetNone;
+            // The reload phase (more.reset) is not taken from here: this report is unreliable, so one from before a
+            // rest can come after it (kResetPhase).
             // A fallen player's gauge can outlast our own reload: only a standing teammate's fight is news here.
             if (more_ok && more.boss && !p->invader && !dead && !game::loading()) rules::note_teammate_boss(more.boss);
             p->last_seen = now();
@@ -2166,17 +2194,27 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             break;
         }
         case kRest: {
-            if (g_role == Role::None) return;
+            Simple m{};
+            if (g_role == Role::None || !as(&m)) return;
             if (g_role == Role::Host) {
-                // a guest rested: reset here and tell the other guests
+                // a guest rested: reset here and tell the other guests (with the rest's id)
                 Simple r{};
                 fill_header(&r, kRest);
-                r.value = 0;
+                r.value = m.value;
                 broadcast(r, true, from);
             } else if (from != g_host) {
                 return;
             }
+            g_rest_id = m.value;
             world::remote_rest();
+            break;
+        }
+        case kResetPhase: {
+            ResetPhase m{};
+            if (!as(&m) || g_invade) return;
+            PeerInfo* p = peer(from);
+            p->reset = m.phase <= kResetReady ? m.phase : kResetNone;
+            p->reset_rest = m.rest;
             break;
         }
         case kFlags: {
@@ -2210,6 +2248,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (PeerInfo* p = peer(m.who)) {
                 p->dead = true;
                 p->respawn = kRespawnNone;  // a new death: its respawn has not reached the warp yet
+                p->went_kept = false;
                 ++p->death_events;  // their character here gets rebuilt (party::tick)
             }
             say(fmt(m.invader ? kMsgInvaderDied : kMsgDied, event_name(m)));
@@ -2227,7 +2266,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             Simple m;
             if (!as(&m) || g_invade || (g_role == Role::Guest && from != g_host)) return;
             // Every death's warp says it went (note_respawn_went); only a wipe waits on it.
-            if (g_role == Role::Guest && m.value == kRespawnWent) g_host_went_at = now();
+            if (g_role == Role::Guest && (m.value & kRespawnPhase) == kRespawnWent) g_host_went_at = now();
             PeerInfo* p = peer(from);
             const uint32_t was = p->respawn;
             note_peer_respawn(p, m.value);
@@ -2389,9 +2428,12 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
 
 void send_rest() {
     if (g_role == Role::None || !g_lobby) return;
+    static uint32_t n = 0;
+    g_rest_id = static_cast<uint32_t>(GetTickCount64()) * 2654435761u ^ static_cast<uint32_t>(steam::self()) ^ ++n;
+    if (!g_rest_id) g_rest_id = 1;
     Simple r{};
     fill_header(&r, kRest);
-    r.value = static_cast<uint32_t>(game::last_bonfire());
+    r.value = g_rest_id;
     if (g_role == Role::Host) {
         broadcast(r);
     } else if (g_host && g_step == Step::InWorld && !g_invade) {
@@ -3061,14 +3103,12 @@ void tick() {
             team_at = now();
             std::vector<spectate::Teammate> team;
             bool all_dead = true;
-            bool all_down = true;  // and none on the way back from a death of their own (world: a team wipe)
             const PeerInfo* boss_mate = nullptr;  // a living teammate with a boss gauge up (rules: bonfires wait)
             if (g_role != Role::None && !g_invade && !game::loading()) {
                 const std::vector<party::Remote> members = party::remotes();
                 for (const auto& p : g_peers) {
                     if (!coop_member(p, members)) continue;
                     all_dead &= p.dead;
-                    all_down &= p.dead && p.respawn != kRespawnWent;
                     if (!boss_mate && !p.dead && p.boss_fight && now() - p.last_seen <= 5.0) boss_mate = &p;
                     spectate::Teammate t;
                     t.id = p.id;
@@ -3080,7 +3120,6 @@ void tick() {
             }
             spectate::set_teammates(team);
             world::set_everyone_dead(!team.empty() && all_dead);
-            world::set_team_down(!team.empty() && all_down);
             if (!game::loading()) {
                 auto& st = rules::state();
                 if (boss_mate && !st.teammate_boss_fight) {
@@ -3408,10 +3447,19 @@ bool team_respawn_go() {
     return true;
 }
 
+void report_reset_phase() {
+    if (g_role == Role::None || !g_lobby || g_invade) return;
+    ResetPhase m{};
+    fill_header(&m, kResetPhase);
+    m.rest = g_rest_id;
+    m.phase = g_reset;
+    broadcast(m);
+}
+
 void set_reset_phase(uint8_t phase) {
     if (g_reset == phase) return;
     g_reset = phase;
-    if (g_role != Role::None && g_lobby) send_info();  // at once: the others' reloads or warps may be waiting on it
+    report_reset_phase();  // at once: the others' reloads or warps may be waiting on it
 }
 
 bool resets_ready() {
@@ -3422,12 +3470,29 @@ bool resets_ready() {
     return true;
 }
 
-bool heard_since(double t) {
+std::string reset_phase_missing() {
     const std::vector<party::Remote> members = party::remotes();
     for (const auto& p : g_peers) {
-        if (coop_member(p, members) && p.last_seen <= t) return false;  // the hello or a player report
+        if (coop_member(p, members) && p.team_respawn && p.reset_rest != g_rest_id) return utf8(shown_name(p));
     }
-    return true;
+    return {};
+}
+
+bool wipe_reload(double fell_at) {
+    const std::vector<party::Remote> members = party::remotes();
+    int n = 0;
+    for (const auto& p : g_peers) {
+        if (!coop_member(p, members)) continue;
+        ++n;
+        if (p.dead && p.respawn == kRespawnWent) {
+            if (p.went_kept) return false;  // their reload kept the world: ours keeps it too
+            continue;                       // their reload started it over: part of the wipe
+        }
+        if (p.dead) continue;  // down, not gone yet
+        if (p.went_over_at > 0 && p.went_over_at >= fell_at) continue;  // up again from the wipe's reload
+        return false;  // standing
+    }
+    return n > 0;
 }
 
 bool others_wait_on_reset() {
@@ -3447,9 +3512,10 @@ bool fallen_at_respawn() {
     return true;
 }
 
-void note_respawn_went() {
+void note_respawn_went(bool kept) {
     if (g_role == Role::None || g_invade || !g_lobby || g_respawn == kRespawnWent) return;
     if (g_role == Role::Guest && g_step != Step::InWorld) return;
+    g_respawn_kept = kept;
     respawn_signal(kRespawnWent);
 }
 

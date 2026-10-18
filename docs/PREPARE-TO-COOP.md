@@ -254,9 +254,13 @@ merged with the guests' (dead in any game is dead), and a guest's the host's lis
 the host does not have loaded. While a co-op teammate is down, the host sends a fallen guest its list, and a guest
 a fallen host its own, each time it changes (message 22, every 0.5 s at most); a list that comes during the load,
 before the load takes it, replaces the one given at the warp, so a kill during the load is kept too. A team wipe
-(every co-op player down at once at some point of the death, a teammate whose own respawn warp had already gone
-not counted: that one reloaded keeping the dead) and a rest during the death start the world over as before, and a
-load that did not take the list drops it. A player from before this gets no list and brings the world's
+and a rest during the death start the world over as before, and a load that did not take the list drops it. Which
+of the two a reload is, is decided when its warp goes, after any wait, and every game must decide the same for the
+same deaths: each player's "went" (message 21 and the player report) says whether its reload keeps the world, and a
+later reload follows the teammates that went before it. One that kept the world means ours keeps it too (the
+second of two deaths that came seconds apart, before either player had seen the other's); one that started it over
+is part of the same wipe (in a wipe the host's warp goes first, and the guests' follow it). With none gone yet, it
+is a wipe when every other co-op player is down. A player from before this gets no list and brings the world's
 dead back in their own game, as before.
 
 **A rest after a lost boss fight reloads too.** Only a load puts a boss fight back to its start: the boss, its fog
@@ -275,10 +279,12 @@ teammate reports it on theirs (`boss` in the 1.1.0 player report). The last two 
 fought the Taurus Demon far from the host, whose copy of the fight's run stopped at "wait for the leap to end" (an
 animation does not end on a copy the network moves), so the switch never came there and the host's rest left its
 fight going. A rest, ours or another player's, while such a boss still lives reloads that game at its bonfire. It is
-decided at the rest, before the rest restarts the events. Each such game reports its reload in the 1.1.0 player
-report (`reset`): waiting while its menus are open, until every teammate has sent a report since the rest (the rest's
-message is reliable and can arrive ahead of the rester's report that it waits), or while a fallen player is not at
-their respawn warp yet (up to 15 s), then ready. The reloads go once none of them is still waiting, and the fallen's
+decided at the rest, before the rest restarts the events. Every 1.1.0 game reports its reload phase for each rest
+(message 23, reliable, with the rest's id, which the rester puts in the rest's message and the host passes on): none,
+waiting or ready. The player report is not used for it: it is unreliable, so one from before the rest could come
+after it and read "none" for a reload that waits. A reloading game is waiting while its menus are open, until every
+teammate's phase for this rest has come (one that never answers is given up after 5 s), or while a fallen player is
+not at their respawn warp yet (up to 15 s), then ready. The reloads go once none of them is still waiting, and the fallen's
 respawn warps go once none is pending, so every game reloads at once, as after a wipe. A fallen player waits as long
 as such a teammate is heard from, with no time limit (leveling at the bonfire can take a while, and a fallen player
 who reloaded first would meet the old world's boss); the teammate is told every 8 s that the others are waiting for

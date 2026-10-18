@@ -27,9 +27,6 @@ void tick();
 void set_session(bool active, bool invader, bool invader_present);
 void set_players(int coop_players);       // players sharing the host's world, invaders not counted
 void set_everyone_dead(bool all_dead);    // every other player is dead too
-// Every other co-op player is down and none of them is already on the way back from a death of their own (their
-// respawn warp went): a death now is part of a team wipe.
-void set_team_down(bool down);
 // A local rest at a bonfire: `before` runs before the game's own rest (items), `fn` after it (tell the others).
 void set_rest_handler(void (*fn)());
 void set_before_rest_handler(void (*fn)());

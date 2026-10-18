@@ -63,8 +63,6 @@ int row_index(int id) {
 bool g_active = false, g_invader = false, g_invader_present = false;
 int g_players = 1;
 bool g_everyone_dead = false;
-bool g_team_down = false;    // every other co-op player is down, none on the way back already (session)
-bool g_death_wiped = false;  // so it was at some point of our current death: a team wipe
 bool g_was_alive = true;
 void (*g_rest_fn)() = nullptr;
 void (*g_death_fn)() = nullptr;
@@ -78,6 +76,7 @@ bool g_limbo = false;
 bool g_team_hold = false;   // a team wipe or a lost fight's reload: our respawn waits for the others' (session)
 bool g_team_asked = false;  // asked once per death: a second warp of the same death does not wait again
 double g_death_at = 0;          // our death, or the end of its wait (spectating, limbo, the team); 0 while we live
+double g_fell_at = 0;           // when we fell, for the death we are in
 bool g_death_warp = false;      // this death's respawn warp was asked for
 bool g_death_finished = false;  // finish_death ran for this death
 bool g_return_cleared = false;  // finish_death cleared a stale return to the title for this death
@@ -295,6 +294,7 @@ void __stdcall after_rest() {
     if (g_rest_fn && g_active && !g_invader) g_rest_fn();
     deadlist::note_rest();
     reset_after_rest("We");
+    session::report_reset_phase();  // for this rest, whether our world reloads or not
 }
 
 __declspec(naked) void hk_regene() {
@@ -321,14 +321,16 @@ bool limbo_wanted() {
 
 // Our death's respawn warp goes. In a session with a co-op teammate the reload keeps the world's dead characters
 // dead, as they are in the other games (deadlist.cpp): a death costs a Crimson Blossom, not the world. A team wipe
-// starts the world over in every game, and so does a rest (deadlist::note_rest).
-void keep_dead_on_reload() {
-    if (!g_active || g_invader || !local_dead() || g_players < 2) return;
-    if (g_death_wiped) {
+// starts the world over in every game, and so does a rest (deadlist::note_rest). Decided now, when the warp goes,
+// after any wait: the teammates whose respawn went before ours say how theirs went, and ours follows them
+// (session::wipe_reload). True when the reload keeps the world (the others are told with our "went").
+bool keep_dead_on_reload() {
+    if (!g_active || g_invader || !local_dead() || g_players < 2) return false;
+    if (session::wipe_reload(g_fell_at)) {
         LOG_INFO("[coop] Team wipe: our reload starts the world over");
-        return;
+        return false;
     }
-    deadlist::arm(game::own_world());
+    return deadlist::arm(game::own_world());
 }
 
 // The game's own ways of sending a summoned player home (the host left or died, the room is gone, a kick) end
@@ -392,10 +394,7 @@ char __cdecl hk_warp_kick() {
     }
     // Before the original body sets the warp request. A death is aimed at the bonfire; the empty map is not loaded.
     if (!g_bypass && rules::prepare_warp_kick(local_dead())) return 1;
-    if (!g_bypass && g_active && local_dead()) {
-        session::note_respawn_went();
-        keep_dead_on_reload();
-    }
+    if (!g_bypass && g_active && local_dead()) session::note_respawn_went(keep_dead_on_reload());
     return g_warp_orig();
 }
 
@@ -452,8 +451,7 @@ bool install_boss_fog() {
 // The respawn warp that waited (limbo, a team wipe) goes ahead.
 void respawn_now() {
     if (rules::prepare_warp_kick(local_dead())) return;
-    if (g_active) session::note_respawn_went();
-    keep_dead_on_reload();
+    if (g_active) session::note_respawn_went(keep_dead_on_reload());
     g_bypass = true;
     g_warp_orig();
     g_bypass = false;
@@ -843,9 +841,11 @@ static void death_watch_tick() {
 // and ours waits for our menus to close (a load is not started from one).
 constexpr double kResetWait = 15.0;  // our reload waits this long for the fallen to reach their respawn warp
 constexpr double kResetNag = 8.0;    // how often we are told that others wait on our menu (the line fades)
+constexpr double kPhaseWait = 5.0;   // a teammate whose reload phase for the rest never comes is given up after it
 static int g_reset_boss = 0;         // the boss whose lost fight our reload starts over (0 none)
 static double g_reset_since = 0;
 static double g_reset_told = 0;      // when we were last told that the others wait on our menu
+static bool g_phase_given_up = false;
 
 static void drop_reset(const char* why) {
     LOG_INFO("[coop] Lost boss fight: our world does not reload (%s)", why);
@@ -860,6 +860,7 @@ static void reset_after_rest(const char* who) {
     g_reset_boss = boss;
     g_reset_since = now();
     g_reset_told = 0;
+    g_phase_given_up = false;
     session::set_reset_phase(session::kResetWaiting);
     LOG_INFO("[coop] %s rested while boss %d is awake in this game: its fight was lost, our world reloads at our "
              "bonfire with the fallen",
@@ -881,9 +882,15 @@ static void reset_tick() {
         return;
     }
     const double waited = now() - g_reset_since;
-    // The rest's message is reliable and can arrive ahead of the rester's report that its reload waits: until every
-    // teammate has reported since the rest, a reload phase of none is from before it.
-    const bool ready = !menu_open() && !rules::cutscene_playing() && session::heard_since(g_reset_since) &&
+    // Each teammate's reload phase comes for the rest it answers (kResetPhase): until every one for this rest is in,
+    // the phase we hold for them may be from before it.
+    const std::string missing = session::reset_phase_missing();
+    if (!missing.empty() && waited >= kPhaseWait && !g_phase_given_up) {
+        g_phase_given_up = true;
+        LOG_INFO("[coop] Lost boss fight: no reload phase from %s for this rest after %.0f s; not waited for",
+                 missing.c_str(), kPhaseWait);
+    }
+    const bool ready = !menu_open() && !rules::cutscene_playing() && (missing.empty() || waited >= kPhaseWait) &&
                        (session::fallen_at_respawn() || waited >= kResetWait);
     session::set_reset_phase(ready ? session::kResetReady : session::kResetWaiting);
     // The others' respawns and reloads wait while we sit in the bonfire menu (or another): we are told so, as they
@@ -959,7 +966,10 @@ void configure(const Config& cfg) {
 void tick() {
     const uint32_t me = game::player();
     const bool alive = me && hp(me) > 0;
-    if (me && g_was_alive && !alive && g_active && g_death_fn) g_death_fn();
+    if (me && g_was_alive && !alive) {
+        g_fell_at = now();
+        if (g_active && g_death_fn) g_death_fn();
+    }
     if (me) g_was_alive = alive;
     // The debuff follows the Crimson Blossoms in the inventory (effects do not survive a map load).
     if (me && alive && !game::loading()) {
@@ -983,11 +993,6 @@ void tick() {
         }
     }
     if (!local_dead()) g_team_asked = false;  // alive again, or loading (no character)
-    if (!local_dead()) {
-        g_death_wiped = false;
-    } else if (g_team_down) {
-        g_death_wiped = true;
-    }
     deadlist::tick();
     death_watch_tick();
     reset_tick();
@@ -1015,14 +1020,11 @@ void set_session(bool active, bool invader, bool invader_present) {
     if (!active) {
         g_players = 1;
         g_everyone_dead = false;
-        g_team_down = false;
     }
 }
 
 void set_players(int coop_players) { g_players = std::max(1, coop_players); }
 void set_everyone_dead(bool all_dead) { g_everyone_dead = all_dead; }
-
-void set_team_down(bool down) { g_team_down = down; }
 void set_rest_handler(void (*fn)()) { g_rest_fn = fn; }
 void set_before_rest_handler(void (*fn)()) { g_before_rest_fn = fn; }
 void set_death_handler(void (*fn)()) { g_death_fn = fn; }
@@ -1055,6 +1057,7 @@ void remote_rest() {
     deadlist::note_rest();
     spectate::someone_rested();
     reset_after_rest("Another player");
+    session::report_reset_phase();  // for this rest, whether our world reloads or not
     // A death that is not waiting for the fight but is stuck before its respawn goes ahead too.
     // (An ordinary death reaches its warp in about 8 s; one that has not after 10 s is stuck.)
     if (local_dead() && g_active && !g_invader && !g_death_warp && !spectate::holding() && g_death_at != 0 &&

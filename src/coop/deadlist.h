@@ -24,8 +24,9 @@ void note_list(uint64_t from, bool from_host, const uint8_t* data, size_t size);
 // A rest, ours or another player's: the world starts over in every game, and the lists from before it are void.
 void note_rest();
 // Our death's respawn warp goes (an individual death in a session, not a team wipe): the reload keeps the world's
-// dead, ours merged with the host's (a guest) or the guests' (the host).
-void arm(bool host);
+// dead, ours merged with the host's (a guest) or the guests' (the host). False when it does not (a rest during our
+// death, or no list): the reload starts the world over.
+bool arm(bool own_world);
 // Per frame, game thread: drops the kept lists once we live again, and a list the load did not take.
 void tick();
 

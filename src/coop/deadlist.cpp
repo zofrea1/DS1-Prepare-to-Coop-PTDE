@@ -248,19 +248,20 @@ void note_rest() {
     LOG_INFO("[coop] A rest during our load: our reload starts the world over too");
 }
 
-void arm(bool own_world) {
+bool arm(bool own_world) {
     if (g_rested) {
         LOG_INFO("[coop] A rest came during our death: our reload starts the world over, as everyone's did");
-        return;
+        return false;
     }
     const std::vector<uint8_t> raw = build();
     if (!parse(raw.data(), raw.size(), &g_ours)) {
         LOG_INFO("[coop] Our world's dead characters could not be read: our reload starts the world over");
-        return;
+        return false;
     }
     g_armed_own = own_world;
     g_loading_seen = false;
     g_armed = give("Our death's respawn warp goes");
+    return g_armed;
 }
 
 void tick() {

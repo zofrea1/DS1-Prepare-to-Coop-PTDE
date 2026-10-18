@@ -509,10 +509,14 @@ bool kick_prepare(bool dead) {
 
 int clear_visited_temporary_flags();  // the death reload's reset of the maps' xxxx5xxx flags (below)
 constexpr int kDeathLatch = 4000;     // OnEvent_4000 starts a death only while it is off; a load at home clears it
+// The bosses an event woke in this game since its last load (note_ai_state); every load puts them back to sleep.
+std::set<int> g_awake_bosses;
+bool g_reset_reload = false;  // this load is a living guest's reload after a lost boss fight (arm_reset_reload)
 
 void __cdecl before_map_load() {
     g_marked = false;
     g_bonfire_spawn = false;
+    g_awake_bosses.clear();
     // A walk, a follow, or the trip home did not come from the death warp. Drop a stale request so the
     // next placement is not pulled onto the bonfire. The death load itself still has the flag, because
     // the warp set it and this constructor is the first step of that load.
@@ -536,8 +540,9 @@ void __cdecl before_map_load() {
             const int n = clear_visited_temporary_flags();
             const bool latch = game::flag(kDeathLatch);
             if (latch) game::set_flag(kDeathLatch, false);
-            LOG_INFO("[coop] Death reload: the host's world's temporary flags (xxxx5xxx) start over, as a load at home "
-                     "does (%d block(s)%s)", n, latch ? "; death flag 4000 cleared" : "");
+            LOG_INFO("[coop] %s: the host's world's temporary flags (xxxx5xxx) start over, as a load at home does (%d "
+                     "block(s)%s)", g_reset_reload ? "Reload after a lost boss fight" : "Death reload", n,
+                     latch ? "; death flag 4000 cleared" : "");
         }
     }
 }
@@ -548,6 +553,7 @@ void __cdecl after_map_load() {
     g_bonfire_spawn = false;
     // The placement step is still ahead of this. It reads g_place_bonfire, which stays set.
     g_death_respawn = false;
+    g_reset_reload = false;
 }
 
 // True: jump to 0xEEFCFB. The compare itself is not executed, so the join map is left alone.
@@ -2907,6 +2913,21 @@ int install_one(const char* what, bool ok) {
 
 bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
 
+void arm_reset_reload() {
+    if (!seamless_rules() || !g_state.guest || g_state.invader) return;
+    g_death_respawn = true;
+    g_reset_reload = true;
+}
+
+int awake_boss() {
+    for (int entity : g_awake_bosses) {
+        const uint32_t chr = chr_by_entity(entity);
+        uint32_t hp = 0;
+        if (chr && read32(chr + 0x2D4, &hp) && static_cast<int>(hp) > 0) return entity;
+    }
+    return 0;
+}
+
 State& state() { return g_state; }
 
 bool disasters_active() {
@@ -3079,7 +3100,12 @@ bool ai_off_here(uint32_t chr) {
     return read32(chr + 0x28, &ctrl) && ctrl && read8(ctrl + 0xC0, &ai) && !(ai & 1);
 }
 
-uint32_t __stdcall hk_net_priority(uint32_t chr) {
+// The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
+uint32_t g_watch_chr = 0;
+uint32_t g_watch_bid = 0;
+double g_watch_bid_at = -100;
+
+uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
     const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
     if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
@@ -3110,6 +3136,15 @@ uint32_t __stdcall hk_net_priority(uint32_t chr) {
             }
             return 0;
         }
+    }
+    return bid;
+}
+
+uint32_t __stdcall hk_net_priority(uint32_t chr) {
+    const uint32_t bid = net_priority(chr);
+    if (chr == g_watch_chr) {
+        g_watch_bid = bid;
+        g_watch_bid_at = seconds();
     }
     return bid;
 }
@@ -3150,7 +3185,8 @@ void track_watched_enemies() {
 // whether their AI is on in this game (Set Character AI State: ChrCtrl+0xC0 bit 0, 0xD6C3F0) and what this game bids,
 // for the 2026-10-17 report. After a team wipe the guest walked into the Asylum Demon's hall first, and the demon
 // then fought only while the host stood close to it and paused when the host walked away. Logged when that changes
-// and every 10 s during the fight.
+// and every 10 s during the fight. The bosses an event woke in this game are followed too, gauge or not: a player who
+// waits outside the fight has no gauge, but their game still runs the boss (2026-10-18).
 constexpr uint32_t kMenuManVar = 0x013786D0;
 
 uint32_t chr_of_handle(uint32_t handle) {
@@ -3170,16 +3206,39 @@ void track_boss_control() {
     const double t = seconds();
     if (t - last < 0.5 || lines > 300 || !g_state.active || game::loading()) return;
     last = t;
-    static std::map<uint32_t, std::pair<int, double>> seen;  // gauge handle -> (state, last line)
+    static std::map<uint32_t, std::pair<int, double>> seen;  // character -> (state, last line)
+    // The characters: (character, entity or 0, gauge handle or -1).
+    struct Followed {
+        uint32_t chr;
+        int entity;
+        uint32_t gauge;
+    };
+    std::vector<Followed> bosses;
     uint32_t mm = 0;
-    if (!read32(kMenuManVar, &mm) || !mm) return;
-    for (uint32_t off : {0xF64u, 0xF78u}) {
-        uint32_t h = 0xFFFFFFFF, current = 0, own_ai = 0, net_ai = 0, ctrl = 0, engage = 0, authority = 0;
+    if (read32(kMenuManVar, &mm) && mm) {
+        for (uint32_t off : {0xF64u, 0xF78u}) {
+            uint32_t h = 0xFFFFFFFF;
+            if (!read32(mm + off, &h) || h == 0xFFFFFFFF) continue;
+            if (const uint32_t chr = chr_of_handle(h)) bosses.push_back({chr, 0, h});
+        }
+    }
+    for (int entity : g_awake_bosses) {
+        const uint32_t chr = chr_by_entity(entity);
+        if (!chr) continue;
+        bool known = false;
+        for (auto& b : bosses) {
+            if (b.chr != chr) continue;
+            b.entity = entity;
+            known = true;
+        }
+        if (!known) bosses.push_back({chr, entity, 0xFFFFFFFF});
+    }
+    for (const Followed& b : bosses) {
+        const uint32_t chr = b.chr;
+        uint32_t current = 0, own_ai = 0, net_ai = 0, ctrl = 0, engage = 0, authority = 0;
         uint8_t ai = 0;
         game::Vec3 at{}, me{};
-        if (!read32(mm + off, &h) || h == 0xFFFFFFFF) continue;
-        const uint32_t chr = chr_of_handle(h);
-        if (!chr || !read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai) ||
+        if (!read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai) ||
             !read32(chr + 0x28, &ctrl) || !read8(ctrl + 0xC0, &ai) || !game::chr_position(chr, &at)) {
             continue;
         }
@@ -3187,14 +3246,20 @@ void track_boss_control() {
         read32(chr + 0x204, &authority);
         const int control = current == own_ai ? 1 : current == net_ai ? 2 : 0;
         const int state = control * 2 + (ai & 1);
-        auto& s = seen[h];
+        auto& s = seen[chr];
         if (state == s.first && t - s.second < 10.0) continue;
         s = {state, t};
         game::position(&me, nullptr);
         ++lines;
-        LOG_INFO("[coop] Boss %08X: moved by %s, its AI %s in this game (engagement %u, authority %u), at (%.1f, %.1f, "
+        char name[48];
+        if (b.entity) {
+            sprintf_s(name, "%d%s", b.entity, b.gauge == 0xFFFFFFFF ? " (no gauge here)" : "");
+        } else {
+            sprintf_s(name, "%08X", b.gauge);
+        }
+        LOG_INFO("[coop] Boss %s: moved by %s, its AI %s in this game (engagement %u, authority %u), at (%.1f, %.1f, "
                  "%.1f), %.0f m from us",
-                 h, control == 1 ? "this game (own AI)" : control == 2 ? "another game (network)" : "neither (?)",
+                 name, control == 1 ? "this game (own AI)" : control == 2 ? "another game (network)" : "neither (?)",
                  (ai & 1) ? "on" : "off", engage, authority, at.x, at.y, at.z, dist3(me, at));
     }
 }
@@ -3202,11 +3267,31 @@ void track_boss_control() {
 // Set Character AI State (0xD6C3F0: eax = entity, stdcall(state); from EMEVD 2004[01] at 0xBC299A and from Lua at
 // 0xD5FDA4) on a boss (team 7): logged with the event that ran it and whether another player's game started that
 // run (event sync), to see which run decides a boss's AI in each game (diagnostic).
+// The same calls tell which bosses are awake in this game (awake_boss): a boss fight's events wake the boss when the
+// fight begins (all but four of the bosses below: 1410802, 1510801, 1510811 and 1600800 are never switched on) and
+// put it to sleep when it starts over.
 constexpr uint32_t kSetAiState = 0x00D6C3F0;
 constexpr uint32_t kBossTeam = 7;  // chr+0x74 of a boss
 void* g_set_ai_orig = nullptr;
+// The bosses with a health bar: the entities of every "Display Boss Health Bar" (2003[11]) in the maps' events,
+// the DLC's included.
+constexpr int kGaugeBosses[] = {1000800, 1010700, 1010750, 1010800, 1010801, 1100160, 1200800, 1200801,
+                                1210401, 1210800, 1210820, 1210840, 1300800, 1310800, 1400800, 1410400,
+                                1410600, 1410700, 1410802, 1500800, 1510650, 1510800, 1510801, 1510810,
+                                1510811, 1600800, 1600810, 1700700, 1700800, 1800800, 1810800, 1810810};
+
+bool gauge_boss(int entity) {
+    return std::find(std::begin(kGaugeBosses), std::end(kGaugeBosses), entity) != std::end(kGaugeBosses);
+}
 
 void __stdcall note_ai_state(int entity, int state) {
+    if (gauge_boss(entity)) {
+        if (state) {
+            g_awake_bosses.insert(entity);
+        } else {
+            g_awake_bosses.erase(entity);
+        }
+    }
     if (!g_state.active) return;
     static int lines = 0;
     if (lines >= 80) return;
@@ -3236,6 +3321,95 @@ __declspec(naked) void hk_set_ai() {
         popad
         jmp dword ptr [g_set_ai_orig]
     }
+}
+
+// Event animations forced on a boss or a watched enemy (EMEVD 2003[18] -> 0xD719C0 -> the ChrIns event animation
+// 0xE69590, which motion.cpp's hook passes on): the event that ran it here and whether another player's game started
+// that run, then four times a second for 8 s which game moves the character, where it is, whether the animation
+// still plays in this game (the request at [chr+0x10]+4) and what this game bids for it. For the 2026-10-18 report:
+// the Asylum Demon played its leap from the perch (9060) in both games and stayed on the perch, with the host at the
+// bonfire and control passing between the games; the Hellkite's flights go astray the same way.
+constexpr double kAnimWatchTime = 8.0;
+int g_watch_entity = 0;
+int g_watch_anim = 0;
+double g_watch_from = 0;
+double g_watch_next = 0;
+int g_anim_lines = 0;
+
+const char* mover(uint32_t chr) {
+    uint32_t current = 0, own_ai = 0, net_ai = 0;
+    if (!read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai)) return "?";
+    return current == own_ai ? "this game (own AI)" : current == net_ai ? "another game (network)" : "neither (?)";
+}
+
+void anim_watch_tick() {
+    if (!g_watch_chr) return;
+    const double t = seconds();
+    if (t - g_watch_from > kAnimWatchTime || game::loading() || g_anim_lines >= 600 ||
+        chr_by_entity(g_watch_entity) != g_watch_chr) {
+        g_watch_chr = 0;
+        return;
+    }
+    if (t < g_watch_next) return;
+    g_watch_next = t + 0.25;
+    uint32_t request = 0;
+    int32_t playing = -1;
+    game::Vec3 at{};
+    if (!game::chr_position(g_watch_chr, &at)) return;
+    if (read32(g_watch_chr + 0x10, &request) && request) read32(request + 4, reinterpret_cast<uint32_t*>(&playing));
+    char bid[24] = "none lately";
+    if (t - g_watch_bid_at <= 0.5) sprintf_s(bid, "%u", g_watch_bid);
+    ++g_anim_lines;
+    LOG_INFO("[coop] Event animation %d on %d, +%.2f s: moved by %s, event animation %d here, AI %s, at (%.1f, %.1f, "
+             "%.1f), our bid %s",
+             g_watch_anim, g_watch_entity, t - g_watch_from, mover(g_watch_chr), playing,
+             ai_off_here(g_watch_chr) ? "off" : "on", at.x, at.y, at.z, bid);
+}
+
+void note_event_anim(uint32_t chr, int anim) {
+    if (!g_state.active || GetCurrentThreadId() != g_main_thread || g_anim_lines >= 600 || !chr ||
+        chr == game::player()) {
+        return;
+    }
+    uint32_t id = 0, slot = 0, by = 0;
+    if (g_cur_event) {
+        read32(g_cur_event + 0x28, &id);
+        read32(g_cur_event + 0x2C, &slot);
+        read32(g_cur_event + 0x44, &by);
+    }
+    const bool remote_run = static_cast<int>(by) >= 10001 && static_cast<int>(by) <= 10010;
+    // Another animation on the character being watched (from an event, the network or the engine) is logged too.
+    if (chr == g_watch_chr && seconds() - g_watch_from <= kAnimWatchTime) {
+        ++g_anim_lines;
+        LOG_INFO("[coop] Event animation %d on %d, +%.2f s: animation %d starts here (%s %d%s)", g_watch_anim,
+                 g_watch_entity, seconds() - g_watch_from, anim, g_cur_event ? "event" : "not an event",
+                 static_cast<int>(id), remote_run ? ", a run another player's game started" : "");
+        return;
+    }
+    if (!g_cur_event) return;
+    int entity = 0;
+    for (int e : kWatchedEnemies) {
+        if (chr_by_entity(e) == chr) entity = e;
+    }
+    uint32_t team = 0;
+    if (!entity && read32(chr + 0x74, &team) && team == kBossTeam) {
+        for (int e : kGaugeBosses) {
+            if (chr_by_entity(e) != chr) continue;
+            entity = e;
+            break;
+        }
+    }
+    if (!entity) return;
+    g_watch_chr = chr;
+    g_watch_entity = entity;
+    g_watch_anim = anim;
+    g_watch_from = seconds();
+    g_watch_next = 0;
+    g_watch_bid_at = -100;
+    ++g_anim_lines;
+    LOG_INFO("[coop] Event animation %d on %d by event %d (slot %d)%s", anim, entity, static_cast<int>(id),
+             static_cast<int16_t>(slot & 0xFFFF), remote_run ? ", a run another player's game started" : "");
+    anim_watch_tick();
 }
 
 int install() {
@@ -3640,6 +3814,7 @@ void tick() {
     track_bloodstain();
     track_watched_enemies();
     track_boss_control();
+    anim_watch_tick();
     invader_walls_tick();
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();

@@ -5,6 +5,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "rules.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -98,6 +99,7 @@ void queue(const Anim& a) {
 }
 
 void __stdcall note_anim_start(uint32_t chr, int anim, uint32_t loop) {
+    if (chr && !g_replaying && chr != game::player()) rules::note_event_anim(chr, anim);
     if (g_replaying || !g_enabled || !chr || chr != game::player()) return;
     const bool looped = (loop & 0xFF) != 0;
     if (!synced_anim(anim)) {

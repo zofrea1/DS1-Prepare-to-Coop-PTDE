@@ -22,6 +22,8 @@
 
 namespace coop::world {
 
+static void reset_after_rest(const char* who);  // a rest after a lost boss fight (below)
+
 namespace {
 
 // ---------------------------------------------------------------- addresses
@@ -69,7 +71,7 @@ using CharFn = char(__cdecl*)();
 CharFn g_warp_orig = nullptr;
 bool g_bypass = false;
 bool g_limbo = false;
-bool g_team_hold = false;   // a team wipe: our respawn waits for the other players' (session::team_respawn_wait)
+bool g_team_hold = false;   // a team wipe or a lost fight's reload: our respawn waits for the others' (session)
 bool g_team_asked = false;  // asked once per death: a second warp of the same death does not wait again
 double g_death_at = 0;          // our death, or the end of its wait (spectating, limbo, the team); 0 while we live
 bool g_death_warp = false;      // this death's respawn warp was asked for
@@ -287,6 +289,7 @@ void __stdcall before_rest(int object_id) {
 
 void __stdcall after_rest() {
     if (g_rest_fn && g_active && !g_invader) g_rest_fn();
+    reset_after_rest("We");
 }
 
 __declspec(naked) void hk_regene() {
@@ -809,6 +812,75 @@ static void death_watch_tick() {
     if (g_active && !g_invader && !g_death_warp && now() - g_death_at > kDeathStall) finish_death("15 s");
 }
 
+// ---------------------------------------------------------------- a rest after a lost boss fight
+// Only a load puts a boss fight back to its start: the boss, its fog and its flags. A rest restarts some of the
+// fight's events, but they end at once when the fight has begun (the Asylum Demon's 11810310 while 11810314 is on,
+// the Taurus Demon's 11015382 while its own flag is on), and the flags they test are cleared only by a load. In
+// vanilla nobody rests during a fight, and a lost fight always ends in a load. In a session every game in the map
+// runs the fight's events, so a teammate who waited outside keeps the fight going in their game after the fighters
+// fell: the boss stays awake there, wins the network's bids against the games that reloaded (where it sleeps again)
+// and walks into them without its health bar or its music (2026-10-18: the host rested to bring back the guest who
+// fell to the Asylum Demon). So a rest while a boss that woke in this game still lives (rules::awake_boss) reloads
+// this game at its bonfire, as the fighters' deaths reload theirs. It is decided at the rest: most bosses' setup
+// events put the boss to sleep again when the rest restarts them (Gaping Dragon 11005392, Ornstein and Smough
+// 11515392), but the fight's other state (the boss-room flag 11xx5393, where the boss stands, its fog) stays. The
+// reloads start together (the fallen's respawn warps and ours wait for each other: session::set_reset_wait), so that
+// no game's old world feeds another's new one, and ours waits for the bonfire menu to close.
+constexpr double kResetWait = 15.0;  // our reload waits this long for the fallen to reach their respawn warp
+static int g_reset_boss = 0;         // the boss whose lost fight our reload starts over (0 none)
+static double g_reset_since = 0;
+
+static void drop_reset(const char* why) {
+    LOG_INFO("[coop] Lost boss fight: our world does not reload (%s)", why);
+    g_reset_boss = 0;
+    session::set_reset_wait(false);
+}
+
+static void reset_after_rest(const char* who) {
+    if (!g_active || g_invader || g_reset_boss || local_dead()) return;
+    const int boss = rules::awake_boss();
+    if (!boss) return;
+    g_reset_boss = boss;
+    g_reset_since = now();
+    session::set_reset_wait(true);
+    LOG_INFO("[coop] %s rested while boss %d is awake in this game: its fight was lost, our world reloads at our "
+             "bonfire with the fallen",
+             who, boss);
+}
+
+static void reset_tick() {
+    if (!g_reset_boss) return;
+    const char* drop = nullptr;
+    if (!g_active || g_invader) {
+        drop = "the session ended";
+    } else if (game::loading() || !game::player()) {
+        drop = "a load starts it over anyway";
+    } else if (local_dead()) {
+        drop = "we fell: our death reloads it";
+    }
+    if (drop) {
+        drop_reset(drop);
+        return;
+    }
+    if (menu_open() || rules::cutscene_playing()) return;
+    const double waited = now() - g_reset_since;
+    if (!session::fallen_at_respawn() && waited < kResetWait) return;
+    const int bonfire = session::guest() ? session::guest_respawn_bonfire() : game::last_bonfire();
+    const int map = game::bonfire_map(bonfire);
+    if (map == -1) {
+        drop_reset("no bonfire to reload at");
+        return;
+    }
+    LOG_INFO("[coop] Lost boss fight: our world reloads at bonfire %d after %.1f s (boss %d)", bonfire, waited,
+             g_reset_boss);
+    g_reset_boss = 0;
+    session::set_reset_wait(false);
+    text::show(L"The boss fight was lost: the world starts over");
+    *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
+    rules::arm_reset_reload();
+    warp_now(map, -1);
+}
+
 bool install() {
     int failed = 0;
     if (!install_param_guard()) {
@@ -879,6 +951,7 @@ void tick() {
     }
     if (!local_dead()) g_team_asked = false;  // alive again, or loading (no character)
     death_watch_tick();
+    reset_tick();
     if (g_team_hold) {
         if (!local_dead()) {
             g_team_hold = false;  // a load took over (the trip home) or we live again
@@ -938,6 +1011,7 @@ void remote_rest() {
     }
     g_rest_heard = true;
     spectate::someone_rested();
+    reset_after_rest("Another player");
     // A death that is not waiting for the fight but is stuck before its respawn goes ahead too.
     // (An ordinary death reaches its warp in about 8 s; one that has not after 10 s is stuck.)
     if (local_dead() && g_active && !g_invader && !g_death_warp && !spectate::holding() && g_death_at != 0 &&

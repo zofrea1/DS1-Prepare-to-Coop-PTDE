@@ -83,6 +83,16 @@ void set_separation_listener(void (*fn)(bool host));
 // when the kick itself must not run.
 bool prepare_warp_kick(bool dead);
 
+// A boss with a health bar that an event woke in this game since its last load and that still lives (its entity),
+// else 0. After a rest it means the fight was lost: only a load puts it back to sleep (world.cpp).
+int awake_boss();
+// The next load is a living guest's reload at its bonfire in the host's world after a lost boss fight: it is placed
+// and its copy of the host's world starts over as after a death.
+void arm_reset_reload();
+// An event animation starts on a character other than ours (motion.cpp's hook): bosses and watched enemies are
+// followed for a few seconds in the log (diagnostic).
+void note_event_anim(uint32_t chr, int anim);
+
 // Per-frame record of where the local player stood, for the bloodstain of a guest who dies in the host's world.
 void track_safe_position();
 

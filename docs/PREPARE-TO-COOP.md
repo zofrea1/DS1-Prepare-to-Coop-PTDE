@@ -82,7 +82,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Fog walls | The white walls that keep phantoms in the host's area are gone (boss fog stays). |
 | World events | Every player's game runs the world's scripted events, not only the host's (`GuestWorldEvents`): a guest exploring alone meets the Hellkite on the Undead Burg bridge, starts boss fights, rides lifts and gets the event rewards. Progress (event flags) is shared. |
 | Host travel | When the host warps by bonfire, the guests follow to the same bonfire. A guest's own bonfire warp does nothing. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later ("The power of the homeward bone consumes you..."). Guests cannot use Homeward Bones. |
-| Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn), and a teammate who fell and is spectating respawns. While a living teammate is in a boss fight nobody can rest (the bonfire is out of use, as with enemies nearby), so the boss is not reset in the middle of their fight. The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
+| Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn), and a teammate who fell and is spectating respawns. While a living teammate is in a boss fight nobody can rest (the bonfire is out of use, as with enemies nearby), so the boss is not reset in the middle of their fight. If everyone in a boss fight fell while others waited outside, the rest that brings them back also reloads the world of every living player whose game had the boss awake, together with the fallen, so the boss starts over for everyone: the one who rested stays at that bonfire, another player in the area goes to their last bonfire. The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
 | Progress | Event flags changed in the session's world are shared with everyone, and a guest's flags are written to their own world too: progress made together carries home. A disaster of the host's world (the black phantoms of black World Tendency or the Cursed Pendant) stays there. |
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency (a player can also curse their own world without a session), and lifts the curse when used again: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster. Each area with black phantoms starts its own disaster when a player enters it; the game checks every 600 s whether the world is still black and ends the disaster only if not, so in a cursed world the phantoms stay. The curse lasts through sessions but is not saved: after the game is restarted, or another character is loaded, the world is no longer cursed and disasters left from the curse end; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
@@ -219,6 +219,23 @@ or are waited for. A player who fell counts as dead in their reports until their
 wipe lasts through the loads. Another player's character that a load threw away is asked for again only once that player reports standing in the world: asked
 for during their load, it came out invisible and could be walked through. A character first seen while its player
 reports being dead or loading is rebuilt once they are back.
+
+**A rest after a lost boss fight reloads too.** Only a load puts a boss fight back to its start: the boss, its fog
+and its flags. A rest restarts some of the fight's events, but they end at once when the fight has begun (the Asylum
+Demon's `11810310` while `11810314` is on, the Taurus Demon's `11015382` while its own flag is on), or put the boss to
+sleep again without moving it back (most bosses' `11xx5392`), and the boss-room flag `11xx5393` and the other working
+flags are cleared only by a load. In vanilla nobody rests during a fight, and a lost fight always ends in a load. In a
+session every game in the map runs the fight's events (the runs are shared), so a teammate who waited outside kept
+the fight going in their game after the fighters fell. In the 2026-10-18 test the host rested to bring back the guest
+who fell to the Asylum Demon: in the host's game the demon stayed awake on the floor, won the network's bids against
+the guest's reloaded game (where it slept on its perch with its AI off) and walked into it without a health bar or
+music. Now each game notes the bosses (the 32 with a health bar) that an event woke in it since its last load (Set
+Character AI State on, `0xD6C3F0`; off puts one back to sleep). A rest, ours or another player's, while such a boss
+still lives reloads that game at its bonfire. It is decided at the rest, before the rest restarts the events. The
+reload waits for the bonfire menu to close and for the fallen to be at their respawn warp (up to 15 s), and their
+warps wait for it (`reset_wait` in the 1.1.0 player report; up to 25 s), so every game reloads at once, as after a
+wipe. A guest's reload stays in the host's world and starts its copy of the host's temporary flags over, as a death
+reload does.
 
 **A death that does not reach its respawn.** A death is the global script's chain `OnEvent_4000` ("YOU DIED") ->
 `SoloPlayDeath` -> `SoloPlayDeath_TextWait` -> `SoloPlayDeath_1` -> `SoloPlayDeath_2`, which asks for the respawn
@@ -419,7 +436,8 @@ three seconds after the trip home any that is still missing is given back.
 - **Rest:** Lua `Util_RequestRegene` (`0xD5D820`, the bonfire rest event) first gives the items and withers the
   blossoms, then tells the others, who reset their world the way a rest does (`WorldChrMan+0x2CC`). The bonfire's
   "enemies about" test (`0xE3DF90` from `0xD58B49`) also answers yes while a living teammate reports a boss gauge
-  (the 1.1.0 player report), so nobody rests during someone else's boss fight.
+  (the 1.1.0 player report), so nobody rests during someone else's boss fight. A rest after a lost boss fight also
+  reloads every game in which the boss is awake (see Spectating).
 - **Bonfires:** `WarpNextStage_Bonfire` (`0xD62CA0`) and `Util_RequestLevelUpFirst` (`0xD5D850`) are mirrored.
 - **Teams:** who may hit whom comes from the team relation table (`0x12DF268`, 19 x 19, row attacker,
   column target) and each character's team (`chr+0x74`), mostly read inline, so the mod writes the team on the

@@ -37,7 +37,7 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 | --- | --- |
 | Blessed Eye Orb | Host a session. Players with your password can join at any time, wherever you are. |
 | Crystal Eye Orb | Join the session of a player with your password. You arrive at the host's last bonfire, in your own body. |
-| Chaos Eye Orb | Invade a session that allows invaders, as an evil spirit. |
+| Chaos Eye Orb | Invade a session that allows invaders, as an evil spirit. Defeat every co-op player for a Humanity each; fall, and each of them earns one. |
 | Abyssal Eye Orb | A guest returns home; the host disbands the session. |
 | Ominous Tome | Host: change the world rules (allies cannot harm each other, allies can harm each other, the host against the guests). |
 | Dried Fingers | Host: taunt invaders into your world: an invader looking for a world is 50% more likely to pick yours. |
@@ -59,6 +59,7 @@ In the `[PrepareToCoop]` section of `PTDE-FPS-Unlock.ini` (the FPS Unlock's sett
 | `PrepareToCoop` | `true` | The co-op on or off. Off, the DLL is the FPS Unlock alone and the game is as usual (Steam app, save file, title screen). |
 | `Password` | empty | Players with the same password find each other. Avoid `#` (it starts a comment). |
 | `AllowInvaders` | `true` | Others may invade your session as evil spirits. |
+| `InvasionRewards` | `true` | The side that wins an invasion gets Humanity: the invader one per co-op player defeated (once home), or the host and every guest one each when the invader falls. Both sides need 1.1.0. |
 | `DeathDebuffs` | `false` | Each death in a session lowers maximum HP by 10% (up to five), until the next bonfire rest. |
 | `GuestWorldEvents` | `true` | Guests run the world's scripted events in their own game, as the host does (bosses, lifts, cutscenes, the Hellkite). |
 | `BonfireAnimations` | `true` | The others see you sit, rest and stand at a bonfire. |

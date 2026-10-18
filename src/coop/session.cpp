@@ -162,7 +162,8 @@ struct PlayerEvent {
     uint64_t who;
     uint8_t invader;
     char name[64];  // the name to show: a character name from 1.1.0 on (1.0.0 puts Steam names here)
-    uint8_t lost;  // kLeft: the host dropped them after their connection went quiet
+    uint8_t lost;  // kLeft: the host dropped them after their connection went quiet; kDead of an invader (1.1.0):
+                   // this death lost the invasion (the co-op team's reward)
 };
 struct GaitMsg {
     Header h;
@@ -224,6 +225,8 @@ constexpr const wchar_t* kMsgBreakInStart = L"Invading another world as an evil 
 constexpr const wchar_t* kMsgBreakInMission = L"Invaded another world! Defeat {} players";
 constexpr const wchar_t* kMsgBreakInSuccess = L"Invasion success! Returning to your world";
 constexpr const wchar_t* kMsgBreakInFailed = L"Invasion failed... Returning to your world";
+constexpr const wchar_t* kMsgRewardInvader = L"Invasion reward: {} Humanity";
+constexpr const wchar_t* kMsgRewardTeam = L"The invader is defeated. Reward: {} Humanity";
 constexpr const wchar_t* kMsgHostTimeout = L"Failed to create session";
 constexpr const wchar_t* kMsgJoinTimeout = L"Failed to find session";
 constexpr const wchar_t* kMsgBreakInTimeout = L"Failed to find session to invade";
@@ -374,6 +377,12 @@ bool g_close_forced = false;  // a guest was still in the game session when it w
 // defeat. Or we fell first (g_invade_lost): a wipe reported a moment later is no victory.
 bool g_invade_won = false;
 bool g_invade_lost = false;
+// Invasion rewards (InvasionRewards): Humanity for the side that won, given once we stand in the world again, an
+// invader's only back home. Kept through finish(), which comes before an invader is home.
+constexpr int32_t kHumanity = 500;  // the Humanity item (goods)
+int g_reward = 0;                   // Humanity still to give
+bool g_reward_home = false;         // wait for our own world
+const wchar_t* g_reward_text = nullptr;
 bool g_invade_open = false;  // host: our lobby tells invaders' searches we take invaders (ptdesc_invade)
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
@@ -703,6 +712,20 @@ void invasion_won() {
     g_invade_won = true;
     say(kMsgBreakInSuccess);
     game::call_lua("HostDead");  // the game's own invader victory
+    if (g_cfg.invasion_rewards) {  // one per co-op player defeated, as "Defeat {} players" counted them
+        g_reward += std::max(1, g_host_coop_players);
+        g_reward_home = true;
+        g_reward_text = kMsgRewardInvader;
+    }
+}
+
+void reward_tick() {
+    if (g_reward <= 0 || !game::in_game() || game::loading() || !game::player() || world::local_dead()) return;
+    if (g_reward_home && (!game::own_world() || g_role != Role::None)) return;
+    items::give(kHumanity, g_reward);
+    say(fmt(g_reward_text, std::to_wstring(g_reward)));
+    g_reward = 0;
+    g_reward_home = false;
 }
 
 // ---------------------------------------------------------------- a team wipe reloads every game at once
@@ -2100,6 +2123,12 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             say(fmt(m.invader ? kMsgInvaderDied : kMsgDied, event_name(m)));
             // We invade and the last co-op player fell (the host alone is not enough while a guest stands).
             if (invasion_undecided() && coop_team_down()) invasion_won();
+            // An invader's death that lost its invasion (its game decides): the co-op team won, fallen players too.
+            if (m.invader && m.lost && !g_invade && g_cfg.invasion_rewards) {
+                LOG_INFO("[coop] The invasion of %s is repelled: a Humanity for us", utf8(event_name(m)).c_str());
+                ++g_reward;
+                g_reward_text = kMsgRewardTeam;
+            }
             break;
         }
         case kTeamRespawn: {
@@ -2280,7 +2309,8 @@ void send_rest() {
 void send_death() {
     g_respawn = kRespawnNone;
     if (g_role == Role::None || !g_lobby) return;
-    if (invasion_undecided()) {
+    const bool lost_invasion = invasion_undecided();
+    if (lost_invasion) {
         g_invade_lost = true;
         LOG_INFO("[coop] We fell while invading: invasion failed");
         say(kMsgBreakInFailed);
@@ -2288,6 +2318,7 @@ void send_death() {
     // The death debuff (Remastered Seamless Co-op): a Crimson Blossom per death in a session, up to five.
     if (g_cfg.death_debuffs && !g_invade && items::count(items::kBlossom) < 5) items::give(items::kBlossom, 1);
     PlayerEvent e = player_event(kDead, steam::self(), g_invade, utf8(own_name()));
+    e.lost = lost_invasion ? 1 : 0;
     if (g_role == Role::Host) {
         broadcast(e);
     } else if (g_host) {
@@ -2767,6 +2798,7 @@ void configure(const Config& cfg) {
 
 void tick() {
     flash_tick();
+    reward_tick();
     // The first time a character stands at home (after the game starts or another character is loaded), a curse
     // laid on another character is dropped, and disasters still on in the saved flags (the game was closed while the
     // world was cursed) end, as the phantoms would otherwise roam for up to 600 s more in each such map.

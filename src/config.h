@@ -14,6 +14,8 @@ struct CoopConfig {
     int app_id = 480;
     // Others may join as evil spirits (invaders) to hunt the party.
     bool allow_invaders = true;
+    // Humanity for the side that wins an invasion (the invader: one per co-op player defeated; else each co-op player).
+    bool invasion_rewards = true;
     // Dying lowers maximum HP until the next bonfire rest.
     bool death_debuffs = false;
     // Guests run the world's events in their own game as the host does (Remastered Seamless Co-op's

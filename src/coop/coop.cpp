@@ -307,6 +307,7 @@ void coop_install(const CoopConfig& config) {
     coop::session::Config cfg;
     cfg.password = g_cfg.password;
     cfg.allow_invaders = g_cfg.allow_invaders;
+    cfg.invasion_rewards = g_cfg.invasion_rewards;
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.test_protocol = g_cfg.test_protocol;
@@ -316,6 +317,7 @@ void coop_install(const CoopConfig& config) {
                                             "name, soul level and ping"};
     const int overhead = g_cfg.overhead_display >= 0 && g_cfg.overhead_display <= 4 ? g_cfg.overhead_display : 4;
     LOG_INFO("[coop] Companion health bars show the %s", kOverhead[overhead]);
+    LOG_INFO("[coop] Invasion rewards: %s", g_cfg.invasion_rewards ? "Humanity for the side that wins" : "off");
     g_installed = true;
     LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade%s.",
              g_items ? "given at every bonfire rest" : "UNAVAILABLE", texts ? "" : "(On-screen texts unavailable.) ",

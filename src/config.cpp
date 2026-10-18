@@ -20,6 +20,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.app_id = std::atoi(val.c_str());
         } else if (key == "allowinvaders") {
             c.allow_invaders = settings_parse_bool(val);
+        } else if (key == "invasionrewards") {
+            c.invasion_rewards = settings_parse_bool(val);
         } else if (key == "deathdebuffs") {
             c.death_debuffs = settings_parse_bool(val);
         } else if (key == "guestworldevents") {

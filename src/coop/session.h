@@ -14,6 +14,7 @@ namespace coop::session {
 struct Config {
     std::string password;
     bool allow_invaders = true;
+    bool invasion_rewards = true;  // Humanity for the side that wins an invasion
     bool death_debuffs = false;  // each death in a session adds a Crimson Blossom (up to five)
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
     int overhead_display = 4;

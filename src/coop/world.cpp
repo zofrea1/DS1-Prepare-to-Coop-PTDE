@@ -5,6 +5,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "motion.h"
 #include "rules.h"
 #include "session.h"
 #include "spectate.h"
@@ -821,8 +822,10 @@ static void death_watch_tick() {
 // the fallen's respawns start together (session::set_reset_phase), so no game's old world feeds another's new one,
 // and ours waits for our menus to close (a load is not started from one).
 constexpr double kResetWait = 15.0;  // our reload waits this long for the fallen to reach their respawn warp
+constexpr double kResetNag = 8.0;    // how often we are told that others wait on our menu (the line fades)
 static int g_reset_boss = 0;         // the boss whose lost fight our reload starts over (0 none)
 static double g_reset_since = 0;
+static double g_reset_told = 0;      // when we were last told that the others wait on our menu
 
 static void drop_reset(const char* why) {
     LOG_INFO("[coop] Lost boss fight: our world does not reload (%s)", why);
@@ -836,6 +839,7 @@ static void reset_after_rest(const char* who) {
     if (!boss) return;
     g_reset_boss = boss;
     g_reset_since = now();
+    g_reset_told = 0;
     session::set_reset_phase(session::kResetWaiting);
     LOG_INFO("[coop] %s rested while boss %d is awake in this game: its fight was lost, our world reloads at our "
              "bonfire with the fallen",
@@ -860,6 +864,17 @@ static void reset_tick() {
     const bool ready = !menu_open() && !rules::cutscene_playing() &&
                        (session::fallen_at_respawn() || waited >= kResetWait);
     session::set_reset_phase(ready ? session::kResetReady : session::kResetWaiting);
+    // The others' respawns and reloads wait while we sit in the bonfire menu (or another): we are told so, as they
+    // are told that they wait.
+    if (!ready && menu_open() && session::others_wait_on_reset() && now() - g_reset_told >= kResetNag) {
+        const bool sitting = motion::local_loop_anim() != 0;
+        if (g_reset_told == 0) {
+            LOG_INFO("[coop] Lost boss fight: the others wait for our %s", sitting ? "bonfire menu" : "menu");
+        }
+        g_reset_told = now();
+        text::show(sitting ? L"The other players are waiting for you to leave the bonfire"
+                           : L"The other players are waiting for you to close the menu");
+    }
     if (!ready || !session::resets_ready()) return;
     const int bonfire = session::guest() ? session::guest_respawn_bonfire() : game::last_bonfire();
     const int map = game::bonfire_map(bonfire);

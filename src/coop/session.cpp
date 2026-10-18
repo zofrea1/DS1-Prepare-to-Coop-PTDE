@@ -3366,6 +3366,15 @@ bool resets_ready() {
     return true;
 }
 
+bool others_wait_on_reset() {
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (!coop_member(p, members)) continue;
+        if (p.dead ? p.team_respawn && p.respawn == kRespawnWaiting : p.reset == kResetReady) return true;
+    }
+    return false;
+}
+
 bool fallen_at_respawn() {
     const std::vector<party::Remote> members = party::remotes();
     for (const auto& p : g_peers) {

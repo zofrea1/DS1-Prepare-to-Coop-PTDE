@@ -102,7 +102,13 @@ std::string narrow(const std::wstring& w) {
     return n > 0 ? std::string(out) : std::string();
 }
 
-bool fight_on() { return world::boss_fight() || rules::state().invader_present; }
+// A boss fight is on: ours (our boss gauge), or a living teammate's far from us. A death of ours during a teammate's
+// fight would reload our world in the middle of it, and the session host's world decides every enemy's HP: its
+// fresh, unscaled boss went to the fighter's screen at half its health (2026-10-18).
+bool fight_on() {
+    const auto& st = rules::state();
+    return world::boss_fight() || st.teammate_boss_fight || st.invader_present;
+}
 
 int living_teammates() {
     int n = 0;
@@ -393,8 +399,11 @@ void start_hold() {
     g_fight_off_since = 0;
     g_view_at = now() + kViewDelay;
     g_told_waiting = false;
-    LOG_INFO("[coop] We fell during %s with %d teammate(s) still standing: our death waits",
-             world::boss_fight() ? "a boss fight" : "an invasion", living_teammates());
+    const char* during = world::boss_fight()                    ? "a boss fight"
+                         : rules::state().teammate_boss_fight ? "a teammate's boss fight"
+                                                              : "an invasion";
+    LOG_INFO("[coop] We fell during %s with %d teammate(s) still standing: our death waits", during,
+             living_teammates());
 }
 
 void release(const char* why) {

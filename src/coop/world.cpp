@@ -312,7 +312,7 @@ __declspec(naked) void hk_regene() {
 // The respawn warp waits instead of the death itself: only when the death event cannot be held (spectate.cpp).
 bool limbo_wanted() {
     return g_active && !g_invader && local_dead() && g_players >= 2 && !g_everyone_dead &&
-           (boss_fight() || g_invader_present);
+           (boss_fight() || rules::state().teammate_boss_fight || g_invader_present);
 }
 
 // The game's own ways of sending a summoned player home (the host left or died, the room is gone, a kick) end
@@ -954,7 +954,7 @@ void tick() {
             release_limbo("someone rested");
         } else if (g_everyone_dead) {
             release_limbo("everyone fell", true);
-        } else if (!boss_fight() && !g_invader_present) {
+        } else if (!boss_fight() && !rules::state().teammate_boss_fight && !g_invader_present) {
             release_limbo("the fight is over");
         } else if (!g_active) {
             release_limbo("the session ended");

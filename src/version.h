@@ -3,4 +3,4 @@
 #pragma once
 
 // Prepare to Co-op Edition's own version (the FPS Unlock it is built on has its own, ptde_fps_unlock_version()).
-#define PREPARE_TO_COOP_VERSION "1.1.0"
+#define PREPARE_TO_COOP_VERSION "1.2.0"

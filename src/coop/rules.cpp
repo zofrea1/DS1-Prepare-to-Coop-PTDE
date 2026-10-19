@@ -1799,11 +1799,12 @@ int warp_index_of_flag(int id) {
     return -1;
 }
 
-// The warp rows of the bonfire menu stay shut: a living teammate fights a boss, or (a guest) the host's world has
-// no Lordvessel, so the host's game would turn the travel down.
+// The warp rows of the bonfire menu stay shut while travel waits (session::travel_hold: a boss fight, an invasion, a
+// reload after a lost fight, a teammate down), and for a guest whose host has no Lordvessel, whose game would turn
+// the travel down.
 bool travel_closed(int id) {
     if (!seamless_rules()) return false;
-    if (g_state.teammate_boss_fight) return true;
+    if (session::travel_hold() != session::kHoldNone) return true;
     return g_state.guest && id == kFlagLordvessel && g_host_world_known && !g_host_lordvessel;
 }
 // Util_RequestLevelUpFirst (0xD5D850, stdcall(bonfire), ret 4): a bonfire lit for the first time
@@ -1818,9 +1819,9 @@ bool g_remote_call = false;
 
 void __stdcall hk_bonfire_warp(int bonfire) {
     if (!g_remote_call && seamless_rules()) {
-        if (g_state.teammate_boss_fight) {
-            LOG_INFO("[coop] Bonfire warp to %d: not while a teammate fights a boss", bonfire);
-            text::show(L"No travel while a teammate is fighting a boss");
+        if (const int hold = session::travel_hold()) {
+            LOG_INFO("[coop] Bonfire warp to %d: travel waits (%d)", bonfire, hold);
+            text::show(session::travel_hold_text(hold));
             return;
         }
         if (!g_state.host) {
@@ -2003,9 +2004,25 @@ __declspec(naked) void hk_lock_on() {
 constexpr uint32_t kBonfireFoes = 0x00E3DF90;
 constexpr uint32_t kBonfireFoesSite = 0x00D58B49;
 
-// The local player is in a bonfire ceremony (sitting down, the sitting loop, kindling, Reverse Hollowing, standing
-// up): it holds one of the bonfire event animations.
-bool at_bonfire() { return motion::remote_open_anim(game::player()) != 0; }
+// The local player sits at a bonfire, past its rest: the sitting loop (7701, 7711, 7721: the three ways to sit) or a
+// ceremony played seated, kindling (7699) or Reverse Hollowing (7697). Not sitting down (7700, 7710, 7720: the rest
+// happens during it), the first lighting (7698, which leads into a rest), standing up (7702, 7712, 7722) or the warp
+// (7725). Between a seated ceremony and the loop that follows it no event animation may be held for a moment, which
+// is bridged for a second.
+bool seated_anim(int anim) {
+    return anim == 7701 || anim == 7711 || anim == 7721 || anim == 7699 || anim == 7697;
+}
+
+bool at_bonfire() {
+    static ULONGLONG seated_at = 0;
+    const int anim = motion::remote_open_anim(game::player());
+    const ULONGLONG t = GetTickCount64();
+    if (seated_anim(anim)) {
+        seated_at = t;
+        return true;
+    }
+    return anim == 0 && seated_at != 0 && t - seated_at < 1000;
+}
 
 bool __cdecl teammate_boss_fight() {
     return seamless_rules() && !g_state.invader && g_state.teammate_boss_fight && !at_bonfire();

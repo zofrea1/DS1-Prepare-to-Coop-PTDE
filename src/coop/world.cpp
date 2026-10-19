@@ -847,6 +847,8 @@ static double g_reset_since = 0;
 static double g_reset_told = 0;      // when we were last told that the others wait on our menu
 static bool g_phase_given_up = false;
 
+bool reset_pending() { return g_reset_boss != 0; }
+
 static void drop_reset(const char* why) {
     LOG_INFO("[coop] Lost boss fight: our world does not reload (%s)", why);
     g_reset_boss = 0;

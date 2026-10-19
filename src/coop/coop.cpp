@@ -149,9 +149,9 @@ int can_use(int32_t id) {
         case 501:  // Twin Humanities
             if (!in_session) return -1;
             return !invader && !invader_present ? 1 : 0;
-        case 330:  // Homeward Bone: only the host, and not while an invader is in the world
+        case 330:  // Homeward Bone: only the host, and it takes everyone, so not while travel waits (an invader too)
             if (!in_session) return -1;
-            return host && !invader_present ? 1 : 0;
+            return host && session::travel_hold() == session::kHoldNone ? 1 : 0;
         case 115:  // Black Eye Orb
         case 116:
             if (!in_session) return -1;

@@ -44,6 +44,8 @@ bool local_dead();
 // A menu or dialog is open (the bonfire menu and its shops included). The game never starts a load under one: our
 // own loads wait for it to close.
 bool menu_open();
+// This game reloads after a lost boss fight (a rest while its boss was awake) and is waiting to do it.
+bool reset_pending();
 bool in_limbo();
 // Shared light: the local player's own light (0x08 Cast Light or the Sunlight Maggot, 0x10 the Skull Lantern;
 // 1.0.0 sent bits 0 to 2, which are ignored), and showing the other players' lights on their characters here.

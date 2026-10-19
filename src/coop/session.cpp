@@ -198,6 +198,8 @@ enum TravelAnswer : uint32_t {
     kTravelBusy = 5,       // the host is loading, has fallen or is away
     kTravelTimedOut = 6,   // the host's menu stayed open
     kTravelInvader = 7,    // an invader is in the world (bonfires are out of use)
+    kTravelMateDown = 8,   // a teammate is down: their respawn goes first
+    kTravelReload = 9,     // a game reloads after a lost boss fight
 };
 struct PlayerEvent {
     Header h;
@@ -287,12 +289,10 @@ constexpr const wchar_t* kMsgTravelHostMenu = L"{} wants to travel: close the me
 constexpr const wchar_t* kMsgTravelFollowMenu = L"The others are travelling: close the menu to follow";
 constexpr const wchar_t* kMsgTravelFollowSit = L"The others are travelling: leave the bonfire to follow";
 constexpr const wchar_t* kMsgTravelWaiting = L"Waiting for {} to close the menu...";
-constexpr const wchar_t* kMsgTravelBossFight = L"No travel while a boss fight is on";
 constexpr const wchar_t* kMsgTravelNoVessel = L"The host's world has no Lordvessel yet: no travel";
 constexpr const wchar_t* kMsgTravelNotThere = L"The host has not rested at that bonfire yet";
 constexpr const wchar_t* kMsgTravelBusy = L"The host cannot travel right now";
 constexpr const wchar_t* kMsgTravelTimedOut = L"The host did not close the menu: no travel";
-constexpr const wchar_t* kMsgTravelInvader = L"No travel while an invader is in the world";
 constexpr const wchar_t* kMsgTravelOld = L"The host's game cannot travel for guests (Prepare to Co-op 1.2.0 can)";
 constexpr const wchar_t* kMsgKeysLent = L"Key items the host also holds are with you in this world";
 
@@ -438,14 +438,16 @@ double g_world_polled = 0;
 constexpr double kTravelWait = 5.0;   // a guest's request without any answer: the host's game cannot do it
 constexpr double kTravelMenu = 60.0;  // the host keeps a guest's travel this long while its menu stays open
 constexpr double kTravelNag = 8.0;    // how often a menu that holds up a travel is pointed out
+constexpr double kTravelGap = 5.0;    // host: after a trip starts, no other for this long (its load begins frames later)
 uint64_t g_travel_from = 0;
+double g_travel_started = -100;       // host: when our last trip (ours or a guest's) started
 int g_travel_bonfire = -1;
 bool g_travel_spot = false;
 double g_travel_since = 0;
 double g_travel_told = 0;
 double g_travel_asked = 0;
 int g_follow_travel = -1;
-double g_follow_travel_told = 0;
+double g_follow_told = 0;  // a follow (travel or Homeward Bone) last pointed out the menu holding it up
 // Our gait as last sent (motion sync).
 int g_sent_gait = -1;
 double g_last_gait = 0;
@@ -1476,17 +1478,27 @@ void answer_travel(uint64_t to, uint32_t why) {
 }
 
 // Host: why our world cannot travel to that bonfire now (0: it can). A guest's travel is checked against our own
-// world, so a guest cannot take the party further than the host's own warp could.
+// world, so a guest cannot take the party further than the host's own warp could, and waits as the host's own warp
+// does (session::travel_hold). A trip that started a moment ago still has its load ahead: no other goes meanwhile.
 uint32_t travel_refusal(int bonfire, bool spot) {
-    if (!game::in_game() || game::loading() || world::local_dead() || rules::cutscene_playing()) return kTravelBusy;
-    if (world::boss_fight() || rules::state().teammate_boss_fight) return kTravelBossFight;
-    if (rules::state().invader_present) return kTravelInvader;
+    if (!game::in_game() || game::loading() || world::local_dead() || rules::cutscene_playing() ||
+        rules::cutscene_loading() || now() - g_travel_started < kTravelGap) {
+        return kTravelBusy;
+    }
+    switch (travel_hold()) {
+        case kHoldBossFight: return kTravelBossFight;
+        case kHoldInvader: return kTravelInvader;
+        case kHoldReload: return kTravelReload;
+        case kHoldMateDown: return kTravelMateDown;
+        default: break;
+    }
     if (!spot && !rules::own_lordvessel()) return kTravelNoVessel;
     if (!rules::warp_destination(bonfire)) return kTravelNotThere;
     return 0;
 }
 
-// Host: a guest's travel goes once no menu of ours is open (we are taken there with everyone).
+// Host: a guest's travel goes once no menu of ours is open and we are not in a bonfire ceremony (we are taken there
+// with everyone). A warp of our own that starts meanwhile (its animation is such a ceremony) replaces it.
 void host_travel_tick() {
     if (g_travel_bonfire < 0) return;
     if (!admitted(g_travel_from)) {
@@ -1501,7 +1513,9 @@ void host_travel_tick() {
         g_travel_bonfire = -1;
         return;
     }
-    if (world::menu_open()) {
+    const int anim = motion::remote_open_anim(game::player());
+    if (anim == 7725) return;  // our own warp is under way (Lua_Warp): it replaces this travel (send_bonfire_warp)
+    if (world::menu_open() || anim != 0) {
         if (now() - g_travel_since > kTravelMenu) {
             LOG_INFO("[coop] The travel for %s is dropped: our menu stayed open", steam::persona(g_travel_from).c_str());
             answer_travel(g_travel_from, kTravelTimedOut);
@@ -1515,6 +1529,7 @@ void host_travel_tick() {
     }
     const int bonfire = g_travel_bonfire;
     g_travel_bonfire = -1;
+    g_travel_started = now();
     LOG_INFO("[coop] Travelling to bonfire %d for %s; guests follow", bonfire, steam::persona(g_travel_from).c_str());
     say(fmt(kMsgTravelAsked, who));
     BonfireMsg b{};
@@ -2010,24 +2025,35 @@ void guest_carry_keys(const std::vector<int32_t>& held) {
     if (given) g_keys_seen = items::key_items();
 }
 
-// A guest: the host's travel (kBonfireWarp) is followed once no menu is open here (a load is not started under a
-// menu: the bonfire menu's shops, the box, the level up); a fallen guest goes at once, as before. Our own warp's
-// request that nobody answers came to a host that cannot travel for guests.
+// A guest follows the host (its travel, its Homeward Bone) once we stand in the world: not under a menu (the bonfire
+// menu's shops, the box, the level up) or a bonfire ceremony, not in a cutscene, and alive. A fallen guest respawns
+// first, through every wait of a respawn (limbo, the team, the lost fight's reload), and follows once back on their
+// feet; the host does not travel while it knows of a fallen teammate. True while the follow waits; a menu or a
+// ceremony is pointed out every kTravelNag s.
+bool follow_waits() {
+    if (!game::in_game() || game::loading() || world::local_dead() || rules::cutscene_playing() ||
+        rules::cutscene_loading()) {
+        return true;
+    }
+    const bool ceremony = motion::remote_open_anim(game::player()) != 0;
+    if (!ceremony && !world::menu_open()) return false;
+    if (now() - g_follow_told >= kTravelNag) {
+        if (g_follow_told == 0) LOG_INFO("[coop] Following the host waits for our menu to close");
+        g_follow_told = now();
+        text::show(ceremony ? kMsgTravelFollowSit : kMsgTravelFollowMenu);
+    }
+    return true;
+}
+
+// A guest: the host's travel (kBonfireWarp), followed as follow_waits allows. Our own warp's request that nobody
+// answers came to a host that cannot travel for guests.
 void guest_travel_tick() {
     if (g_travel_asked > 0 && now() - g_travel_asked > kTravelWait) {
         g_travel_asked = 0;
         LOG_INFO("[coop] Our travel request got no answer: the host's game does not travel for guests");
         say(kMsgTravelOld);
     }
-    if (g_follow_travel < 0 || !game::in_game() || game::loading()) return;
-    if (world::menu_open() && !world::local_dead()) {
-        if (now() - g_follow_travel_told >= kTravelNag) {
-            if (g_follow_travel_told == 0) LOG_INFO("[coop] The host's travel waits for our menu to close");
-            g_follow_travel_told = now();
-            text::show(motion::remote_open_anim(game::player()) != 0 ? kMsgTravelFollowSit : kMsgTravelFollowMenu);
-        }
-        return;
-    }
+    if (g_follow_travel < 0 || follow_waits()) return;
     const int bonfire = g_follow_travel;
     g_follow_travel = -1;
     LOG_INFO("[coop] Following the host to bonfire %d", bonfire);
@@ -2132,7 +2158,7 @@ void guest_tick() {
                 }
             }
             // The host's Homeward Bone: follow after a moment.
-            if (g_follow_bonfire >= 0 && now() >= g_follow_at && game::in_game() && !game::loading()) {
+            if (g_follow_bonfire >= 0 && now() >= g_follow_at && !follow_waits()) {
                 const int bonfire = g_follow_bonfire;
                 g_follow_bonfire = -1;
                 g_guest_bonfire = bonfire;
@@ -2528,7 +2554,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (from != g_host || !as(&m) || g_step != Step::InWorld || g_invade || m.bonfire < 0) return;
             g_travel_asked = 0;
             g_follow_travel = m.bonfire;
-            g_follow_travel_told = 0;
+            g_follow_told = 0;
             guest_travel_tick();
             break;
         }
@@ -2546,11 +2572,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             LOG_INFO("[coop] The host answered our travel request: %u", m.value);
             switch (m.value) {
                 case kTravelWaiting: say(fmt(kMsgTravelWaiting, host_name)); break;
-                case kTravelBossFight: say(kMsgTravelBossFight); break;
+                case kTravelBossFight: say(travel_hold_text(kHoldBossFight)); break;
                 case kTravelNoVessel: say(kMsgTravelNoVessel); break;
                 case kTravelNotThere: say(kMsgTravelNotThere); break;
                 case kTravelTimedOut: say(kMsgTravelTimedOut); break;
-                case kTravelInvader: say(kMsgTravelInvader); break;
+                case kTravelInvader: say(travel_hold_text(kHoldInvader)); break;
+                case kTravelMateDown: say(travel_hold_text(kHoldMateDown)); break;
+                case kTravelReload: say(travel_hold_text(kHoldReload)); break;
                 default: say(kMsgTravelBusy); break;
             }
             break;
@@ -2576,6 +2604,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             BonfireMsg m;
             if (from != g_host || !as(&m) || g_step != Step::InWorld || g_invade || m.bonfire < 0) return;
             say(kMsgHostWarpOut);
+            g_follow_told = 0;
             g_follow_bonfire = m.bonfire;
             g_follow_at = now() + 3.0;
             break;
@@ -2761,6 +2790,12 @@ void send_bonfire_warp(int bonfire) {
         return;
     }
     if (g_role != Role::Host) return;
+    if (g_travel_bonfire >= 0) {
+        LOG_INFO("[coop] Our own warp goes instead of %s's travel to bonfire %d", steam::persona(g_travel_from).c_str(),
+                 g_travel_bonfire);
+        g_travel_bonfire = -1;  // they are taken along to ours
+    }
+    g_travel_started = now();
     BonfireMsg m{};
     fill_header(&m, kBonfireWarp);
     m.bonfire = bonfire;
@@ -3800,6 +3835,31 @@ bool others_wait_on_reset() {
         if (p.dead ? p.team_respawn && p.respawn == kRespawnWaiting : p.reset == kResetReady) return true;
     }
     return false;
+}
+
+int travel_hold() {
+    if (g_role == Role::None || g_invade) return kHoldNone;
+    const auto& st = rules::state();
+    if (world::boss_fight() || st.teammate_boss_fight) return kHoldBossFight;
+    if (st.invader_present) return kHoldInvader;
+    if (world::reset_pending()) return kHoldReload;
+    const std::vector<party::Remote> members = party::remotes();
+    int hold = kHoldNone;
+    for (const auto& p : g_peers) {
+        if (!coop_member(p, members)) continue;
+        if (!p.dead && (p.reset == kResetWaiting || p.reset == kResetReady)) return kHoldReload;
+        if (p.dead) hold = kHoldMateDown;
+    }
+    return hold;
+}
+
+const wchar_t* travel_hold_text(int hold) {
+    switch (hold) {
+        case kHoldBossFight: return L"No travel while a boss fight is on";
+        case kHoldInvader: return L"No travel while an invader is in the world";
+        case kHoldReload: return L"No travel while the world starts over after a lost boss fight";
+        default: return L"No travel while a teammate is down";
+    }
 }
 
 bool fallen_at_respawn() {

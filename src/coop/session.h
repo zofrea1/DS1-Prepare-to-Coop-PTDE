@@ -132,4 +132,12 @@ bool fallen_at_respawn();
 // reload is ready.
 bool others_wait_on_reset();
 
+// Bonfire travel takes the whole party, so it waits while anyone's game is in the middle of something a load would
+// cut short: a boss fight (ours or a standing teammate's), an invasion, a reload after a lost boss fight (ours or a
+// teammate's), or a teammate who is down (their respawn goes first, through its own waits). kHoldNone: travel is open.
+enum TravelHold : int { kHoldNone = 0, kHoldBossFight, kHoldInvader, kHoldReload, kHoldMateDown };
+int travel_hold();
+// The line that tells the player why (a hold other than kHoldNone).
+const wchar_t* travel_hold_text(int hold);
+
 }  // namespace coop::session

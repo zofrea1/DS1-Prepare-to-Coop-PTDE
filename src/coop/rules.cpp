@@ -5,7 +5,9 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "motion.h"
 #include "session.h"
+#include "text.h"
 #include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -1746,10 +1748,64 @@ void invader_walls_tick() {
 }
 
 // ---------------------------------------------------------------- bonfire travel and lighting
-// WarpNextStage_Bonfire (0xD62CA0, stdcall(bonfire), ret 4) is the bonfire menu's warp. In a seamless session
-// only the host travels by bonfire; the guests follow to the same bonfire, and a guest's own bonfire warp does
-// nothing (as in Remastered Seamless Co-op).
+// WarpNextStage_Bonfire (0xD62CA0, stdcall(bonfire), ret 4) is the bonfire menu's warp: the warp list's pick runs
+// Lua_Warp (the warp animation 7725), whose animation calls Lua_Warp_1 -> WarpNextStage_Bonfire(bonfire - 980, the
+// bonfire's Player part). In a seamless session the whole party travels together, to a bonfire of the host's world:
+// the host's warp takes the guests along, and a guest's warp asks the host to take everyone (session: kTravel),
+// which the host's game checks against its own world (warp_destination, the Lordvessel). Remastered Seamless
+// Co-op lets only the host travel; a guest's own warp did nothing there and here up to 1.1.0. Nobody travels while
+// a living teammate fights a boss: the trip would take them out of the fight.
 constexpr uint32_t kBonfireWarp = 0x00D62CA0;
+// The warp list (0x12DE888, 20 entries {flag, bonfire object, text}): an entry is offered while its flag (200-219)
+// is on in the world's store (0xC40A50 builds the list, 0xC406D0 counts it). A rest sets it (talk command at
+// 0xFCF162 -> 0xC40650, straight into the store, past the flag hooks), so these flags tell where the player of that
+// world has rested. A guest's store has the host's from the join on, plus the guest's own rests there.
+constexpr uint32_t kWarpList = 0x012DE888;
+constexpr int kWarpEntries = 20;
+constexpr uint32_t kRetWarpList = 0x00C40A5F;   // the list's GetEventFlag (0xC40A5A)
+constexpr uint32_t kRetWarpCount = 0x00C406F2;  // the count's GetEventFlag (0xC406ED)
+constexpr int kFlagLordvessel = 710;  // the player owns the Lordvessel (common event 710): the bonfire menu's Warp
+constexpr int kFlagWarpSpot = 717;    // the Warp row of a place that travels without it (common event 717)
+// A guest: what the host's world has, as the host reports it (kHostWorld; unknown from a 1.1.0 host).
+bool g_host_world_known = false;
+bool g_host_lordvessel = false;
+uint32_t g_host_warps = 0;
+
+struct WarpEntry {
+    int32_t flag;
+    int32_t bonfire;
+    int32_t text;
+};
+
+const WarpEntry* warp_list() {
+    static const WarpEntry* list = [] {
+        const auto* e = reinterpret_cast<const WarpEntry*>(static_cast<uintptr_t>(kWarpList));
+        int32_t first[2] = {};
+        if (!read32(kWarpList, reinterpret_cast<uint32_t*>(&first[0])) ||
+            !read32(kWarpList + 4, reinterpret_cast<uint32_t*>(&first[1])) || first[0] != 200 || first[1] != 1021960) {
+            LOG_ERROR("[coop] The bonfire warp list does not match this build: guests cannot ask for travel");
+            return static_cast<const WarpEntry*>(nullptr);
+        }
+        return e;
+    }();
+    return list;
+}
+
+int warp_index_of_flag(int id) {
+    const WarpEntry* list = warp_list();
+    for (int i = 0; list && i < kWarpEntries; ++i) {
+        if (list[i].flag == id) return i;
+    }
+    return -1;
+}
+
+// The warp rows of the bonfire menu stay shut: a living teammate fights a boss, or (a guest) the host's world has
+// no Lordvessel, so the host's game would turn the travel down.
+bool travel_closed(int id) {
+    if (!seamless_rules()) return false;
+    if (g_state.teammate_boss_fight) return true;
+    return g_state.guest && id == kFlagLordvessel && g_host_world_known && !g_host_lordvessel;
+}
 // Util_RequestLevelUpFirst (0xD5D850, stdcall(bonfire), ret 4): a bonfire lit for the first time
 // (OnEvent_BonfireFirstLvUp). Lighting one lights it for every player in the session.
 constexpr uint32_t kBonfireLit = 0x00D5D850;
@@ -1762,8 +1818,14 @@ bool g_remote_call = false;
 
 void __stdcall hk_bonfire_warp(int bonfire) {
     if (!g_remote_call && seamless_rules()) {
+        if (g_state.teammate_boss_fight) {
+            LOG_INFO("[coop] Bonfire warp to %d: not while a teammate fights a boss", bonfire);
+            text::show(L"No travel while a teammate is fighting a boss");
+            return;
+        }
         if (!g_state.host) {
-            LOG_INFO("[coop] Bonfire warp to %d: only the host travels by bonfire", bonfire);
+            LOG_INFO("[coop] Bonfire warp to %d: the host is asked to take everyone there", bonfire);
+            if (g_bonfire_warp_fn) g_bonfire_warp_fn(bonfire);
             return;
         }
         LOG_INFO("[coop] Host warps to bonfire %d; guests follow", bonfire);
@@ -1933,11 +1995,20 @@ __declspec(naked) void hk_lock_on() {
 // player's world, the boss's and its arena's too in the middle of that fight, while a boss fight is won or lost by
 // the team together (spectate.cpp). A teammate who fell and spectates does not count, so a rest still ends a
 // fight nobody is left to finish.
+// The same answer is what stands a sitting player up: every shop of the bonfire talk (Level Up, Attune Magic,
+// the Bottomless Box, Reinforce, Repair, the warp list) leaves through its closing states as soon as the bonfire's
+// button is unavailable (talk function 37, the button's state), the game's own way out when an enemy comes near. A
+// player who sat down before the fight began keeps the bonfire instead: the rest that resets the world is behind
+// them, and what the menu does after it is their own (the warp rows close for the fight, see travel_closed).
 constexpr uint32_t kBonfireFoes = 0x00E3DF90;
 constexpr uint32_t kBonfireFoesSite = 0x00D58B49;
 
+// The local player is in a bonfire ceremony (sitting down, the sitting loop, kindling, Reverse Hollowing, standing
+// up): it holds one of the bonfire event animations.
+bool at_bonfire() { return motion::remote_open_anim(game::player()) != 0; }
+
 bool __cdecl teammate_boss_fight() {
-    return seamless_rules() && !g_state.invader && g_state.teammate_boss_fight;
+    return seamless_rules() && !g_state.invader && g_state.teammate_boss_fight && !at_bonfire();
 }
 
 __declspec(naked) void hk_bonfire_foes() {
@@ -2794,9 +2865,16 @@ bool guest_owns_flag(int id) {
     return true;
 }
 
-// The getter's answer for a co-op guest: 0 the game's own (active store), 1 on, 2 off.
+// The getter's answer: 0 the game's own (active store), 1 on, 2 off. The bonfire menu's warp rows for every
+// player (travel_closed); for a co-op guest also the warp list, which offers the bonfires of the host's world (a
+// guest's own rests there are not places the host's game travels to), and the guest's own flags below.
 int __stdcall guest_flag_answer(uint32_t ret, int id) {
+    if (ret == kRetTalkRow && (id == kFlagLordvessel || id == kFlagWarpSpot) && travel_closed(id)) return 2;
     if (!g_state.guest || g_state.invader) return 0;
+    if ((ret == kRetWarpList || ret == kRetWarpCount) && g_host_world_known && seamless_rules()) {
+        const int i = warp_index_of_flag(id);
+        if (i >= 0) return (g_host_warps >> i) & 1 ? 1 : 2;
+    }
     if ((ret == kRetTalkRow || ret == kRetTalkFlag) && character_flag(id) && seamless_rules()) {
         bool on = false;
         if (!own_flag(id, &on)) return 0;
@@ -3088,6 +3166,31 @@ void note_world_reset() { g_world_reset_at = GetTickCount64(); }
 void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
 void set_separation_listener(void (*fn)(bool host)) { g_separation_fn = fn; }
 void set_bonfire_lit_listener(void (*fn)(int)) { g_bonfire_lit_fn = fn; }
+
+bool own_lordvessel() { return game::flag(kFlagLordvessel); }
+
+uint32_t own_warps() {
+    const WarpEntry* list = warp_list();
+    uint32_t bits = 0;
+    for (int i = 0; list && i < kWarpEntries; ++i) {
+        if (game::flag(list[i].flag)) bits |= 1u << i;
+    }
+    return bits;
+}
+
+bool warp_destination(int bonfire) {
+    const WarpEntry* list = warp_list();
+    for (int i = 0; list && bonfire >= 0 && i < kWarpEntries; ++i) {
+        if (list[i].bonfire == bonfire + 980) return game::flag(list[i].flag);
+    }
+    return false;
+}
+
+void set_host_world(bool known, bool lordvessel, uint32_t warps) {
+    g_host_world_known = known;
+    g_host_lordvessel = lordvessel;
+    g_host_warps = warps;
+}
 
 void remote_bonfire_warp(int bonfire) {
     if (!g_bonfire_warp_orig || bonfire < 0) return;

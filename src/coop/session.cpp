@@ -85,7 +85,12 @@ enum MsgType : uint8_t {
     kTeamRespawn = 21, // a team wipe (1.1.0): where my respawn is (guest -> host, host -> guests)
     kDeadList = 22,    // 1.1.0: my world's dead characters, to a fallen teammate (host -> guest, guest -> host)
     kResetPhase = 23,  // 1.1.0, everyone -> everyone: my reload after a lost boss fight, for this rest (ResetPhase)
+    kHostWorld = 24,   // 1.2.0, host -> co-op guests: what the host's world has (key items, Lordvessel, warp bonfires)
+    kTravel = 25,      // 1.2.0, guest -> host: my bonfire warp, take everyone to this bonfire (TravelMsg)
+    kTravelAnswer = 26,  // 1.2.0, host -> that guest: the travel waits for the host's menu, or why it cannot go
 };
+// Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
+// told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
 
 // kBossFight (1.1.0): a co-op guest waits for the host's or a guest's boss fight to end (1.0.0 takes it as a refusal).
 enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4, kBossFight = 5 };
@@ -169,6 +174,31 @@ struct ResetPhase {
     uint32_t rest;
     uint8_t phase;
 };
+// kHostWorld: what the host's world has, sent when it changes and to each co-op guest who arrives. A guest carries
+// there the key items of their own that the host holds too (items::travel_key), and its warp list offers the
+// bonfires of the host's world.
+constexpr int kHostKeysMax = 64;  // the inventory's key range holds 64
+struct HostWorldMsg {
+    Header h;
+    uint8_t lordvessel;  // the host owns the Lordvessel (flag 710): bonfire travel is open in that world
+    uint32_t warps;      // bit i: the host has rested at the warp list's i-th bonfire (rules::own_warps)
+    uint8_t keys;
+    int32_t key[kHostKeysMax];
+};
+struct TravelMsg {
+    Header h;
+    int32_t bonfire;  // the warp's point (WarpNextStage_Bonfire's argument)
+    uint8_t spot;     // the guest's Warp row was that of a place that travels without the Lordvessel (flag 717)
+};
+enum TravelAnswer : uint32_t {
+    kTravelWaiting = 1,    // the host has a menu open: the travel goes when it closes
+    kTravelBossFight = 2,  // someone is fighting a boss
+    kTravelNoVessel = 3,   // the host's world has no Lordvessel yet
+    kTravelNotThere = 4,   // the host has not rested at that bonfire
+    kTravelBusy = 5,       // the host is loading, has fallen or is away
+    kTravelTimedOut = 6,   // the host's menu stayed open
+    kTravelInvader = 7,    // an invader is in the world (bonfires are out of use)
+};
 struct PlayerEvent {
     Header h;
     uint64_t who;
@@ -251,7 +281,20 @@ constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returni
 constexpr const wchar_t* kMsgWorldClosed = L"Your world is closed. Guests return to their worlds";
 constexpr const wchar_t* kMsgWorldOpen = L"Your world is open";
 constexpr const wchar_t* kMsgTeamRespawn = L"Waiting for the other players...";  // a team wipe (1.1.0)
-constexpr const wchar_t* kMsgMateBossFight = L"{} is fighting a boss: no resting until the fight is decided";
+constexpr const wchar_t* kMsgMateBossFight = L"{} is fighting a boss: no resting or travel until it is decided";
+constexpr const wchar_t* kMsgTravelAsked = L"{} is taking everyone to a bonfire";
+constexpr const wchar_t* kMsgTravelHostMenu = L"{} wants to travel: close the menu to take everyone";
+constexpr const wchar_t* kMsgTravelFollowMenu = L"The others are travelling: close the menu to follow";
+constexpr const wchar_t* kMsgTravelFollowSit = L"The others are travelling: leave the bonfire to follow";
+constexpr const wchar_t* kMsgTravelWaiting = L"Waiting for {} to close the menu...";
+constexpr const wchar_t* kMsgTravelBossFight = L"No travel while a boss fight is on";
+constexpr const wchar_t* kMsgTravelNoVessel = L"The host's world has no Lordvessel yet: no travel";
+constexpr const wchar_t* kMsgTravelNotThere = L"The host has not rested at that bonfire yet";
+constexpr const wchar_t* kMsgTravelBusy = L"The host cannot travel right now";
+constexpr const wchar_t* kMsgTravelTimedOut = L"The host did not close the menu: no travel";
+constexpr const wchar_t* kMsgTravelInvader = L"No travel while an invader is in the world";
+constexpr const wchar_t* kMsgTravelOld = L"The host's game cannot travel for guests (Prepare to Co-op 1.2.0 can)";
+constexpr const wchar_t* kMsgKeysLent = L"Key items the host also holds are with you in this world";
 
 // ---------------------------------------------------------------- state
 enum class Role { None, Host, Guest };
@@ -368,16 +411,41 @@ int g_separation = 0;
 bool g_anim_log = false;  // animation sync diagnostic lines in the log (session only)
 // Which player each other character in our world belongs to (kept while both exist, see update_remote_players).
 std::map<uint32_t, uint64_t> g_chr_peer;
-// Key items a co-op guest gained in the host's world. Keys picked up there were missing from the guest's own
-// inventory later (the Asylum's F2 East Key and Big Pilgrim's Key, 2026-10-16: both used or received in the
-// host's world, absent from the save; the Estus from the same talk stayed). Where they are lost is not known yet,
-// so the key items are logged at every step, and keys gained there that are gone after the trip home are given
-// back.
+// Key items of a co-op guest in the host's world. Every load in another player's world empties the key array the
+// inventory uses there (MoveMapStep 0xEFC6C3 -> 0x51C520 with clear 1), so a guest arrives without keys, and a death
+// or a travel there takes the keys gained in that world as well. Keys gained there are written into the own world's
+// array too (items::keep_key_for_home) and are put back after such a load. A guest also carries the keys of their
+// own that the host's world has (kHostWorld): a guest who had the Big Pilgrim's Key at home got no second one when
+// the Asylum Demon fell in a world without it (their own lot flag was taken), while the host got theirs
+// (2026-10-19 test). Keys gained there that are gone after the trip home are given back.
 std::vector<int32_t> g_keys_arrival;  // held when we arrived in the host's world
 std::vector<int32_t> g_keys_seen;     // as last logged there
+std::vector<int32_t> g_keys_gained;   // gained in the host's world this visit (put back after a load there)
+std::vector<int32_t> g_keys_lent;     // ours that the host's world has too, carried there (not gained)
 std::vector<int32_t> g_keys_carried;  // gained there and held when we left
 double g_keys_polled = 0;
 double g_keys_home_at = 0;            // when we were first home again with keys to check (0 not yet)
+bool g_keys_lent_told = false;        // the player was told once this visit that keys came along
+// A guest: what the host's world has (kHostWorld), from a 1.2.0 host.
+bool g_host_world_known = false;
+std::vector<int32_t> g_host_keys;
+// Host: what our world has, as last sent to the guests (kHostWorld), and when it was last checked.
+std::vector<uint8_t> g_world_sent;
+double g_world_polled = 0;
+// Bonfire travel (kTravel). Host: a guest's travel waiting for our menu to close (bonfire -1 none). Guest: our
+// warp asked the host (0 not asked, cleared by the answer or the host's travel); the host's travel waits for our
+// menu to close (-1 none).
+constexpr double kTravelWait = 5.0;   // a guest's request without any answer: the host's game cannot do it
+constexpr double kTravelMenu = 60.0;  // the host keeps a guest's travel this long while its menu stays open
+constexpr double kTravelNag = 8.0;    // how often a menu that holds up a travel is pointed out
+uint64_t g_travel_from = 0;
+int g_travel_bonfire = -1;
+bool g_travel_spot = false;
+double g_travel_since = 0;
+double g_travel_told = 0;
+double g_travel_asked = 0;
+int g_follow_travel = -1;
+double g_follow_travel_told = 0;
 // Our gait as last sent (motion sync).
 int g_sent_gait = -1;
 double g_last_gait = 0;
@@ -916,6 +984,13 @@ void finish(const std::wstring& why) {
     g_seen_rules = g_seen_infection = g_seen_taunt = -1;
     g_homeward_at = 0;
     g_follow_bonfire = -1;
+    g_follow_travel = -1;
+    g_travel_bonfire = -1;
+    g_travel_asked = 0;
+    g_host_world_known = false;
+    g_host_keys.clear();
+    g_world_sent.clear();
+    rules::set_host_world(false, false, 0);
     g_guest_bonfire = -1;
     g_cut_map = -1;
     g_cut_own_map = -1;
@@ -1373,12 +1448,107 @@ void host_invasions_open() {
              open ? "can find" : "cannot find");
 }
 
+// ---------------------------------------------------------------- bonfire travel and the host's world
+// Host: what our world has, for the co-op guests (kHostWorld), when it changed (checked every 2 s).
+void host_world_tick() {
+    if (now() - g_world_polled < 2.0 || !game::in_game() || game::loading() || !game::own_world()) return;
+    g_world_polled = now();
+    HostWorldMsg m{};
+    fill_header(&m, kHostWorld);
+    m.lordvessel = rules::own_lordvessel() ? 1 : 0;
+    m.warps = rules::own_warps();
+    const std::vector<int32_t> keys = items::key_items();
+    m.keys = static_cast<uint8_t>(std::min<size_t>(keys.size(), kHostKeysMax));
+    std::copy(keys.begin(), keys.begin() + m.keys, m.key);
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&m);
+    if (std::vector<uint8_t>(bytes, bytes + sizeof(m)) == g_world_sent) return;
+    g_world_sent.assign(bytes, bytes + sizeof(m));
+    for (uint64_t id : g_admitted) {
+        if (!peer_is_invader(id) && !is_lost(id)) steam::send(id, &m, sizeof(m), true);
+    }
+}
+
+void answer_travel(uint64_t to, uint32_t why) {
+    Simple a{};
+    fill_header(&a, kTravelAnswer);
+    a.value = why;
+    send_to(to, a);
+}
+
+// Host: why our world cannot travel to that bonfire now (0: it can). A guest's travel is checked against our own
+// world, so a guest cannot take the party further than the host's own warp could.
+uint32_t travel_refusal(int bonfire, bool spot) {
+    if (!game::in_game() || game::loading() || world::local_dead() || rules::cutscene_playing()) return kTravelBusy;
+    if (world::boss_fight() || rules::state().teammate_boss_fight) return kTravelBossFight;
+    if (rules::state().invader_present) return kTravelInvader;
+    if (!spot && !rules::own_lordvessel()) return kTravelNoVessel;
+    if (!rules::warp_destination(bonfire)) return kTravelNotThere;
+    return 0;
+}
+
+// Host: a guest's travel goes once no menu of ours is open (we are taken there with everyone).
+void host_travel_tick() {
+    if (g_travel_bonfire < 0) return;
+    if (!admitted(g_travel_from)) {
+        g_travel_bonfire = -1;
+        return;
+    }
+    const std::wstring who = shown_name(*peer(g_travel_from));
+    if (const uint32_t why = travel_refusal(g_travel_bonfire, g_travel_spot)) {
+        LOG_INFO("[coop] The travel to bonfire %d for %s cannot go any more (%u)", g_travel_bonfire,
+                 steam::persona(g_travel_from).c_str(), why);
+        answer_travel(g_travel_from, why);
+        g_travel_bonfire = -1;
+        return;
+    }
+    if (world::menu_open()) {
+        if (now() - g_travel_since > kTravelMenu) {
+            LOG_INFO("[coop] The travel for %s is dropped: our menu stayed open", steam::persona(g_travel_from).c_str());
+            answer_travel(g_travel_from, kTravelTimedOut);
+            g_travel_bonfire = -1;
+        } else if (now() - g_travel_told >= kTravelNag) {
+            if (g_travel_told == 0) answer_travel(g_travel_from, kTravelWaiting);
+            g_travel_told = now();
+            text::show(fmt(kMsgTravelHostMenu, who));
+        }
+        return;
+    }
+    const int bonfire = g_travel_bonfire;
+    g_travel_bonfire = -1;
+    LOG_INFO("[coop] Travelling to bonfire %d for %s; guests follow", bonfire, steam::persona(g_travel_from).c_str());
+    say(fmt(kMsgTravelAsked, who));
+    BonfireMsg b{};
+    fill_header(&b, kBonfireWarp);
+    b.bonfire = bonfire;
+    broadcast(b);
+    rules::remote_bonfire_warp(bonfire);
+}
+
+void host_travel_request(uint64_t from, const TravelMsg& m) {
+    uint32_t why = travel_refusal(m.bonfire, m.spot != 0);
+    if (!why && g_travel_bonfire >= 0 && g_travel_from != from) why = kTravelBusy;  // another guest's goes first
+    LOG_INFO("[coop] %s asks to travel to bonfire %d%s: %s (%u)", steam::persona(from).c_str(), m.bonfire,
+             m.spot ? " from a warp spot" : "", why ? "refused" : "everyone goes", why);
+    if (why) {
+        answer_travel(from, why);
+        return;
+    }
+    g_travel_from = from;
+    g_travel_bonfire = m.bonfire;
+    g_travel_spot = m.spot != 0;
+    g_travel_since = now();
+    g_travel_told = 0;
+    host_travel_tick();
+}
+
 void host_tick() {
     if (g_step == Step::Closing) {
         host_close_tick();
         return;
     }
     if (g_step != Step::Hosting) return;
+    host_world_tick();
+    host_travel_tick();
     host_hide_while_away();
     host_invasions_open();
     host_ensure_game_session();
@@ -1714,7 +1884,10 @@ void guest_go_home(const std::wstring& why, const char* reason) {
         const std::vector<int32_t> now_keys = items::key_items();
         g_keys_carried.clear();
         for (int32_t id : now_keys) {
-            if (!holds(g_keys_arrival, id)) g_keys_carried.push_back(id);
+            if (!holds(g_keys_arrival, id) && !holds(g_keys_lent, id)) g_keys_carried.push_back(id);
+        }
+        for (int32_t id : g_keys_gained) {
+            if (!holds(g_keys_carried, id)) g_keys_carried.push_back(id);  // gone from here after a load
         }
         g_keys_home_at = 0;
         LOG_INFO("[coop] Key items as we leave: %s (gained here: %s)", key_text(now_keys).c_str(),
@@ -1745,6 +1918,9 @@ void guest_arrived() {
     if (!g_invade) {
         g_keys_arrival = items::key_items();
         g_keys_seen = g_keys_arrival;
+        g_keys_gained.clear();
+        g_keys_lent.clear();
+        g_keys_lent_told = false;
         g_keys_polled = now();
         LOG_INFO("[coop] Key items on arrival: %s", key_text(g_keys_arrival).c_str());
         LOG_INFO("[coop] Key range on arrival: %s", items::key_layout().c_str());
@@ -1793,6 +1969,69 @@ void on_world_flags(const uint8_t* data, uint32_t size) {
     }
     g_world_wait = 0;
     g_world_ours.clear();
+}
+
+// A guest in the host's world: the key items that belong in the key array there and are missing from it are
+// added (`held`: what it holds now). Keys gained in this world come back after a load emptied the array, and with
+// a 1.2.0 host the keys of our own world that the host's world has too come along (items::travel_key only: never
+// one an event takes back, which would then be both handed over here and still ours at home).
+void guest_carry_keys(const std::vector<int32_t>& held) {
+    std::vector<int32_t> want;
+    for (int32_t id : g_keys_gained) {
+        if (items::travel_key(id)) want.push_back(id);
+    }
+    if (g_host_world_known) {
+        const std::vector<int32_t> own = items::own_key_items();
+        for (int32_t id : g_host_keys) {
+            if (items::travel_key(id) && holds(own, id) && !holds(want, id)) want.push_back(id);
+        }
+    }
+    bool lent_now = false, given = false;
+    for (int32_t id : want) {
+        if (holds(held, id)) continue;
+        const bool gained = holds(g_keys_gained, id);
+        if (!items::give(id, 1)) {
+            static int lines = 0;
+            if (++lines <= 20) LOG_INFO("[coop] Key item %d could not be put in our inventory here", id);
+            continue;
+        }
+        given = true;
+        if (!gained && !holds(g_keys_lent, id)) {
+            g_keys_lent.push_back(id);
+            lent_now = true;
+        }
+        LOG_INFO("[coop] Key item %d is with us in the host's world: %s", id,
+                 gained ? "gained here, back after a load" : "ours, and the host's world has it too");
+    }
+    if (lent_now && !g_keys_lent_told) {
+        g_keys_lent_told = true;
+        say(kMsgKeysLent);
+    }
+    if (given) g_keys_seen = items::key_items();
+}
+
+// A guest: the host's travel (kBonfireWarp) is followed once no menu is open here (a load is not started under a
+// menu: the bonfire menu's shops, the box, the level up); a fallen guest goes at once, as before. Our own warp's
+// request that nobody answers came to a host that cannot travel for guests.
+void guest_travel_tick() {
+    if (g_travel_asked > 0 && now() - g_travel_asked > kTravelWait) {
+        g_travel_asked = 0;
+        LOG_INFO("[coop] Our travel request got no answer: the host's game does not travel for guests");
+        say(kMsgTravelOld);
+    }
+    if (g_follow_travel < 0 || !game::in_game() || game::loading()) return;
+    if (world::menu_open() && !world::local_dead()) {
+        if (now() - g_follow_travel_told >= kTravelNag) {
+            if (g_follow_travel_told == 0) LOG_INFO("[coop] The host's travel waits for our menu to close");
+            g_follow_travel_told = now();
+            text::show(motion::remote_open_anim(game::player()) != 0 ? kMsgTravelFollowSit : kMsgTravelFollowMenu);
+        }
+        return;
+    }
+    const int bonfire = g_follow_travel;
+    g_follow_travel = -1;
+    LOG_INFO("[coop] Following the host to bonfire %d", bonfire);
+    rules::remote_bonfire_warp(bonfire);
 }
 
 void guest_tick() {
@@ -1845,7 +2084,7 @@ void guest_tick() {
             }
             break;
         case Step::InWorld:
-            if (!g_invade && now() - g_keys_polled >= 2.0 && !game::loading()) {
+            if (!g_invade && now() - g_keys_polled >= 2.0 && !game::loading() && game::in_game()) {
                 g_keys_polled = now();
                 const std::vector<int32_t> k = items::key_items();
                 if (k != g_keys_seen && !k.empty()) {
@@ -1854,12 +2093,14 @@ void guest_tick() {
                     g_keys_seen = k;
                     // A key gained here goes into the own world's key array as well (items::keep_key_for_home).
                     for (int32_t id : k) {
-                        if (holds(g_keys_arrival, id)) continue;
+                        if (holds(g_keys_arrival, id) || holds(g_keys_lent, id) || holds(g_keys_gained, id)) continue;
+                        g_keys_gained.push_back(id);
                         LOG_INFO("[coop] Key item %d, gained here, %s", id,
                                  items::keep_key_for_home(id) ? "is kept for home as well"
                                                               : "could not be kept for home (given back there)");
                     }
                 }
+                guest_carry_keys(k);
             }
             if (g_host_heard > 0 && now() >= g_quiet_grace_until) {
                 const double quiet = now() - g_host_heard;
@@ -1898,6 +2139,7 @@ void guest_tick() {
                 *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
                 world::warp_now(game::bonfire_map(bonfire), -1);
             }
+            guest_travel_tick();
             break;
         case Step::GoingHome:
             if (g_invade && in_step > 10.0 && game::in_game() && !game::own_world() && !game::loading()) {
@@ -2171,7 +2413,11 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 if (m.who != from) return;
                 name_event(&m);
                 broadcast(m, true, from);  // tell the other guests
-                if (!m.invader) send_world_flags(from);
+                if (!m.invader) {
+                    send_world_flags(from);
+                    g_world_sent.clear();  // what our world has, to the newcomer (and again to the others)
+                    g_world_polled = 0;
+                }
             } else if (from != g_host) {
                 return;
             }
@@ -2279,9 +2525,51 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kBonfireWarp: {
             BonfireMsg m;
-            if (from != g_host || !as(&m) || g_step != Step::InWorld || g_invade) return;
-            LOG_INFO("[coop] Following the host to bonfire %d", m.bonfire);
-            rules::remote_bonfire_warp(m.bonfire);
+            if (from != g_host || !as(&m) || g_step != Step::InWorld || g_invade || m.bonfire < 0) return;
+            g_travel_asked = 0;
+            g_follow_travel = m.bonfire;
+            g_follow_travel_told = 0;
+            guest_travel_tick();
+            break;
+        }
+        case kTravel: {
+            TravelMsg m{};
+            if (g_role != Role::Host || g_step != Step::Hosting || !as(&m) || peer_is_invader(from)) return;
+            host_travel_request(from, m);
+            break;
+        }
+        case kTravelAnswer: {
+            Simple m{};
+            if (g_role != Role::Guest || from != g_host || g_invade || !as(&m)) return;
+            g_travel_asked = 0;
+            const std::wstring host_name = shown_name(*peer(g_host));
+            LOG_INFO("[coop] The host answered our travel request: %u", m.value);
+            switch (m.value) {
+                case kTravelWaiting: say(fmt(kMsgTravelWaiting, host_name)); break;
+                case kTravelBossFight: say(kMsgTravelBossFight); break;
+                case kTravelNoVessel: say(kMsgTravelNoVessel); break;
+                case kTravelNotThere: say(kMsgTravelNotThere); break;
+                case kTravelTimedOut: say(kMsgTravelTimedOut); break;
+                case kTravelInvader: say(kMsgTravelInvader); break;
+                default: say(kMsgTravelBusy); break;
+            }
+            break;
+        }
+        case kHostWorld: {
+            if (g_role != Role::Guest || from != g_host || g_invade || size < offsetof(HostWorldMsg, key)) return;
+            HostWorldMsg m{};
+            std::memcpy(&m, data, std::min<size_t>(size, sizeof(m)));
+            const size_t fit = (size - offsetof(HostWorldMsg, key)) / sizeof(int32_t);
+            const size_t n = std::min<size_t>({m.keys, fit, static_cast<size_t>(kHostKeysMax)});
+            std::vector<int32_t> keys(m.key, m.key + n);
+            if (!g_host_world_known || keys != g_host_keys) {
+                LOG_INFO("[coop] The host's world: key items %s, Lordvessel %s, warp bonfires %05X", key_text(keys).c_str(),
+                         m.lordvessel ? "yes" : "no", m.warps);
+            }
+            g_host_world_known = true;
+            g_host_keys = keys;
+            rules::set_host_world(true, m.lordvessel != 0, m.warps);
+            g_keys_polled = 0;  // carry the keys at the next look
             break;
         }
         case kHomeward: {
@@ -2462,6 +2750,16 @@ void send_death() {
 }
 
 void send_bonfire_warp(int bonfire) {
+    if (g_role == Role::Guest) {
+        if (g_invade || g_step != Step::InWorld || !g_host) return;
+        TravelMsg t{};
+        fill_header(&t, kTravel);
+        t.bonfire = bonfire;
+        t.spot = game::flag(717) && !game::flag(710) ? 1 : 0;
+        send_to(g_host, t);
+        g_travel_asked = now();
+        return;
+    }
     if (g_role != Role::Host) return;
     BonfireMsg m{};
     fill_header(&m, kBonfireWarp);

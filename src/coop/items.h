@@ -36,6 +36,13 @@ bool install();
 int count(int32_t goods_id);
 // The key items held (goods in the inventory's key range, ids in slot order).
 std::vector<int32_t> key_items();
+// The key items in the own world's key array: the same as key_items() at home; in another player's world, the
+// keys of our own world, which the game keeps apart (see keep_key_for_home).
+std::vector<int32_t> own_key_items();
+// A key item a co-op guest may carry in the host's world when the host's world has it too: one that opens the way
+// and that no event takes back (the keys, the Master Key, the Peculiar Doll, the boxes, the Rite of Kindling).
+// Not the Embers, Lord Souls or the Lordvessel, which the world takes from the player who hands them over.
+bool travel_key(int32_t goods_id);
 // The inventory's key-range header and the ids in the own-world key array, for the log (diagnostic).
 std::string key_layout();
 // In another player's world: writes a key item into the own world's key array too, so the trip home keeps it.

@@ -292,6 +292,31 @@ std::string key_layout() {
     return out;
 }
 
+std::vector<int32_t> own_key_items() {
+    std::vector<int32_t> out;
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return out;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t keys = 0, own = 0;
+    if (!read32(inv + 0x118, &keys) || !read32(inv + 0x114, &own) || own < 0x10000) return out;
+    for (uint32_t i = 0; i < keys && i < 256; ++i) {
+        const uint32_t e = own + i * 0x1C;
+        uint32_t cat = 0, id = 0;
+        uint8_t used = 0;
+        if (!read32(e, &cat) || !read32(e + 4, &id) || !read8(e + 0x10, &used)) break;
+        if (used == 1 && cat == kGoodsCategory) out.push_back(static_cast<int32_t>(id));
+    }
+    return out;
+}
+
+// EquipParamGoods rows with goodsType 1 (key item) in PTDE: 384 Peculiar Doll, 800-813 Embers, 2001-2021 keys
+// (2022 unused), 2100 Master Key, 2500-2503 Lord Souls and shards, 2510 Lordvessel, 2600-2602 smithboxes and the
+// Repairbox, 2607 Rite of Kindling, 2608 Bottomless Box; 2200, 2504, 2520, 2603-2606 and 2609 are unused rows.
+bool travel_key(int32_t goods_id) {
+    return goods_id == 384 || (goods_id >= 2001 && goods_id <= 2021) || goods_id == 2100 ||
+           (goods_id >= 2600 && goods_id <= 2602) || goods_id == 2607 || goods_id == 2608;
+}
+
 namespace {
 
 // The goods in a key array's held slots (+0x10 in use) that have this id.

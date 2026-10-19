@@ -804,7 +804,7 @@ static void finish_death(const char* why) {
 
 // A menu or dialog is open (the indictment menu after an invader's kill holds the death until it closes; the same
 // checks as the co-op items' "in control").
-static bool menu_open() {
+bool menu_open() {
     uint32_t mm = 0, request = 0, dialog = 0, text = 0;
     if (!read32(kMenuManVar, &mm) || mm < 0x10000) return false;
     if (read32(mm + 0x60, &request) && request != 0) return true;

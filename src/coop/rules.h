@@ -19,7 +19,7 @@ struct State {
     bool leaving = false;     // we are leaving on purpose: the game's own leave code may run
     bool closing = false;     // host: the session is being disbanded; the guests are on their way out
     bool invader_present = false;  // an invader is in the session (vanilla multiplayer limits apply)
-    bool teammate_boss_fight = false;  // a living co-op teammate has a boss gauge up: bonfires wait (no rest)
+    bool teammate_boss_fight = false;  // a living co-op teammate has a boss gauge up: no rest, no travel
     int own_chr_type = -1;    // guest: our chr type at home (0 human, 8 hollow)
     // The host's world rules (the host decides, guests mirror them).
     int world_rules = 0;      // Ominous Tome: 0 none, 1 allies are hostile, 2 allies fight in teams
@@ -66,8 +66,18 @@ std::vector<uint8_t> world_flag_snapshot();
 // or -1 for a snapshot that does not fit this store (nothing is written then).
 int apply_world_flag_snapshot(const uint8_t* data, size_t size);
 
-// The host travels by bonfire (WarpNextStage_Bonfire): `fn(bonfire)` tells the guests, who follow.
+// Bonfire travel (WarpNextStage_Bonfire; `bonfire` is the warp's point, the bonfire object - 980): the host's own
+// warp goes ahead and `fn(bonfire)` tells the guests, who follow; a guest's own warp does not go ahead, `fn(bonfire)`
+// asks the host to take everyone there. Neither goes while a living teammate fights a boss.
 void set_bonfire_warp_listener(void (*fn)(int bonfire));
+// Our own world's travel (the host's checks of a guest's request): we own the Lordvessel; the warp list's bonfires
+// we have rested at (bit i = entry i); the bonfire is one of them.
+bool own_lordvessel();
+uint32_t own_warps();
+bool warp_destination(int bonfire);
+// A guest: what the host's world has (known: the host reported it). The bonfire menu then offers the warp only
+// when the host owns the Lordvessel, and the warp list only the bonfires of the host's world.
+void set_host_world(bool known, bool lordvessel, uint32_t warps);
 // A bonfire was lit for the first time (Util_RequestLevelUpFirst): `fn(bonfire)` tells the others.
 void set_bonfire_lit_listener(void (*fn)(int bonfire));
 // The same, on behalf of another player (does not report back).

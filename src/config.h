@@ -16,8 +16,9 @@ struct CoopConfig {
     bool allow_invaders = true;
     // Humanity for the side that wins an invasion (the invader: one per co-op player defeated; else each co-op player).
     bool invasion_rewards = true;
-    // Dying lowers maximum HP until the next bonfire rest.
-    bool death_debuffs = false;
+    // Each death in a session adds a Crimson Blossom (up to five), lowering maximum HP until the next bonfire rest
+    // (on by default since 1.1.0).
+    bool death_debuffs = true;
     // Guests run the world's events in their own game as the host does (Remastered Seamless Co-op's
     // rule): bosses, lifts, cutscenes, scripted enemies. false = the game's own co-op (host only).
     bool guest_world_events = true;

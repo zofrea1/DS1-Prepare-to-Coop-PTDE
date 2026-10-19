@@ -30,7 +30,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
    | Dried Fingers | Host: taunt invaders; an invader searching for a world is 50% more likely to pick yours. | host |
    | Cursed Pendant | Curse your own world: it counts as pure black World Tendency until you use the pendant again. | your own world: alone or as host |
-   | Crimson Blossom | Not used: with `DeathDebuffs`, one blooms with each death in a session (up to five), each lowering maximum HP by 10%. They wither at a bonfire. | never |
+   | Crimson Blossom | Not used: one blooms with each death in a session (up to five), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0). They wither at a bonfire. | never |
    | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
 
    The items are used like any other item (quick slot, the item animation); when one cannot be used it is

@@ -35,6 +35,15 @@ constexpr uint32_t kMenuManVar = 0x013786D0;
 constexpr uint32_t kNoEventAnim[2] = {0x012E0C64, 0x012E0C68};  // the "none" handle pair (PlayerIns+0xFC/+0x100)
 constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, count). count <= 0 removes one stack.
 constexpr uint32_t kGoodsCategory = 0x40000000;
+// An inventory slot's item replaced (the bonfire's refill turns an empty Estus Flask into the full one with it,
+// 0xC0CC31): eax = count, edi = slot, esi = the equipment data (PlayerGameData+0x1B8), stdcall(&{id, row} from the
+// goods getter, keep count). It also renames the slot in the equipped quick-item records (+0x1C slots, +0x94 ids),
+// which a plain write of the slot would leave on the old item. ret 8, al = done.
+constexpr uint32_t kReplaceSlot = 0x00C0AAB0;
+// The Estus Flask: goods 200 + 2 * level is the empty flask, the next id the full one with its charges as its count
+// (EquipParamGoods replaceItemId swaps them; maxNum 20 at +0x36). Levels 0-7.
+constexpr int32_t kEstusFirst = 200;
+constexpr int32_t kEstusLast = 215;
 constexpr int kCount = kLast - kFirst + 1;
 constexpr int kRowSize = 0x5C;  // EQUIP_PARAM_GOODS_ST
 
@@ -244,6 +253,102 @@ int count(int32_t goods_id) {
         if (cat == kGoodsCategory && static_cast<int32_t>(id) == goods_id) return static_cast<int>(num);
     }
     return 0;
+}
+
+namespace {
+
+// The Estus Flask's slot in the inventory (-1 none), with its item id and count.
+int estus_slot(int32_t* id_out, int* count_out) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return -1;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t n = 0, keys = 0, last = 0, a = 0, b = 0;
+    if (!read32(inv + 0x110, &n) || !read32(inv + 0x118, &keys) || !read32(inv + 0x13C, &last) ||
+        !read32(inv + 0x120, &a) || !read32(inv + 0x124, &b)) {
+        return -1;
+    }
+    const uint32_t end = (last + 1 < n) ? last + 1 : n;
+    for (uint32_t i = 0; i < end && i < 4096; ++i) {
+        const uint32_t e = (i < keys ? a : b) + i * 0x1C;
+        uint32_t cat = 0, id = 0, num = 0;
+        if (!read32(e, &cat) || !read32(e + 4, &id) || !read32(e + 8, &num)) return -1;
+        const int32_t goods = static_cast<int32_t>(id);
+        if (cat == kGoodsCategory && goods >= kEstusFirst && goods <= kEstusLast) {
+            *id_out = goods;
+            *count_out = static_cast<int>(num);
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+// The goods row (EquipParamGoods) of an item through the game's getter, as the refill takes it: {id, row}.
+struct GoodsRow {
+    int32_t id;
+    uint32_t row;
+};
+
+bool goods_row(int32_t goods_id, GoodsRow* found) {
+    found->id = -1;
+    found->row = 0;
+    __try {
+        __asm {
+            mov eax, found
+            push eax
+            mov edi, goods_id
+            mov eax, kGoodsGetter
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return found->row != 0 && found->id == goods_id;
+}
+
+bool replace_slot(int slot, GoodsRow* row, int count) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd || slot < 0) return false;
+    const uint32_t inv = pgd + 0x1B8;
+    uint8_t done = 0;
+    __try {
+        __asm {
+            push 0  // the count is set too
+            mov eax, row
+            push eax
+            mov eax, count
+            mov edi, slot
+            mov esi, inv
+            mov ecx, kReplaceSlot
+            call ecx
+            mov done, al
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return done != 0;
+}
+
+}  // namespace
+
+int estus_charges() {
+    int32_t id = -1;
+    int count = 0;
+    if (estus_slot(&id, &count) < 0) return -1;
+    return (id - kEstusFirst) % 2 == 1 ? count : 0;
+}
+
+bool set_estus_charges(int charges) {
+    int32_t id = -1;
+    int count = 0;
+    const int slot = estus_slot(&id, &count);
+    if (slot < 0 || charges <= 0) return false;
+    const int32_t full = kEstusFirst + (id - kEstusFirst) / 2 * 2 + 1;
+    GoodsRow row{};
+    if (!goods_row(full, &row)) return false;
+    int16_t max_num = 0;
+    std::memcpy(&max_num, reinterpret_cast<const void*>(static_cast<uintptr_t>(row.row + 0x36)), 2);
+    if (max_num > 0 && charges > max_num) charges = max_num;
+    return replace_slot(slot, &row, charges) && estus_charges() == charges;
 }
 
 // +0x10 is the slot's "in use" byte (see mark_key_item_removable): every key held in the co-op save has it.

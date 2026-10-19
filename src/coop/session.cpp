@@ -466,6 +466,11 @@ int g_reward = 0;                   // Humanity still to give
 bool g_reward_home = false;         // wait for our own world
 const wchar_t* g_reward_text = nullptr;
 bool g_invade_open = false;  // host: our lobby tells invaders' searches we take invaders (ptdesc_invade)
+// An invader drinks from the Estus Flask (the game's own rule forbids it; coop.cpp allows it) with at most
+// kInvaderEstus charges: more are set aside on arrival and given back once home, so an invasion costs only what
+// was drunk. Kept in memory only: a crash or quit during the invasion leaves the flask at the cap until a rest.
+constexpr int kInvaderEstus = 5;
+int g_estus_kept = 0;  // charges set aside for the trip home
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
 bool g_hidden = false;
@@ -1941,6 +1946,15 @@ void guest_arrived() {
         LOG_INFO("[coop] Key range on arrival: %s", items::key_layout().c_str());
     }
     if (g_invade) {
+        const int charges = items::estus_charges();
+        if (charges > kInvaderEstus && items::set_estus_charges(kInvaderEstus)) {
+            g_estus_kept += charges - kInvaderEstus;
+            LOG_INFO("[coop] Estus Flask: %d charges for the invasion, %d set aside until we are home", kInvaderEstus,
+                     charges - kInvaderEstus);
+        } else if (charges > kInvaderEstus) {
+            LOG_ERROR("[coop] Estus Flask: could not set it to %d charges for the invasion (it has %d)", kInvaderEstus,
+                      charges);
+        }
         int defeat = g_host_coop_players;
         say(fmt(kMsgBreakInMission, std::to_wstring(defeat)));
     } else {
@@ -3355,6 +3369,19 @@ void tick() {
             }
             g_keys_carried.clear();
             g_keys_home_at = 0;
+        }
+    }
+    // Back home from an invasion: the Estus charges set aside on arrival come back on top of what is left.
+    if (g_estus_kept > 0 && g_role == Role::None && game::in_game() && !game::loading() && game::own_world()) {
+        const int left = items::estus_charges();
+        const int kept = g_estus_kept;
+        g_estus_kept = 0;
+        if (left < 0) {
+            LOG_INFO("[coop] Estus Flask: no flask to give the %d set-aside charges back to", kept);
+        } else {
+            const bool ok = items::set_estus_charges(left + kept);
+            LOG_INFO("[coop] Estus Flask: %d set-aside charges back after the invasion (%d left) -> %d%s", kept, left,
+                     items::estus_charges(), ok ? "" : " (not taken)");
         }
     }
     g_invader_bars = g_role == Role::Guest && g_invade && g_step == Step::InWorld ? 1 : 0;

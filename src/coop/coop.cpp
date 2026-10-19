@@ -149,6 +149,11 @@ int can_use(int32_t id) {
         case 501:  // Twin Humanities
             if (!in_session) return -1;
             return !invader && !invader_present ? 1 : 0;
+        // Estus Flask (full, levels 0-7): the game forbids it to black phantoms (EquipParamGoods enable_black 0; its
+        // heal lands on them, effectTargetGhost). An invader in the host's world may drink, with the charges capped
+        // for the invasion (session.cpp, kInvaderEstus). Not in ds1sc.
+        case 201: case 203: case 205: case 207: case 209: case 211: case 213: case 215:
+            return invader && !coop::game::own_world() ? 1 : -1;
         case 330:  // Homeward Bone: only the host, and it takes everyone, so not while travel waits (an invader too)
             if (!in_session) return -1;
             return host && session::travel_hold() == session::kHoldNone ? 1 : 0;

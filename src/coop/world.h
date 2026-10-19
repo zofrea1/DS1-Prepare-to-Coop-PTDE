@@ -41,6 +41,8 @@ void remote_rest();
 
 bool boss_fight();
 bool local_dead();
+// The death we are in is part of a team wipe: every co-op player fell and the world starts over (session::wipe_reload).
+bool team_wipe_death();
 // A menu or dialog is open (the bonfire menu and its shops included). The game never starts a load under one: our
 // own loads wait for it to close.
 bool menu_open();

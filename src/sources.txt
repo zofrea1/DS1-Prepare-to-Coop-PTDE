@@ -18,3 +18,4 @@ src\coop\overlay.cpp
 src\coop\party.cpp
 src\coop\motion.cpp
 src\coop\deadlist.cpp
+src\coop\deathtext.cpp

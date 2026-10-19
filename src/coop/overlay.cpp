@@ -2,6 +2,8 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "overlay.h"
 
+#include "deathtext.h"
+
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -190,6 +192,7 @@ void draw(IDirect3DDevice9* dev) {
 }
 
 HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty) {
+    deathtext::render();  // the death text's band, between two frames (deathtext.cpp)
     __try {
         draw(dev);
     } __except (EXCEPTION_EXECUTE_HANDLER) {

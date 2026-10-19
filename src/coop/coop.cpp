@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "coop.h"
 
+#include "deathtext.h"
 #include "game.h"
 #include "hook.h"
 #include "items.h"
@@ -234,6 +235,7 @@ void hotkeys() {
 void tick_body() {
     coop::session::tick();
     coop::world::tick();
+    coop::deathtext::tick();
     coop::spectate::tick();
     if (g_items) coop::items::tick();
     if (g_cfg.hotkeys) hotkeys();
@@ -291,6 +293,7 @@ void coop_install(const CoopConfig& config) {
     if (!coop::session::install_nameplate()) LOG_ERROR("[coop] Companion nameplates were not changed");
     if (!coop::session::install_invader_bars()) LOG_ERROR("[coop] Invaders still see no health bars");
     coop::spectate::install();
+    coop::deathtext::install();
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");

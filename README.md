@@ -10,28 +10,26 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 1.2.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
 
-## What's new in 1.1.0
+## What's new in 1.2.0
 
-1.1.0 is a major update over 1.0.0. It makes the session one shared world, with teamwork rules:
+- **Anyone can travel.** A guest's bonfire warp takes everyone along, to any bonfire the host's own warp could reach.
+- **Your keys come with you** into the host's world, when the host has them too.
+- **Keep your seat.** A player already sitting at a bonfire when a teammate's boss fight starts can still level up, attune, use the box, kindle or reverse hollowing.
+- **The Darksign** takes everyone home like the Homeward Bone, at the cost of the host's souls and humanity.
+- **YOUR TEAM DIED** after a team wipe, and **invaders can drink Estus** (up to 5 charges per invasion).
+- **Fixes**: guests no longer fall through the world after following a warp, and another player's character no longer comes back intangible and without attacks after a respawn.
 
-- **Win or wipe together.** Fall during a boss fight (yours, or a teammate's anywhere in the world) or an invasion and you spectate a teammate who still stands. If the team wins, the fallen respawn; if everyone falls, every game reloads at once into a world that starts over.
-- **A death keeps the world.** A player who falls respawns at their bonfire with the enemies the team has killed still dead, host and guests alike. Enemies come back at a bonfire rest, or for everyone after a team wipe.
-- **Crimson Blossoms are on by default.** Each death in a session costs 10% of your maximum HP until your next rest (up to five).
-- **No resting mid-fight**, and a rest after a lost boss fight reloads everyone in the area, so the boss starts over for everyone.
-- **Bosses behave**: after a wipe they start in their place and wake on cue, and a standing player's game moves them, never a spectator's.
-- **Invasions done properly**, with the game's own invasion points, Humanity rewards for the winning side, and one outcome per invasion.
-- **Progress comes home** reliably (key items, NPC fates), health bars match the enemy scaling, light is shared, and players are shown by their character names.
-
-The full list is in the [1.1.0 release notes](release-notes/v1.1.0.md).
+The full list is in the [1.2.0 release notes](release-notes/v1.2.0.md). 1.1.0, a major update, made the session one shared world with teamwork rules: boss fights and invasions won or lost together, deaths that keep the world, Crimson Blossoms ([1.1.0 release notes](release-notes/v1.1.0.md)).
 
 ## Requirements
 
 - Dark Souls: Prepare to Die Edition, the current Steam build (the same check as the FPS Unlock's).
 - Steam running. While Prepare to Co-op is on, the game runs as Steam's Spacewar (app 480): Prepare to Die Edition's own Steam lobbies were switched off in 2022, and Spacewar is the long-standing community route for its multiplayer. Steam shows you as playing Spacewar.
-- Everyone in a session uses the same `Password`. Prepare to Co-op 1.0.0 and 1.1.0 play together, but the team rules (spectating, wipes, the rest lock, deaths that keep the world) need everyone on 1.1.0.
+- Everyone in a session uses the same `Password`. Prepare to Co-op 1.0.0, 1.1.0 and 1.2.0 play together, but the team rules (spectating, wipes, the rest lock, deaths that keep the world) need everyone on 1.1.0 or later, and guest travel and carried keys need the host on 1.2.0.
 - Works with DSfix (set `unlockFPS 0` in `DSfix.ini` if the FPS unlock is on).
 
 ## Install
@@ -61,7 +59,7 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 
 The items are used like any other item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1** host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Another player's floating health bar shows their character's name with their soul level and ping (`OverheadPlayerDisplay`), and joins, departures, deaths and rule changes are told at the bottom of the screen, by character name. If a player's connection drops (a crash, a lost network, a Steam Deck put to sleep), the others are told within seconds and that player is sent home.
 
-Prepare to Co-op 1.0.0 and 1.1.0 use the same co-op protocol, so their players join and invade each other (the features new in 1.1.0 work between 1.1.0 players). When a later version has to change the protocol, players who cannot play together are told so instead of "No sessions found": three times at the bottom of the screen, with the versions and who needs to update. A host is told the same when such a player tries to join (from 1.1.0 on; Prepare to Co-op 1.0.0 itself only says "Failed to connect").
+Prepare to Co-op 1.0.0, 1.1.0 and 1.2.0 use the same co-op protocol, so their players join and invade each other (each version's new features work between players who have it). When a later version has to change the protocol, players who cannot play together are told so instead of "No sessions found": three times at the bottom of the screen, with the versions and who needs to update. A host is told the same when such a player tries to join (from 1.1.0 on; Prepare to Co-op 1.0.0 itself only says "Failed to connect").
 
 ## Playing together
 
@@ -103,7 +101,7 @@ In the `[PrepareToCoop]` section of `PTDE-FPS-Unlock.ini` (the FPS Unlock's sett
 | `PrepareToCoop` | `true` | The co-op on or off. Off, the DLL is the FPS Unlock alone and the game is as usual (Steam app, save file, title screen). |
 | `Password` | empty | Players with the same password find each other. Avoid `#` (it starts a comment). |
 | `AllowInvaders` | `true` | Others may invade your session as evil spirits. |
-| `InvasionRewards` | `true` | The side that wins an invasion gets Humanity: the invader one per co-op player defeated (once home), or the host and every guest one each when the invader falls. Both sides need 1.1.0. |
+| `InvasionRewards` | `true` | The side that wins an invasion gets Humanity: the invader one per co-op player defeated (once home), or the host and every guest one each when the invader falls. Both sides need 1.1.0 or later. |
 | `DeathDebuffs` | `true` | Each death in a session adds a Crimson Blossom (up to five), each lowering maximum HP by 10% until the next bonfire rest. On by default since 1.1.0 (1.0.0's INI has it off). |
 | `GuestWorldEvents` | `true` | Guests run the world's scripted events in their own game, as the host does (bosses, lifts, cutscenes, the Hellkite). |
 | `BonfireAnimations` | `true` | The others see you sit, rest and stand at a bonfire. |
@@ -152,4 +150,4 @@ build.bat
 
 Prepare to Co-op Edition is free software under the GNU General Public License, version 3 or later ([LICENSE](LICENSE)), with an additional permission that allows it to be combined with the game and its libraries (see [NOTICE.md](NOTICE.md)). Anyone who distributes it, or a mod that includes it, must make the complete source of what they distribute available under the same license.
 
-The FPS Unlock in `fps-unlock` keeps its own MIT license. The title logo and movie in `assets` and `src/title_art.inc` are derived from the game's own title screen (© Bandai Namco Entertainment, FromSoftware) and are not covered by either license; they are included only for use with the game.
+The FPS Unlock in `fps-unlock` keeps its own MIT license. The title logo and movie in `assets` and `src/title_art.inc` are derived from the game's own title screen, and the YOUR TEAM DIED lettering (`assets/TeamDied.png`, `src/coop/team_died_art.inc`) from the game's own letters (© Bandai Namco Entertainment, FromSoftware); they are not covered by either license and are included only for use with the game.

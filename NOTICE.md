@@ -35,6 +35,10 @@ works.
   derived from Dark Souls: Prepare to Die Edition's own title screen, © Bandai Namco Entertainment Inc. and
   FromSoftware, Inc. They are not covered by the GNU GPL or the MIT License and are included only so the mod
   can show its title screen in the game.
+- **YOUR TEAM DIED lettering** (`assets/TeamDied.png`, and `src/coop/team_died_art.inc` made from it): put
+  together from the letters of the game's own YOU DIED and other text effects, © Bandai Namco Entertainment
+  Inc. and FromSoftware, Inc. Not covered by the GNU GPL or the MIT License; included only so the mod can show
+  it in the game after a team wipe.
 
 Dark Souls is a trademark of Bandai Namco Entertainment Inc. This mod is not affiliated with or endorsed by
 Bandai Namco Entertainment or FromSoftware.

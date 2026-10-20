@@ -156,6 +156,7 @@ int can_use(int32_t id) {
         case 201: case 203: case 205: case 207: case 209: case 211: case 213: case 215:
             return invader && !coop::game::own_world() ? 1 : -1;
         case 330:  // Homeward Bone: only the host, and it takes everyone, so not while travel waits (an invader too)
+        case 117:  // Darksign: the Homeward Bone's trip at the cost of every soul and all humanity (SpEffect 3226)
             if (!in_session) return -1;
             return host && session::travel_hold() == session::kHoldNone ? 1 : 0;
         case 115:  // Black Eye Orb
@@ -181,6 +182,17 @@ bool use_item(int32_t id) {
         case 330:
             // In a session the host's bone takes everyone to the host's last bonfire (session tick).
             if (!session::in_session()) return false;
+            session::host_homeward();
+            return true;
+        case 117:
+            // The Darksign's effect (SpEffect 3226) is the Homeward Bone's (3220, stateInfo 16) plus clearSoul and
+            // heroPointDamage 99: the same trip for everyone, and the user loses every soul and all humanity, with
+            // no bloodstain, as in the game.
+            if (!session::in_session()) return false;
+            LOG_INFO("[coop] Darksign: %d souls and %d humanity lost; everyone goes to our last bonfire",
+                     coop::game::souls(), coop::game::humanity());
+            coop::game::set_souls(0);
+            coop::game::set_humanity(0);
             session::host_homeward();
             return true;
         default:

@@ -149,7 +149,8 @@ struct Info {
     int32_t ceremony;       // the bonfire animation the player is looping (the sit), 0 none
 };
 // Added in 1.1.0 behind Info, which keeps protocol 8: an older player reads the Info part and ignores the rest,
-// and an older player's shorter Info leaves these at their defaults.
+// and an older player's shorter Info leaves these at their defaults. InfoMore2 (1.2.0) adds to it the same way: a
+// 1.1.0 player reads InfoMore, and a 1.1.0 player's InfoMore leaves event_anim unknown.
 struct InfoMore {
     Info info;
     uint8_t boss_fight;    // a boss gauge is shown in this player's game (the host keeps invaders out meanwhile)
@@ -158,6 +159,10 @@ struct InfoMore {
     uint8_t reset;         // this player's world's reload after a lost boss fight (kResetNone ..., world.cpp)
     int32_t boss;          // the boss on this player's gauge (its entity), 0 none: its fight began in every game
                            // that holds it, also where the fight's own runs stop short (rules::note_teammate_boss)
+};
+struct InfoMore2 {
+    InfoMore more;
+    int32_t event_anim;  // the event animation the sender's own character holds (motion::held_event_anim), 0 none
 };
 struct BonfireMsg {
     Header h;
@@ -295,6 +300,7 @@ constexpr const wchar_t* kMsgTravelBusy = L"The host cannot travel right now";
 constexpr const wchar_t* kMsgTravelTimedOut = L"The host did not close the menu: no travel";
 constexpr const wchar_t* kMsgTravelOld = L"The host's game cannot travel for guests (Prepare to Co-op 1.2.0 can)";
 constexpr const wchar_t* kMsgKeysLent = L"Key items the host also holds are with you in this world";
+constexpr const wchar_t* kMsgFellJoining = L"You fell before reaching the other world: the join is called off";
 
 // ---------------------------------------------------------------- state
 enum class Role { None, Host, Guest };
@@ -2076,6 +2082,16 @@ void guest_travel_tick() {
 
 void guest_tick() {
     const double in_step = now() - g_step_since;
+    // A player who falls in their own world while joining (before the game's move into the host's world) never gets
+    // there: the death's reload replaces that move. Aimed at the host's bonfire as a guest's death is, it stood them
+    // at that bonfire of their OWN world, half in the session, until they left (2026-10-19 19:56). The join is called
+    // off at once, before the death's warp, which then takes them to their own last bonfire as any death does.
+    if ((g_step == Step::Joining || g_step == Step::Loading) && game::in_game() && !game::loading() &&
+        game::own_world() && world::local_dead()) {
+        if (g_home_bonfire >= 0) *ptr<int>(game::game_man() + game::kGmLastBonfire) = g_home_bonfire;
+        guest_go_home(kMsgFellJoining, "we fell before reaching the other world");
+        return;
+    }
     switch (g_step) {
         case Step::Searching:
             // One lobby-list request hung after the previous session's P2P failure. Ask once more
@@ -2205,7 +2221,8 @@ void guest_tick() {
 
 // ---------------------------------------------------------------- shared
 void send_info() {
-    InfoMore more{};
+    InfoMore2 more2{};
+    InfoMore& more = more2.more;
     Info& i = more.info;
     fill_header(&i, kInfo);
     i.soul_level = game::soul_level();
@@ -2238,7 +2255,10 @@ void send_info() {
         dead ? g_respawn | (g_respawn == kRespawnWent && g_respawn_kept ? kRespawnKept : 0) : kRespawnNone);
     more.reset = g_reset;  // not read from 1.1.0 on: kResetPhase carries it, reliably and for its rest
     more.boss = rules::own_gauge_boss();
-    broadcast(more, false);
+    const uint32_t me = game::player();
+    const int held = me && !game::loading() ? motion::held_event_anim(me) : 0;
+    more2.event_anim = held < 0 ? 1 : held;  // held with no id known: still "held" (-1 is "not reported")
+    broadcast(more2, false);
 }
 
 // The player an event is about, by their character's name when we know them (a 1.0.0 player's events carry its
@@ -2315,6 +2335,60 @@ void reconcile_ceremonies() {
                      have);
         }
     }
+}
+
+// The other players' characters are updated every frame wherever they stand, as the event command "Set Network
+// Update Rate: Always" (2004[34], 0xD6D780) does for the Hellkite: chr+0x1FD bit 0 fixes the rate chr+0xF4 at 0.
+// Otherwise WorldChrMan's update (0xE3F7D7..0xE3F8D7) gives a character off screen a lower rate and one whose state
+// object is not active ([chr+0xC]+8 != 2) none at all (-1): no update, so an event animation it was playing never
+// reaches its end (the auto stop 0xE6B180 runs in the update). Vanilla never needed more: a phantom stays in the
+// host's area. Across the Firelink / Undead Burg seam the host's event animation 7520 (20:10:28, the guest still in
+// Firelink) was left open on the guest's copy of the host, which then had no collision and showed no attacks after
+// both stood together again (2026-10-19 test). Such a copy (any event animation, not only the bonfire ones above) is
+// also cleared once its player reports holding none (InfoMore2), or after 30 s for a player who does not report it.
+void remote_characters_upkeep() {
+    static double last = 0;
+    if (now() - last < 0.5) return;
+    last = now();
+    if (g_role == Role::None || game::loading()) return;
+    static int rate_lines = 0;
+    for (uint32_t chr : game::remote_player_chrs()) {
+        uint8_t flags = 0;
+        uint32_t rate = 0;
+        if (!read8(chr + 0x1FD, &flags) || !read32(chr + 0xF4, &rate) || ((flags & 1) && rate == 0)) continue;
+        *ptr<uint8_t>(chr + 0x1FD) = flags | 1;
+        *ptr<int32_t>(chr + 0xF4) = 0;
+        if (++rate_lines <= 20) {
+            LOG_INFO("[coop] Another player's character %08X is updated every frame from now on (its rate was %d)", chr,
+                     static_cast<int32_t>(rate));
+        }
+    }
+    static std::map<uint32_t, double> held_since;  // characters seen holding an event animation, since when
+    static std::map<uint32_t, double> cleared_at;
+    static int lines = 0;
+    std::map<uint32_t, double> held_now;
+    for (const auto& p : g_peers) {
+        if (p.dead || now() - p.last_seen > 3.0 || now() - p.anim_at < 3.0) continue;
+        const uint32_t chr = chr_of_peer(p.id);
+        if (!chr) continue;
+        const int held = motion::held_event_anim(chr);
+        if (held == 0 || (p.ceremony != 0 && held == p.ceremony)) continue;
+        const auto it = held_since.find(chr);
+        const double since = it == held_since.end() ? now() : it->second;
+        held_now[chr] = since;
+        const double held_for = now() - since;
+        const bool stuck = p.event_anim >= 0
+                               ? p.event_anim == 0 && p.event_free_since > 0 && now() - p.event_free_since >= 3.0 &&
+                                     held_for >= 3.0
+                               : p.ceremony == 0 && held_for >= 30.0;
+        if (!stuck || now() - cleared_at[chr] < 5.0) continue;
+        cleared_at[chr] = now();
+        if (motion::play_remote_anim(chr, motion::Anim{1, 0, 0}) && ++lines <= 60) {
+            LOG_INFO("[coop] %s's character still held event animation %d for %.0f s (%s): cleared", p.name.c_str(), held,
+                     held_for, p.event_anim >= 0 ? "they hold none" : "they do not report theirs");
+        }
+    }
+    held_since.swap(held_now);
 }
 
 void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
@@ -2429,6 +2503,15 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             p->ceremony = motion::synced_anim(m.ceremony) ? m.ceremony : 0;
             InfoMore more{};
             const bool more_ok = as(&more);
+            InfoMore2 more2{};
+            if (as(&more2)) {
+                if (more2.event_anim != 0) {
+                    p->event_free_since = 0;
+                } else if (p->event_anim != 0 || p->event_free_since == 0) {
+                    p->event_free_since = now();
+                }
+                p->event_anim = more2.event_anim;
+            }
             p->boss_fight = more_ok && more.boss_fight != 0;
             p->team_respawn = more_ok && more.team_respawn != 0;
             if (more_ok && (more.respawn & kRespawnPhase) == kRespawnWent && g_role == Role::Guest && from == g_host) {
@@ -3450,6 +3533,7 @@ void tick() {
         }
     }
     reconcile_ceremonies();
+    remote_characters_upkeep();
     rules::tick();
     {
         const auto& st = rules::state();

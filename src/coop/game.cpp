@@ -492,6 +492,8 @@ bool call_lua(const char* name) {
 int soul_level() { return field<int>(player_game_data(), 0x88, 0); }
 int souls() { return field<int>(player_game_data(), 0x8C, 0); }
 void set_souls(int value) { put<int>(player_game_data(), 0x8C, value < 0 ? 0 : value); }
+int humanity() { return field<int>(player_game_data(), 0x7C, 0); }  // talk function 29(10) reads the same
+void set_humanity(int value) { put<int>(player_game_data(), 0x7C, value < 0 ? 0 : value); }
 int death_count() { return field<int>(game_data_man(), 0x5C, 0); }
 
 }  // namespace coop::game

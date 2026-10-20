@@ -347,6 +347,17 @@ bool play_remote_anim(uint32_t chr, const Anim& a) {
     return done;
 }
 
+int held_event_anim(uint32_t chr) {
+    uint32_t request = 0, anim = 0, h0 = 0, h1 = 0, none0 = 0, none1 = 0;
+    if (!chr || !read32(chr + 0xFC, &h0) || !read32(chr + 0x100, &h1) || !read32(0x012E0C64, &none0) ||
+        !read32(0x012E0C68, &none1) || (h0 == none0 && h1 == none1)) {
+        return 0;
+    }
+    if (!read32(chr + 0x10, &request) || request < 0x10000 || !read32(request + 4, &anim)) return -1;
+    const int id = static_cast<int>(anim);
+    return id > 0 ? id : -1;
+}
+
 int remote_open_anim(uint32_t chr) {
     // The slot handle at +0xFC/+0x100 is the pair at 0x12E0C64/0x12E0C68 when there is none.
     uint32_t request = 0, anim = 0, h0 = 0, h1 = 0, none0 = 0, none1 = 0;

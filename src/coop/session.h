@@ -42,6 +42,8 @@ struct PeerInfo {
     double gait_at = 0;      // when they last reported it
     int ceremony = 0;        // the bonfire animation they report looping (their sit), 0 none
     double anim_at = 0;      // when one of their event animations last arrived
+    int event_anim = -1;     // the event animation their own character holds (1.2.0), 0 none, -1 not reported
+    double event_free_since = 0;  // since when they have reported holding none (0: they hold one, or unknown)
     int death_events = 0;    // kDead messages about them this session
     bool boss_fight = false; // a boss gauge is shown in their game (1.1.0 players report it)
     bool team_respawn = false;  // their respawn after a team wipe waits for the others' (kTeamRespawn)

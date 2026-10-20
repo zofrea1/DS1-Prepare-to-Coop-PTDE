@@ -124,6 +124,9 @@ bool call_lua(const char* name);
 int soul_level();
 int souls();
 void set_souls(int value);
+// The local player's (soft) humanity.
+int humanity();
+void set_humanity(int value);
 int death_count();
 
 }  // namespace coop::game

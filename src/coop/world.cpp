@@ -1073,7 +1073,9 @@ bool boss_fight() { return boss_handle(0) != 0xFFFFFFFF || boss_handle(1) != 0xF
 // The death we are in is part of a team wipe, as keep_dead_on_reload decides it when the warp goes (asked by the
 // death text, deathtext.cpp).
 bool team_wipe_death() {
-    return g_active && !g_invader && local_dead() && g_players >= 2 && session::wipe_reload(g_fell_at);
+    // The death script can ask before tick() has seen the fall (a fall death starts its text in the same frame).
+    const double fell = g_was_alive ? now() : g_fell_at;
+    return g_active && !g_invader && local_dead() && g_players >= 2 && session::wipe_reload(fell);
 }
 
 bool local_dead() {

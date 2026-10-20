@@ -55,6 +55,10 @@ int remote_loop_anim(uint32_t chr);
 // go of a finished one by itself (0xE6B180, every frame); one that stays long after its player moved on
 // was missed.
 int remote_open_anim(uint32_t chr);
+// Any event animation the character holds a slot for (a bonfire ceremony, a door, a lever, the fog gate, ...): its
+// id, -1 held with no id known, 0 none. While one is held the character has no collision and takes no other
+// animation (see the header comment).
+int held_event_anim(uint32_t chr);
 // True for the animations that are passed on (Remastered Seamless Co-op's list).
 bool synced_anim(int anim);
 

@@ -297,6 +297,7 @@ constexpr const wchar_t* kMsgTravelWaiting = L"Waiting for {} to close the menu.
 constexpr const wchar_t* kMsgTravelNoVessel = L"The host's world has no Lordvessel yet: no travel";
 constexpr const wchar_t* kMsgTravelNotThere = L"The host has not rested at that bonfire yet";
 constexpr const wchar_t* kMsgTravelBusy = L"The host cannot travel right now";
+constexpr const wchar_t* kMsgTripBusy = L"No travel right now";
 constexpr const wchar_t* kMsgTravelTimedOut = L"The host did not close the menu: no travel";
 constexpr const wchar_t* kMsgTravelOld = L"The host's game cannot travel for guests (Prepare to Co-op 1.2.0 can)";
 constexpr const wchar_t* kMsgKeysLent = L"Key items the host also holds are with you in this world";
@@ -371,8 +372,11 @@ int64_t g_ping_qpc = 0;  // guest: counter when the last ping was sent (0 none)
 std::vector<std::pair<int, bool>> g_flag_queue;
 int g_host_coop_players = 1;
 RestPoint g_rest;
-// Host: Homeward Bone used (seconds), see tick.
+// Host: a Homeward Bone or the Darksign used (seconds, 0 none), its trip still to go (host_tick). It holds the
+// travel slot from the use on (host_homeward).
 double g_homeward_at = 0;
+bool g_homeward_darksign = false;
+uint64_t g_homeward_bumped = 0;  // the guest whose waiting travel it replaced (answered if the trip cannot go)
 // Guest: the host's Homeward Bone, warp to this bonfire at g_follow_at.
 int g_follow_bonfire = -1;
 double g_follow_at = 0;
@@ -758,6 +762,7 @@ bool peer_is_invader(uint64_t id) {
 }
 
 uint32_t chr_of_peer(uint64_t id);
+const PeerInfo* peer_by_chr(uint32_t chr);
 
 // A co-op player of our session (the host or a guest; invaders do not count). The lobby can also hold players who
 // never got in, and a refused joiner still broadcasts its status: a host counts the players it admitted, everyone
@@ -1488,12 +1493,10 @@ void answer_travel(uint64_t to, uint32_t why) {
     send_to(to, a);
 }
 
-// Host: why our world cannot travel to that bonfire now (0: it can). A guest's travel is checked against our own
-// world, so a guest cannot take the party further than the host's own warp could, and waits as the host's own warp
-// does (session::travel_hold). A trip that started a moment ago still has its load ahead: no other goes meanwhile.
-uint32_t travel_refusal(int bonfire, bool spot) {
+// Host: why no trip of the party's can start now (0: one can), a travel or a Homeward Bone's.
+uint32_t trip_refusal() {
     if (!game::in_game() || game::loading() || world::local_dead() || rules::cutscene_playing() ||
-        rules::cutscene_loading() || now() - g_travel_started < kTravelGap) {
+        rules::cutscene_loading()) {
         return kTravelBusy;
     }
     switch (travel_hold()) {
@@ -1503,6 +1506,15 @@ uint32_t travel_refusal(int bonfire, bool spot) {
         case kHoldMateDown: return kTravelMateDown;
         default: break;
     }
+    return 0;
+}
+
+// Host: why our world cannot travel to that bonfire now (0: it can). A guest's travel is checked against our own
+// world, so a guest cannot take the party further than the host's own warp could, and waits as the host's own warp
+// does (session::travel_hold). A trip that started a moment ago still has its load ahead: no other goes meanwhile.
+uint32_t travel_refusal(int bonfire, bool spot) {
+    if (now() - g_travel_started < kTravelGap || g_homeward_at > 0) return kTravelBusy;
+    if (const uint32_t why = trip_refusal()) return why;
     if (!spot && !rules::own_lordvessel()) return kTravelNoVessel;
     if (!rules::warp_destination(bonfire)) return kTravelNotThere;
     return 0;
@@ -1567,6 +1579,50 @@ void host_travel_request(uint64_t from, const TravelMsg& m) {
     host_travel_tick();
 }
 
+// Host: a Homeward Bone's or the Darksign's trip cannot go (refused at the use or when it was to go).
+void homeward_refused(uint32_t why, bool darksign) {
+    LOG_INFO("[coop] Host %s: no trip (%u)", darksign ? "Darksign" : "Homeward Bone", why);
+    switch (why) {
+        case kTravelBossFight: say(travel_hold_text(kHoldBossFight)); break;
+        case kTravelInvader: say(travel_hold_text(kHoldInvader)); break;
+        case kTravelMateDown: say(travel_hold_text(kHoldMateDown)); break;
+        case kTravelReload: say(travel_hold_text(kHoldReload)); break;
+        default: say(kMsgTripBusy); break;
+    }
+}
+
+// Host: the trip of a Homeward Bone or the Darksign goes, unless something now holds the party's trips back (the
+// item can be used only when nothing does, but its animation takes a moment). The Darksign's cost is taken only
+// when the trip goes. The bone is not used up in a session (the game's UseGoods, which uses it up, is skipped), so
+// a refused trip costs nothing.
+void homeward_go(bool ready) {
+    const bool darksign = g_homeward_darksign;
+    const uint64_t bumped = g_homeward_bumped;
+    g_homeward_at = 0;
+    g_homeward_darksign = false;
+    g_homeward_bumped = 0;
+    const int bonfire = game::last_bonfire();
+    uint32_t why = ready ? trip_refusal() : kTravelBusy;
+    if (!why && bonfire < 0) why = kTravelNotThere;
+    if (why) {
+        homeward_refused(why, darksign);
+        if (bumped && admitted(bumped)) answer_travel(bumped, why);
+        return;
+    }
+    if (darksign) {
+        LOG_INFO("[coop] Darksign: %d souls and %d humanity lost", game::souls(), game::humanity());
+        game::set_souls(0);
+        game::set_humanity(0);
+    }
+    g_travel_started = now();
+    BonfireMsg m{};
+    fill_header(&m, kHomeward);
+    m.bonfire = bonfire;
+    broadcast(m);
+    LOG_INFO("[coop] Host %s: everyone goes to bonfire %d", darksign ? "Darksign" : "Homeward Bone", bonfire);
+    world::warp_now(game::bonfire_map(bonfire), -1);
+}
+
 void host_tick() {
     if (g_step == Step::Closing) {
         host_close_tick();
@@ -1594,19 +1650,11 @@ void host_tick() {
             ++i;
         }
     }
-    // A Homeward Bone in a session (Remastered Seamless Co-op): the host goes to their last bonfire and the
-    // guests follow there.
+    // A Homeward Bone or the Darksign in a session (Remastered Seamless Co-op): the host goes to their last
+    // bonfire and the guests follow there, once our game can take the trip (within 2 s of the use).
     if (g_homeward_at > 0) {
-        if (now() - g_homeward_at < 2.0 && game::in_game() && !game::loading()) {
-            const int bonfire = game::last_bonfire();
-            BonfireMsg m{};
-            fill_header(&m, kHomeward);
-            m.bonfire = bonfire;
-            broadcast(m);
-            LOG_INFO("[coop] Host Homeward Bone: everyone goes to bonfire %d", bonfire);
-            if (bonfire >= 0) world::warp_now(game::bonfire_map(bonfire), -1);
-        }
-        g_homeward_at = 0;
+        const bool ready = game::in_game() && !game::loading();
+        if (ready || now() - g_homeward_at >= 2.0) homeward_go(ready);
     }
     if (now() - g_last_state > 1.0) {
         g_last_state = now();
@@ -2337,6 +2385,57 @@ void reconcile_ceremonies() {
     }
 }
 
+// What the game keeps on another player's character here that decides whether it is updated, collides and
+// takes animations, for the log: [chr+0xC] is its map entity (+8 state, 2 active; +0x14 bit 0 dead or disabled,
+// bit 1 under the entity [+0x1C]), chr+0x1FD the update flags (bit 0 fixed rate, bit 3 visible), chr+0xF4 the
+// update rate, chr+0x29C its floor, [[chr+0x28]+0x1C] its physics.
+struct CopyLook {
+    uint32_t ent_state = 0xFFFFFFFF;  // -1: no entity
+    uint32_t ent_flags = 0;
+    uint32_t f1fd = 0, f1fe = 0, f3c4 = 0;
+    int32_t rate = 0;
+    int hp = 0;
+    bool floor = false, phys = false;
+    int held = 0;  // motion::held_event_anim
+    // The fields a change of is logged: not the rate, the visible bit or the HP beyond alive or not.
+    uint64_t sig() const {
+        uint64_t v = ent_state & 0xFF;
+        v = v << 8 | (ent_flags & 0xFF);
+        v = v << 8 | (f1fd & 0xE7);
+        v = v << 16 | (f1fe & 0xFFFF);
+        v = v << 4 | (floor ? 8 : 0) | (phys ? 4 : 0) | (hp > 0 ? 2 : 0) | (held != 0 ? 1 : 0);
+        return v ^ (static_cast<uint64_t>(f3c4) << 32);
+    }
+};
+
+CopyLook look_at(uint32_t chr) {
+    CopyLook c;
+    uint32_t ent = 0, ctrl = 0, phys = 0, floor = 0, v = 0;
+    uint8_t b = 0;
+    if (read32(chr + 0xC, &ent) && ent && read32(ent + 8, &v)) {
+        c.ent_state = v;
+        if (read8(ent + 0x14, &b)) c.ent_flags = b;
+    }
+    if (read8(chr + 0x1FD, &b)) c.f1fd = b;
+    if (read32(chr + 0x1FC, &v)) c.f1fe = v >> 16;
+    if (read32(chr + 0x3C4, &v)) c.f3c4 = v;
+    if (read32(chr + 0xF4, &v)) c.rate = static_cast<int32_t>(v);
+    if (read32(chr + 0x2D4, &v)) c.hp = static_cast<int>(v);
+    c.floor = read32(chr + 0x29C, &floor) && floor;
+    c.phys = read32(chr + 0x28, &ctrl) && ctrl && read32(ctrl + 0x1C, &phys) && phys;
+    c.held = motion::held_event_anim(chr);
+    return c;
+}
+
+std::string describe(const CopyLook& c) {
+    char buf[200];
+    std::snprintf(buf, sizeof(buf),
+                  "entity %d/%02X, 1FD %02X, 1FE %04X, 3C4 %08X, rate %d, HP %d, floor %s, physics %s, event animation %d",
+                  static_cast<int32_t>(c.ent_state), c.ent_flags, c.f1fd, c.f1fe, c.f3c4, c.rate, c.hp,
+                  c.floor ? "yes" : "none", c.phys ? "yes" : "none", c.held);
+    return buf;
+}
+
 // The other players' characters are updated every frame wherever they stand, as the event command "Set Network
 // Update Rate: Always" (2004[34], 0xD6D780) does for the Hellkite: chr+0x1FD bit 0 fixes the rate chr+0xF4 at 0.
 // Otherwise WorldChrMan's update (0xE3F7D7..0xE3F8D7) gives a character off screen a lower rate and one whose state
@@ -2346,23 +2445,84 @@ void reconcile_ceremonies() {
 // Firelink) was left open on the guest's copy of the host, which then had no collision and showed no attacks after
 // both stood together again (2026-10-19 test). Such a copy (any event animation, not only the bonfire ones above) is
 // also cleared once its player reports holding none (InfoMore2), or after 30 s for a player who does not report it.
+// The rate is fixed only on a character made 2 s ago or more: the game sets a new one up in its first frames
+// (its entity not active yet, rate -1), as it would without us. (A copy made while its player still got up at their
+// bonfire was the one with no collision, both times: party.cpp now waits for that.)
+// Each character's state is written to the log when it is first seen and when it changes, and a character we stand
+// inside of (it should push us away) is pointed out with it.
 void remote_characters_upkeep() {
     static double last = 0;
     if (now() - last < 0.5) return;
     last = now();
-    if (g_role == Role::None || game::loading()) return;
-    static int rate_lines = 0;
-    for (uint32_t chr : game::remote_player_chrs()) {
-        uint8_t flags = 0;
-        uint32_t rate = 0;
-        if (!read8(chr + 0x1FD, &flags) || !read32(chr + 0xF4, &rate) || ((flags & 1) && rate == 0)) continue;
-        *ptr<uint8_t>(chr + 0x1FD) = flags | 1;
-        *ptr<int32_t>(chr + 0xF4) = 0;
-        if (++rate_lines <= 20) {
-            LOG_INFO("[coop] Another player's character %08X is updated every frame from now on (its rate was %d)", chr,
-                     static_cast<int32_t>(rate));
-        }
+    struct Watch {
+        double first = 0;
+        bool told = false;       // its first line written (once we know whose it is, or after 1.5 s)
+        uint64_t sig = 0;
+        int inside = 0;          // checks in a row we stood inside it
+        double told_inside = -100;
+    };
+    static std::map<uint32_t, Watch> watch;
+    if (g_role == Role::None || game::loading()) {
+        watch.clear();  // a load makes every character anew, maybe at the same address
+        return;
     }
+    static int rate_lines = 0, look_lines = 0, inside_lines = 0;
+    std::map<uint32_t, Watch> seen;
+    const uint32_t me = game::player();
+    game::Vec3 at{};
+    float angle = 0;
+    const bool me_free = me && !world::local_dead() && motion::held_event_anim(me) == 0 && game::position(&at, &angle);
+    for (uint32_t chr : game::remote_player_chrs()) {
+        const PeerInfo* p = peer_by_chr(chr);
+        const std::string who = p ? p->name : "another player";
+        const auto it = watch.find(chr);
+        Watch w = it == watch.end() ? Watch{} : it->second;
+        CopyLook c = look_at(chr);
+        if (it == watch.end()) w.first = now();
+        if (!w.told && (p || now() - w.first >= 1.5)) {
+            w.told = true;
+            w.sig = c.sig();
+            if (++look_lines <= 300) {
+                char state[96] = "their state not known";
+                if (p) {
+                    std::snprintf(state, sizeof(state), "%s, up %.1f s, event animation %d", p->dead ? "dead" : "alive",
+                                  !p->dead && p->alive_since > 0 ? now() - p->alive_since : 0.0, p->event_anim);
+                }
+                LOG_INFO("[coop] %s's character %08X is here (made %.1f s ago; %s): %s", who.c_str(), chr,
+                         now() - w.first, state, describe(c).c_str());
+            }
+        } else if (w.told && c.sig() != w.sig) {
+            w.sig = c.sig();
+            if (++look_lines <= 300) {
+                LOG_INFO("[coop] %s's character %08X now: %s", who.c_str(), chr, describe(c).c_str());
+            }
+        }
+        if (now() - w.first >= 2.0 && !((c.f1fd & 1) && c.rate == 0)) {
+            *ptr<uint8_t>(chr + 0x1FD) = static_cast<uint8_t>(c.f1fd | 1);
+            *ptr<int32_t>(chr + 0xF4) = 0;
+            if (++rate_lines <= 20) {
+                LOG_INFO("[coop] %s's character %08X is updated every frame from now on (its rate was %d)", who.c_str(),
+                         chr, c.rate);
+            }
+        }
+        // Two characters that collide stand 0.5 m or more apart (their capsules).
+        game::Vec3 pos{};
+        if (me_free && p && !p->dead && p->ceremony == 0 && p->event_anim <= 0 && c.held == 0 && c.hp > 0 &&
+            game::chr_position(chr, &pos)) {
+            const float dx = pos.x - at.x, dz = pos.z - at.z;
+            const float apart = std::sqrt(dx * dx + dz * dz);
+            w.inside = apart < 0.3f && std::fabs(pos.y - at.y) < 1.0f ? w.inside + 1 : 0;
+            if (w.inside >= 2 && now() - w.told_inside > 20.0 && ++inside_lines <= 20) {
+                w.told_inside = now();
+                LOG_INFO("[coop] We stand inside %s's character %08X (%.2f m apart), made %.0f s ago: it may not "
+                         "collide; %s", who.c_str(), chr, apart, now() - w.first, describe(c).c_str());
+            }
+        } else {
+            w.inside = 0;
+        }
+        seen[chr] = w;
+    }
+    watch.swap(seen);
     static std::map<uint32_t, double> held_since;  // characters seen holding an event animation, since when
     static std::map<uint32_t, double> cleared_at;
     static int lines = 0;
@@ -2650,6 +2810,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             BonfireMsg m;
             if (from != g_host || !as(&m) || g_step != Step::InWorld || g_invade || m.bonfire < 0) return;
             g_travel_asked = 0;
+            g_follow_bonfire = -1;  // the host's latest trip is the one followed
             g_follow_travel = m.bonfire;
             g_follow_told = 0;
             guest_travel_tick();
@@ -2701,6 +2862,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             BonfireMsg m;
             if (from != g_host || !as(&m) || g_step != Step::InWorld || g_invade || m.bonfire < 0) return;
             say(kMsgHostWarpOut);
+            g_travel_asked = 0;    // our own travel request is answered by this trip
+            g_follow_travel = -1;  // the host's latest trip is the one followed
             g_follow_told = 0;
             g_follow_bonfire = m.bonfire;
             g_follow_at = now() + 3.0;
@@ -2986,6 +3149,17 @@ party::PeerState peer_state(uint32_t chr, const std::wstring& name) {
     s.deaths = p->deaths;
     s.death_events = p->death_events;
     s.map = p->map;
+    s.up_for = !p->dead && p->alive_since > 0 ? now() - p->alive_since : 0;
+    s.event_anim = p->event_anim;
+    // Up: out of every event animation for a second (sitting at a bonfire aside, which is shown on the character),
+    // or, for a player who does not report theirs, standing for 6 s (the rise after a respawn takes about 3 s).
+    if (p->event_anim < 0) {
+        s.settled = s.alive && s.up_for >= 6.0;
+    } else if (p->event_anim == 0) {
+        s.settled = s.alive && p->event_free_since > 0 && now() - p->event_free_since >= 1.0;
+    } else {
+        s.settled = s.alive && p->ceremony != 0;
+    }
     return s;
 }
 
@@ -3740,9 +3914,26 @@ void curse_world() {
     g_last_state = 0;
 }
 
-void host_homeward() {
-    if (!hosting()) return;
+bool host_homeward(bool darksign) {
+    if (!hosting()) return false;
+    const uint32_t why = now() - g_travel_started < kTravelGap || g_homeward_at > 0 ? kTravelBusy : trip_refusal();
+    if (why) {
+        homeward_refused(why, darksign);
+        return false;
+    }
+    // The trip takes the travel slot now: a guest's travel asked for in the same tick (the messages are read
+    // before host_tick) would warp us a second time. A guest's travel waiting for our menu comes along to ours.
+    g_homeward_bumped = 0;
+    if (g_travel_bonfire >= 0) {
+        LOG_INFO("[coop] Our %s goes instead of %s's travel to bonfire %d", darksign ? "Darksign" : "Homeward Bone",
+                 steam::persona(g_travel_from).c_str(), g_travel_bonfire);
+        g_homeward_bumped = g_travel_from;
+        g_travel_bonfire = -1;
+    }
     g_homeward_at = now();
+    g_homeward_darksign = darksign;
+    g_travel_started = now();
+    return true;
 }
 
 bool in_session() {
@@ -3758,8 +3949,6 @@ bool guest() { return g_role == Role::Guest; }
 bool active() { return g_role != Role::None; }
 bool idle() { return g_role == Role::None; }
 bool invader() { return g_role == Role::Guest && g_invade; }
-double homeward_time() { return g_homeward_at; }
-void clear_homeward_time() { g_homeward_at = 0; }
 const std::vector<PeerInfo>& peers() { return g_peers; }
 
 void remember_rest_point() {

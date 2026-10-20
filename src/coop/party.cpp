@@ -175,7 +175,7 @@ std::vector<Node> slot_nodes() {
 }
 
 double g_queued_at[3] = {-100, -100, -100};
-bool g_deferred[3] = {};  // a missing character waits for its player to be back in the world (logged once)
+int g_deferred[3] = {};  // a missing character waits: 1 for its player to be in the world, 2 to be up (logged once)
 bool g_was_loading = true;
 double g_loaded_at = 0;
 double g_last_check = 0;
@@ -261,7 +261,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
         g_was_loading = true;
         g_removed.clear();
         for (Made& m : g_made) m = Made{};
-        for (bool& d : g_deferred) d = false;
+        for (int& d : g_deferred) d = 0;
         return;
     }
     if (g_was_loading) {
@@ -293,13 +293,29 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
             // character while the host was still loading after its own death: it came out invisible and could be
             // walked through, and stayed so after the host was back (2026-10-17 test).
             if (ps.known && !ps.invader && !ps.alive) {
-                if (!g_deferred[r.slot]) {
-                    g_deferred[r.slot] = true;
+                if (g_deferred[r.slot] != 1) {
+                    g_deferred[r.slot] = 1;
                     LOG_INFO("[coop] %s's character is missing: it is created once they are back in the world", name);
                 }
                 continue;
             }
-            g_deferred[r.slot] = false;
+            // Nor while they still get up at their bonfire (event animation 6950 after a respawn) or hold another
+            // event animation: the character made then could be walked through and showed none of their attacks
+            // for as long as it lived (the host's copy on the guest, made 2.3 s after the host stood again,
+            // 2026-10-19 twice). Made anyway 20 s after they stood, an event animation or not.
+            if (ps.known && !ps.invader && !ps.settled && ps.up_for < 20.0) {
+                if (g_deferred[r.slot] != 2) {
+                    g_deferred[r.slot] = 2;
+                    LOG_INFO("[coop] %s's character is missing: it is created once they are up (event animation %d)",
+                             name, ps.event_anim);
+                }
+                continue;
+            }
+            if (g_deferred[r.slot] == 2) {
+                LOG_INFO("[coop] %s is up %.1f s after standing again (event animation %d)", name, ps.up_for,
+                         ps.event_anim);
+            }
+            g_deferred[r.slot] = 0;
             if (push_waiting(member)) {
                 g_queued_at[r.slot] = now();
                 LOG_INFO("[coop] %s's character is missing: asked the game to create it again", name);

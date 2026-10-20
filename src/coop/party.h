@@ -37,6 +37,9 @@ struct PeerState {
     int deaths = -1;        // their death count as they report it (-1 unknown)
     int death_events = -1;  // deaths they told the session about (kDead), -1 unknown
     int map = -1;           // the map they report being in (-1 unknown)
+    double up_for = 0;      // how long they have reported being alive (0 dead or unknown)
+    int event_anim = -1;    // the event animation their own character holds, as they report it (0 none, -1 unknown)
+    bool settled = false;   // alive and out of event animations (the rise after a respawn included) for a moment
 };
 
 // Every frame on the game thread while a seamless session is established. `peer` answers for a character (and

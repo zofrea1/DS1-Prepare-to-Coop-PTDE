@@ -69,8 +69,10 @@ void close_world();  // the host's Black Separation Crystal: every other player 
 void cycle_rules();  // Ominous Tome: none -> allies hostile -> teams -> none
 void taunt();        // Dried Fingers
 void curse_world();  // Cursed Pendant: curses our own world (offline or hosting), or lifts the curse
-// The host used a Homeward Bone in a session: the host and every guest go to the host's last bonfire.
-void host_homeward();
+// The host used a Homeward Bone in a session, or the Darksign (which also costs every soul and all humanity when
+// the trip goes): the host and every guest go to the host's last bonfire. The trip takes the travel slot at once
+// and goes on the next tick; false (and the host told why) when no trip can go now.
+bool host_homeward(bool darksign);
 
 // Item rules (Remastered Seamless Co-op's): a session is established (we host one or we are in one).
 bool in_session();
@@ -79,9 +81,6 @@ bool guest();
 bool active();       // any role, including searching and joining
 bool idle();         // no role at all (the session items may start one)
 bool invader();      // we invade
-// Host: when the last Homeward Bone was used (GetTickCount64 seconds; 0 none).
-double homeward_time();
-void clear_homeward_time();
 
 // Kept for the session text. The on-screen box that used to draw these lines is not shown; soul level and
 // ping are appended to the name on each companion's floating health bar instead.

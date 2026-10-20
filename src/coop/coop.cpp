@@ -182,18 +182,14 @@ bool use_item(int32_t id) {
         case 330:
             // In a session the host's bone takes everyone to the host's last bonfire (session tick).
             if (!session::in_session()) return false;
-            session::host_homeward();
+            session::host_homeward(false);
             return true;
         case 117:
             // The Darksign's effect (SpEffect 3226) is the Homeward Bone's (3220, stateInfo 16) plus clearSoul and
             // heroPointDamage 99: the same trip for everyone, and the user loses every soul and all humanity, with
-            // no bloodstain, as in the game.
+            // no bloodstain, as in the game (taken when the trip goes).
             if (!session::in_session()) return false;
-            LOG_INFO("[coop] Darksign: %d souls and %d humanity lost; everyone goes to our last bonfire",
-                     coop::game::souls(), coop::game::humanity());
-            coop::game::set_souls(0);
-            coop::game::set_humanity(0);
-            session::host_homeward();
+            session::host_homeward(true);
             return true;
         default:
             return false;

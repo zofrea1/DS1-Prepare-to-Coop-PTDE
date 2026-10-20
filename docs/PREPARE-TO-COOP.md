@@ -81,7 +81,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Bosses and areas | Defeating a boss or crossing into another area no longer ends the session. Joining is never locked. Players roam the host's world freely. |
 | Fog walls | The white walls that keep phantoms in the host's area are gone (boss fog stays). |
 | World events | Every player's game runs the world's scripted events, not only the host's (`GuestWorldEvents`): a guest exploring alone meets the Hellkite on the Undead Burg bridge, starts boss fights, rides lifts and gets the event rewards. Progress (event flags) is shared. |
-| Travel | Anyone can warp by bonfire, and everyone travels together. The host's warp takes every guest to the same bonfire. A guest's warp asks the host's game, which takes everyone there if the host's own world could: the host owns the Lordvessel and has rested at that bonfire (a guest's warp list shows the host's bonfires); otherwise the guest is told why not. A player with a menu open or in a bonfire animation (sitting, kindling) follows once it is over and is told so meanwhile; a player in a cutscene follows after it, and a player who has fallen follows once back on their feet. A guest's travel waits up to a minute for the host's menu, and the host's own warp replaces a guest's travel that is still waiting. Nobody travels while a boss fight is on (a standing teammate's included), an invader is in the world, a teammate is down (their respawn goes first), or a world is starting over after a lost boss fight. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later, as they follow a travel ("The power of the homeward bone consumes you..."); the bone waits for the same things as travel. The Darksign does the same as the bone (the host only), and costs every soul and all humanity, as in the game. Guests cannot use Homeward Bones or the Darksign. (In ds1sc only the host travels; a guest's warp does nothing.) |
+| Travel | Anyone can warp by bonfire, and everyone travels together. The host's warp takes every guest to the same bonfire. A guest's warp asks the host's game, which takes everyone there if the host's own world could: the host owns the Lordvessel and has rested at that bonfire (a guest's warp list shows the host's bonfires); otherwise the guest is told why not. A player with a menu open or in a bonfire animation (sitting, kindling) follows once it is over and is told so meanwhile; a player in a cutscene follows after it, and a player who has fallen follows once back on their feet. A guest's travel waits up to a minute for the host's menu, and the host's own warp replaces a guest's travel that is still waiting. Nobody travels while a boss fight is on (a standing teammate's included), an invader is in the world, a teammate is down (their respawn goes first), or a world is starting over after a lost boss fight. When the host uses a Homeward Bone, the host goes to their last bonfire and every guest follows a moment later, as they follow a travel ("The power of the homeward bone consumes you..."); the bone waits for the same things as travel. The Darksign does the same as the bone (the host only), and costs every soul and all humanity, as in the game, taken when the trip goes. Neither is a rest: the trip is a warp (`WarpNextStageKick`), and the enemies everyone killed stay dead, as after a bone in single player. Guests cannot use Homeward Bones or the Darksign. (In ds1sc only the host travels; a guest's warp does nothing.) |
 | Bonfires | Lighting a bonfire for the first time lights it for every player. When anyone rests, every player's world resets (enemies respawn), and a teammate who fell and is spectating respawns. While a living teammate is in a boss fight nobody can rest (the bonfire is out of use, as with enemies nearby), so the boss is not reset in the middle of their fight. A player who sat down before the fight began stays seated with the bonfire menu (level up, attunement, the Bottomless Box, kindling, Reverse Hollowing): the rest that resets the world is behind them. Only the warp waits for the fight. If everyone in a boss fight fell while others waited outside, the rest that brings them back also reloads the world of every living player whose game had the boss awake, together with the fallen, so the boss starts over for everyone: the one who rested stays at that bonfire, another player in the area goes to their last bonfire. The reload waits until the one who rested leaves the bonfire menu (a load is not started from a menu); while the others wait, that player is told so at the bottom of the screen. The others see you sit down, rest, kindle, reverse hollowing and stand up (`BonfireAnimations`). |
 | Key items | Entering another world, your key items stay at home (the game's own rule), so a guest cannot open what the host's world has not opened yet. A guest carries there the key items of their own that the host holds too, and one the host gets while you are there joins you at once if you have it at home (a 1.2.0 host). Only items that open the way and that no event takes back are carried: the keys, the Master Key, the Peculiar Doll, the boxes and the Rite of Kindling (not Embers, Lord Souls or the Lordvessel). Key items gained in the host's world come home with you, and stay with you through deaths and travel there. |
 | Bloodstains | A guest who dies leaves their bloodstain where they fell, in the host's world, and finds the same stain at the same place when they are back in their own. |
@@ -234,8 +234,11 @@ host's already went follows at once, and the host does not wait for a guest that
 alone). A warp that replaces the waiting one (the trip home) drops the wait. Players from before this never wait
 or are waited for. A player who fell counts as dead in their reports until their respawned character exists, so a
 wipe lasts through the loads. Another player's character that a load threw away is asked for again only once that player reports standing in the world: asked
-for during their load, it came out invisible and could be walked through. A character first seen while its player
-reports being dead or loading is rebuilt once they are back.
+for during their load, it came out invisible and could be walked through. Nor is it asked for while they still get
+up at their bonfire (event animation 6950, about 3 s after a respawn or a Homeward Bone) or hold any other event
+animation (up to 20 s after they stood): asked for then, it could be walked through and showed none of their attacks
+for as long as it lived (the host's character on the guest, made 2.3 s after the host stood again, twice). A
+character first seen while its player reports being dead or loading is rebuilt once they are back.
 
 **A death keeps the world.** In vanilla a death reloads the world with every enemy back. In a session only the
 game of the player who fell reloads, so the enemies the team had killed came back in that game alone: after the
@@ -461,7 +464,13 @@ player opening a door, pulling a lever, passing a fog gate) never ended, and a c
 collision and takes no other animation: after a player went through the Firelink / Undead Burg seam their copy
 could be walked through and showed no attacks. Each player also reports the event animation their own character
 holds (1.2.0, behind the 1.1.0 report), and a copy still holding one 3 s after its player holds none (30 s for
-players who do not report it) is stopped as the game stops its own.
+players who do not report it) is stopped as the game stops its own. The rate is fixed only on a character made 2 s
+ago or more: the game sets a new one up in its first frames (its entity not active yet, rate -1).
+
+For the log, each of these characters' state (its map entity's state and flags at `[chr+0xC]+8` and `+0x14`, the
+update flags `chr+0x1FD`, `chr+0x1FE`, `chr+0x3C4`, the rate, HP, floor, physics and event animation) is written
+when it is first seen, with its player's report (up for how long, which event animation), and again when it
+changes; a character we stand inside of (two that collide stay 0.5 m apart) is pointed out with its state.
 
 A player who falls in their own world while joining (before the move into the host's world) has the join called
 off: the death goes to their own last bonfire, as any death does.
@@ -557,11 +566,15 @@ to `items::travel_key` (an Ember, Lord Soul or the Lordvessel handed over there 
   carries out for everyone, or turns down (message 26). A guest's warp list (`0xC40A50`, count `0xC406D0`) is answered
   from the host's flags. The bonfire menu's warp rows (710, 717) stay shut during a living teammate's boss fight, and
   for a guest when the host has no Lordvessel. Every warp, the host's own and a guest's request, and the
-  Homeward Bone wait on `session::travel_hold` (a boss fight, an invader, a lost fight's reload here or in a teammate's
+  Homeward Bone and the Darksign wait on `session::travel_hold` (a boss fight, an invader, a lost fight's reload here or in a teammate's
   game, a fallen teammate), so no travel load replaces a respawn or a reload that is waiting. Following waits while a
   menu is open (`world::menu_open`), in a bonfire animation, in a cutscene, or while dead (the respawn goes first,
   with its own waits); the host takes a guest's travel only out of its menus and bonfire animations, and its own warp
   (animation 7725) replaces a waiting one. A trip blocks any other for 5 s, since its load begins frames later.
+  The bone's trip takes that slot the moment it is used (a guest's travel asked for in the same tick would warp the
+  host twice: the messages are read before the host's tick), replaces a guest's waiting travel, and checks the
+  holds again when it goes on the next tick; the Darksign's cost is taken only then. In a session the game's
+  `UseGoods` (`0xE50C70`, which applies the bone's effect and uses it up) is skipped, so a refused trip costs nothing.
 - **Teams:** who may hit whom comes from the team relation table (`0x12DF268`, 19 x 19, row attacker,
   column target) and each character's team (`chr+0x74`), mostly read inline, so the mod writes the team on the
   players' characters every frame (and answers the getter `0xE68C80` the same way). ds1sc

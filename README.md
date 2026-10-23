@@ -1,5 +1,3 @@
-## If my mod brought you some happiness, and you have the means, you're welcome to donate at [buymeacoffee.com/zofrea](https://buymeacoffee.com/zofrea). Thank you and enjoy the mod!
-
 # Prepare to Co-op Edition
 
 Play all of **Dark Souls: Prepare to Die Edition** together with up to three friends, from the Undead Asylum to the Kiln, without the limits of the game's own co-op. Guests keep their own body and progress, deaths respawn at a bonfire without bringing back the enemies the team has killed, a player who falls during a boss fight or an invasion spectates the others until the team wins or wipes (a wipe respawns everyone together in a world that starts over), boss kills and area changes no longer end the session, multiplayer fog walls are gone, a bonfire rest resets everyone's world (never in the middle of a teammate's boss fight), progress made together carries home, and enemies scale with the number of players. Evil spirits can invade a session too.

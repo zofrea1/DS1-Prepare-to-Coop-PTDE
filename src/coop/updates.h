@@ -12,7 +12,8 @@ namespace coop::updates {
 // Asks GitHub on a thread of its own (a few seconds at most; nothing happens when there is no answer), against
 // `version` (this build's, or the hidden TestVersion key's, which shows the notice on a build that is current).
 void start(const char* version);
-// Every frame on the game thread: shows the notice while no character is loaded, and closes it for good once one is.
+// Every frame on the game thread: shows the notice until the first character is loaded, then closes it for good.
+// An answer that comes after that is only logged (map loads look like the title screen).
 void tick();
 
 }  // namespace coop::updates

@@ -141,8 +141,9 @@ DWORD WINAPI check_thread(void*) {
 
 bool g_started = false;
 bool g_reported = false;
-bool g_shown = false;  // the notice is on screen
-bool g_done = false;   // closed for good (a character was loaded while it showed), or nothing to show
+bool g_loaded = false;  // a character has been loaded since the start
+bool g_shown = false;   // the notice is on screen
+bool g_done = false;    // closed for good (a character was loaded), or nothing to show
 
 }  // namespace
 
@@ -161,6 +162,10 @@ void start(const char* version) {
 
 void tick() {
     if (!g_started || g_done) return;
+    // The notice is for the title screen before the first character load. A map load has no character either,
+    // and PlayerGameData lives from start to exit, so nothing later tells the title screen apart: once a character
+    // was loaded, the notice is not shown again this run.
+    if (game::in_game()) g_loaded = true;
     const int state = g_state.load();
     if (state == kPending) return;
     if (!g_reported) {
@@ -176,19 +181,20 @@ void tick() {
         g_done = true;
         return;
     }
-    // On the title screen (no character loaded) until the player is in the world; a check that answers in the
-    // world waits for the next visit to the title screen.
-    const bool title = !game::in_game();
-    if (title && !g_shown) {
+    if (g_loaded) {
+        if (g_shown) {
+            overlay::set_notice({});
+            g_shown = false;
+        } else {
+            LOG_INFO("[coop] Update check: the answer came after a character was loaded; the notice waits for the next start");
+        }
+        g_done = true;
+    } else if (!g_shown) {
         const std::wstring latest = text::widen(g_latest), current = text::widen(g_ours);
         overlay::set_notice({L"Prepare to Co-op Edition " + latest + L" is available",
                              L"You have " + current + L". Download the new version from GitHub or NexusMods:",
                              kReleasesPage, kNexusPage});
         g_shown = true;
-    } else if (!title && g_shown) {
-        overlay::set_notice({});
-        g_shown = false;
-        g_done = true;
     }
 }
 

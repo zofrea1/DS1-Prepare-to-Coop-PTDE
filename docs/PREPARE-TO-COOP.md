@@ -580,9 +580,10 @@ session never tells anyone to update. Instead, at each start (`CheckForUpdates`,
 asks GitHub's API for the repository's latest release (`api.github.com/repos/zofrea1/DS1-Prepare-to-Coop-PTDE/
 releases/latest`, WinHTTP, 5 s timeouts, drafts and pre-releases left out) and compares its tag with this build's
 version. A newer one is announced in a box at the top of the title screen, drawn by the mod's Direct3D overlay (a
-Windows message box would take the focus from a game in exclusive fullscreen), until a character is loaded; an answer
-that comes during play waits for the next visit to the title screen. No answer (offline, a firewall) shows nothing;
-the log says what happened.
+Windows message box would take the focus from a game in exclusive fullscreen), until a character is loaded. An answer
+that comes after that is only logged and shown at the next start: a map load has no character either, and the game's
+PlayerGameData lives from start to exit, so a later visit to the title screen cannot be told apart from a load. No
+answer (offline, a firewall) shows nothing; the log says what happened.
 
 ### World events
 

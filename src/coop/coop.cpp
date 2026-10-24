@@ -366,7 +366,8 @@ void coop_install(const CoopConfig& config) {
     coop::items::set_dialog_text(&parchment_dialog);
     coop::world::set_before_rest_handler(&before_rest);
     g_miracle = coop::world::set_homeward_state_handler(&homeward_state);
-    if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: NetworkTickRate is not available");
+    if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
+    coop::netrate::set_smoothing(g_cfg.net_smoothing);
     coop::world::set_blossom_counter(&blossom_count);
     coop::world::Config wc;
     wc.death_debuffs = g_cfg.death_debuffs;
@@ -392,8 +393,10 @@ void coop_install(const CoopConfig& config) {
     const int overhead = g_cfg.overhead_display >= 0 && g_cfg.overhead_display <= 4 ? g_cfg.overhead_display : 4;
     LOG_INFO("[coop] Companion health bars show the %s", kOverhead[overhead]);
     LOG_INFO("[coop] Invasion rewards: %s", g_cfg.invasion_rewards ? "Humanity for the side that wins" : "off");
-    LOG_INFO("[coop] Network updates when hosting: %d a second (NetworkTickRate; guests use their host's)",
-             std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)));
+    LOG_INFO("[coop] Network updates when hosting: %d a second (NetworkTickRate; guests use their host's); smoothing "
+             "%d ms above 6 a second (NetworkSmoothing)",
+             std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)),
+             std::max(0, std::min(coop::netrate::kMaxSmoothing, g_cfg.net_smoothing)));
     g_installed = true;
     LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade%s.",
              g_items ? "given at every bonfire rest" : "UNAVAILABLE", texts ? "" : "(On-screen texts unavailable.) ",

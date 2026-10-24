@@ -552,11 +552,26 @@ rounds (`0xE56BC0`, packet type 3, 8 a packet, one packet every other frame) sta
 table at WorldChrMan+0x2B4); their HP from the host every 4th frame (`0xE56790`). The mod's own reports go once a
 second.
 
+Between updates: a player's character moves toward the newest update at the speed that covers it in 1.2 times the
+gap (the double at `0x11E84F8`, used at `0xE1F3A1`), an enemy's (`0xE21270`, NetAIManipulator, gap `+0x288`) in 1.1
+times it (`0x11E8500` at `0xE21663`) and turns by angle over gap; either jumps when the update would need more than
+20 m/s (an enemy: its own limit, `+0x80`), the gap is 0, or more than 2 s passed. A player's animations (both layers,
+with their time, packed by `0xE2C030`) come in the same update, so another player's roll or swing starts when the
+next one arrives. An enemy's actions are messages of their own (`0xE56AB0`, packet type 0x21), sent the frame they
+start whatever the rate. The update loop (`0xE1F950`) decodes every update that came for a player in a frame (pop
+`0xD30140`, back to `0xE1F980`); the gap is zeroed after each, so the second of two in one frame jumps. Enemies take
+only the newest position each frame (`0xE556F0` overwrites, `0xE55360` takes it once).
+
 `NetworkTickRate` (the host's, sent behind the state message, 1.3.0) sets the player update's reload to 30 / rate
-frames and the enemies' round to 0.25 x 6 / rate s in every game of the session. The receiver's turn is the time of a
-30 FPS frame over the gap the update took (`netrate.cpp` stubs at `0xE1F83C` and `0xE1F8CB`, never less than the
-game's fifth, at most the whole turn), so a character turns in step whatever rate its player sends at; at the
-game's own rate the turn is the game's. A guest of 1.2.0 or older keeps sending six a second.
+frames and the enemies' round to 0.25 x 6 / rate s in every game of the session. Above the game's own rate the
+receiving side changes too (`netrate.cpp`): the pop takes every update that is waiting and keeps the newest (each
+holds the whole state); the movement covers an update in at least the gap plus `NetworkSmoothing` (each player's
+own, default 25 ms; stubs at `0xE1F3A1` and `0xE21663`), where the game's 20% (10%) of slack is a few ms at thirty
+a second and an update a little late left the character standing; and the turn is a 30 FPS frame over the gap plus
+the smoothing (stubs at `0xE1F83C` and `0xE1F8CB`, never less than the game's fifth, at most the whole turn). A
+character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 58 ms
+at thirty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
+older keeps sending six a second.
 
 ### World events
 

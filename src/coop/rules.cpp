@@ -2239,6 +2239,40 @@ void __fastcall hk_multiplay_test(uint8_t* cond, void* edx, float dt, uint8_t* e
     cond[8] = static_cast<uint8_t>((cond[8] & 0xFE) | (pass ? 1 : 0));
 }
 
+// The NPC invasions (Kirk twice in the Demon Ruins, Paladin Leeroy, Maneater Mildred, Xanthous King Jeremiah, and the
+// one in the Depths) are map events that place a black NPC summon sign (2003[25], sign type 1) once the player
+// walks into an area, if the game is the host or alone and the player is in human form: "IF Character Type
+// (10000, Alive)" (EcTestChrType, vtable 0x11DD660 slot 1 = 0xBB75D0, thiscall(cond, dt, event): +0x18 entity,
+// +0x1C type, result in bit 0 of +8). The game has no other test for it (SosSignMan's black sign summons whoever
+// placed it). While the world is cursed by the Cursed Pendant, that test passes for a hollow player too in these
+// events, so the dark spirits invade the hollow as well (user request, 2026-10-23); a world without the curse
+// keeps the game's own rule.
+constexpr uint32_t kChrTypeVtable = 0x011DD660;
+constexpr uint32_t kChrTypeTest = 0x00BB75D0;
+constexpr int kNpcInvasionEvents[] = {11005039, 11105030, 11315030, 11405035, 11415035, 11415038};
+constexpr int kChrTypeAlive = 0, kChrTypeHollow = 8;
+
+void __fastcall hk_chr_type_test(uint8_t* cond, void* edx, float dt, uint8_t* event) {
+    using TestFn = void(__fastcall*)(uint8_t*, void*, float, uint8_t*);
+    reinterpret_cast<TestFn>(kChrTypeTest)(cond, edx, dt, event);
+    if (!g_state.infection || !cond || !event || (cond[8] & 1)) return;
+    const int entity = *reinterpret_cast<int*>(cond + 0x18);
+    const int wanted = static_cast<int8_t>(cond[0x1C]);
+    if (entity != 10000 || wanted != kChrTypeAlive) return;
+    uint32_t id = 0;
+    if (!read32(reinterpret_cast<uint32_t>(event) + kEventId, &id) || !in_list(kNpcInvasionEvents, static_cast<int>(id))) {
+        return;
+    }
+    if (game::chr_type() != kChrTypeHollow) return;
+    cond[8] |= 1;
+    static int lines = 0;
+    static uint32_t last_id = 0;
+    if (id != last_id && ++lines <= 20) {
+        last_id = id;
+        LOG_INFO("[coop] The world is cursed: NPC invasion event %u takes us as human although we are hollow", id);
+    }
+}
+
 // A run of a map event that another player's game started reaches this game as an event sync (FrpgEmkEventIns
 // slot 4, 0xBC4000: thiscall(event, connection, type, data, size), ret 0x10). Types 1 and 2 move the event's
 // program counter (+0x20 points at it) past the condition that passed there, and set its player (+0x44 = 10001 +
@@ -3922,6 +3956,8 @@ int install() {
         failed += install_one("team types", g_team_orig != nullptr);
     }
     failed += install_one("world tendency", swap_pointer(kTendencyVtable + 4, kTendencyTest, reinterpret_cast<void*>(&hk_tendency)));
+    failed += install_one("NPC invasions in a cursed world",
+                          swap_pointer(kChrTypeVtable + 4, kChrTypeTest, reinterpret_cast<void*>(&hk_chr_type_test)));
     {
         // push esi ; mov esi,ecx ; movzx ecx,byte [esi+18h]
         static const uint8_t k[7] = {0x56, 0x8B, 0xF1, 0x0F, 0xB6, 0x4E, 0x18};

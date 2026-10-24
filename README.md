@@ -53,7 +53,7 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 | Abyssal Eye Orb | A guest returns home; the host disbands the session. |
 | Ominous Tome | Host: change the world rules (allies cannot harm each other, allies can harm each other, the host against the guests). |
 | Dried Fingers | Host: taunt invaders into your world: an invader looking for a world is 50% more likely to pick yours. |
-| Cursed Pendant | Curse your own world (pure black World Tendency), alone or as host: black phantoms appear in every area that has them and stay until you use the pendant again. The curse lasts through sessions; it is not saved, so after restarting the game use the pendant again. |
+| Cursed Pendant | Curse your own world (pure black World Tendency), alone or as host: black phantoms appear in every area that has them and stay until you use the pendant again, and the NPC invaders (Kirk, Leeroy, Mildred, Jeremiah) come even while you are hollow. The curse lasts through sessions; it is not saved, so after restarting the game use the pendant again. |
 | Crimson Blossom | Not used: one blooms with each death in a session (up to five), each lowering maximum HP by 10% until your next bonfire rest, where they wither (`DeathDebuffs`). |
 | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds. |
 

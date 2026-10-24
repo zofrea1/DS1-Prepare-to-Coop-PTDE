@@ -26,6 +26,9 @@ struct CoopConfig {
     bool bonfire_animations = true;
     // Text over other players: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
     int overhead_display = 4;
+    // Host: how many times a second every game of the session sends its player's character and the enemies it moves
+    // (6, the game's own, to 30). Guests and invaders use their host's.
+    int net_rate = 6;
     // Enemy and boss scaling per extra player, in percent.
     int enemy_health = 35;
     int enemy_damage = 0;

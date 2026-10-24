@@ -611,7 +611,7 @@ void __cdecl before_map_load() {
         if (!g_place_bonfire && g_trip_reload) {
             // The host's trip was a load at home, which started its maps' temporary flags over; the bone or the
             // Darksign may have left a boss fight, whose working flags would otherwise wake the boss early in our
-            // game when we come back (the stale-flag boss of the 2026-10-17 test).
+            // game when we come back.
             const int n = clear_visited_temporary_flags();
             LOG_INFO("[coop] Following the host's trip: the host's world's temporary flags (xxxx5xxx) start over, as "
                      "the host's load did (%d block(s))", n);

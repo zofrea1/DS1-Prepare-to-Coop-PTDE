@@ -116,9 +116,12 @@ int living_teammates() {
     return n;
 }
 
+bool g_trip_release = false;  // the host's trip home came while we were down (trip_release): no hold until we live
+
 bool hold_wanted() {
     const auto& st = rules::state();
-    return st.active && !st.invader && !st.leaving && world::local_dead() && fight_on() && living_teammates() > 0;
+    return st.active && !st.invader && !st.leaving && !g_trip_release && world::local_dead() && fight_on() &&
+           living_teammates() > 0;
 }
 
 // ---------------------------------------------------------------- the camera
@@ -497,6 +500,7 @@ void tick() {
         }
         g_passed = false;
         g_rested = false;
+        g_trip_release = false;
         return;
     }
     if (!g_hold) return;
@@ -529,6 +533,11 @@ void tick() {
 
 void someone_rested() {
     if (g_hold || (world::local_dead() && !g_passed)) g_rested = true;
+}
+
+void trip_release() {
+    g_trip_release = true;
+    if (g_hold) release("the host's trip home");
 }
 
 bool holding() { return g_hold; }

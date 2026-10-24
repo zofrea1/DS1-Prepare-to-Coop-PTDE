@@ -35,6 +35,8 @@ constexpr uint32_t kInventoryAdd = 0x00C0B700;
 constexpr uint32_t kMenuManVar = 0x013786D0;
 constexpr uint32_t kNoEventAnim[2] = {0x012E0C64, 0x012E0C68};  // the "none" handle pair (PlayerIns+0xFC/+0x100)
 constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, count). count <= 0 removes one stack.
+constexpr uint32_t kMagicGetter = 0x00D1D800;   // as the goods getter: edi = magic id, push out {id, row}; ret 4
+constexpr uint32_t kMagicFlags = 0x2B;          // MagicParam: bit 0 enable_multi, bit 1 enable_multi_only
 constexpr uint32_t kGoodsCategory = 0x40000000;
 // An inventory slot's item replaced (the bonfire's refill turns an empty Estus Flask into the full one with it,
 // 0xC0CC31): eax = count, edi = slot, esi = the equipment data (PlayerGameData+0x1B8), stdcall(&{id, row} from the
@@ -628,6 +630,28 @@ void remove_all(int32_t goods_id) {
     if (before > 0 || cleared > 0 || after > 0) {
         LOG_INFO("[coop] Crimson Blossoms withered (%d held, %d slot(s) cleared, %d left)", before, cleared, after);
     }
+}
+
+bool set_magic_multi(int32_t magic_id, bool on) {
+    uint32_t found[2] = {0, 0};  // {id, row}
+    __try {
+        __asm {
+            push edi
+            mov edi, magic_id
+            lea eax, found
+            push eax
+            mov eax, kMagicGetter
+            call eax
+            pop edi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    uint8_t flags = 0;
+    if (!found[1] || !read8(found[1] + kMagicFlags, &flags)) return false;
+    const uint8_t want = static_cast<uint8_t>(on ? flags | 1 : flags & ~1);
+    if (want != flags) *ptr<uint8_t>(found[1] + kMagicFlags) = want;
+    return true;
 }
 
 int take(int32_t goods_id, int n) {

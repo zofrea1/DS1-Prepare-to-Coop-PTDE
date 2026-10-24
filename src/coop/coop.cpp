@@ -8,6 +8,7 @@
 #include "items.h"
 #include "log.h"
 #include "motion.h"
+#include "netrate.h"
 #include "rules.h"
 #include "session.h"
 #include "spectate.h"
@@ -20,6 +21,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 #include <cwchar>
 
@@ -188,14 +190,14 @@ bool use_item(int32_t id) {
         case 330:
             // In a session the host's bone takes everyone to the host's last bonfire (session tick).
             if (!session::in_session()) return false;
-            session::host_homeward(false);
+            session::host_homeward(session::kHomeBone);
             return true;
         case 117:
             // The Darksign's effect (SpEffect 3226) is the Homeward Bone's (3220, stateInfo 16) plus clearSoul and
             // heroPointDamage 99: the same trip for everyone, and the user loses every soul and all humanity, with
             // no bloodstain, as in the game (taken when the trip goes).
             if (!session::in_session()) return false;
-            session::host_homeward(true);
+            session::host_homeward(session::kHomeDarksign);
             return true;
         default:
             return false;
@@ -203,6 +205,42 @@ bool use_item(int32_t id) {
 }
 
 int blossom_count() { return coop::items::count(coop::items::kBlossom); }
+
+// ---------------------------------------------------------------- the Homeward miracle
+// Homeward (Magic 5210) puts on effect 580, which turns into 581 after 0.6 s: stateInfo 16, the return to the last
+// bonfire, as the Homeward Bone's 3220. The game marks it unusable in multiplayer (enable_multi off). In a session the
+// host may cast it whenever the Homeward Bone could be used (session::bone_hold), and it takes everyone home as the
+// bone does, with no bone from anyone; nobody else casts it there.
+constexpr int32_t kHomewardMiracle = 5210;
+bool g_miracle = false;  // the return-to-bonfire call is hooked (world::set_homeward_state_handler)
+
+void homeward_miracle_tick() {
+    using namespace coop;
+    const bool allow = g_miracle && session::hosting() && session::bone_hold() == session::kHoldNone;
+    static int shown = -1;
+    if (static_cast<int>(allow) != shown && items::set_magic_multi(kHomewardMiracle, allow)) shown = allow ? 1 : 0;
+}
+
+// The return-to-bonfire state on our character. In a session only the Homeward miracle gets here: the bone's and the
+// Darksign's effects are never put on there (use_item). The host's takes everyone to the host's bonfire; anyone
+// else's is dropped (the session stays). The state lasts a moment, so one cast is one trip.
+bool homeward_state() {
+    using namespace coop;
+    if (!session::in_session()) return false;
+    static ULONGLONG last = 0;
+    const ULONGLONG t = GetTickCount64();
+    const bool fresh = t - last > 3000;
+    last = t;
+    if (fresh) {
+        if (session::hosting()) {
+            LOG_INFO("[coop] The Homeward miracle: the party's trip home");
+            session::host_homeward(session::kHomeMiracle);
+        } else {
+            LOG_INFO("[coop] A return to the bonfire in a session that is not the host's: dropped");
+        }
+    }
+    return true;
+}
 
 // A bonfire rest: the co-op items the player lacks, the Crimson Blossoms wither, and the host remembers where
 // guests arrive.
@@ -251,7 +289,11 @@ void tick_body() {
     coop::world::tick();
     coop::deathtext::tick();
     coop::spectate::tick();
-    if (g_items) coop::items::tick();
+    coop::netrate::tick(coop::session::net_rate());
+    if (g_items) {
+        coop::items::tick();
+        homeward_miracle_tick();
+    }
     if (g_cfg.hotkeys) hotkeys();
     static ULONGLONG last_beat = 0;
     if (GetTickCount64() - last_beat > 60000) {
@@ -319,6 +361,8 @@ void coop_install(const CoopConfig& config) {
     coop::items::set_can_use(&can_use);
     coop::items::set_dialog_text(&parchment_dialog);
     coop::world::set_before_rest_handler(&before_rest);
+    g_miracle = coop::world::set_homeward_state_handler(&homeward_state);
+    if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: NetworkTickRate is not available");
     coop::world::set_blossom_counter(&blossom_count);
     coop::world::Config wc;
     wc.death_debuffs = g_cfg.death_debuffs;
@@ -335,6 +379,7 @@ void coop_install(const CoopConfig& config) {
     cfg.invasion_rewards = g_cfg.invasion_rewards;
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
+    cfg.net_rate = g_cfg.net_rate;
     cfg.test_protocol = g_cfg.test_protocol;
     cfg.test_version = g_cfg.test_version;
     coop::session::configure(cfg);
@@ -343,6 +388,8 @@ void coop_install(const CoopConfig& config) {
     const int overhead = g_cfg.overhead_display >= 0 && g_cfg.overhead_display <= 4 ? g_cfg.overhead_display : 4;
     LOG_INFO("[coop] Companion health bars show the %s", kOverhead[overhead]);
     LOG_INFO("[coop] Invasion rewards: %s", g_cfg.invasion_rewards ? "Humanity for the side that wins" : "off");
+    LOG_INFO("[coop] Network updates when hosting: %d a second (NetworkTickRate; guests use their host's)",
+             std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)));
     g_installed = true;
     LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade%s.",
              g_items ? "given at every bonfire rest" : "UNAVAILABLE", texts ? "" : "(On-screen texts unavailable.) ",

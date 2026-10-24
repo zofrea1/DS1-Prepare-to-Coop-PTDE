@@ -60,6 +60,9 @@ void remove_all(int32_t goods_id);
 // Takes `n` of an item (not a key item) out of the inventory, as the game's own RemoveItem does. Returns how many
 // went (0 when none was held).
 int take(int32_t goods_id, int n);
+// A spell's "usable in multiplayer" (MagicParam enable_multi, which the game's spell check 0xEAD7C0 reads). Lives in
+// the loaded params only: the game's own value comes back with the next start. False when the row is not found.
+bool set_magic_multi(int32_t magic_id, bool on);
 // A bonfire rest: every co-op item except the Crimson Blossom that is not in the inventory (one each). Checked
 // at every rest, so a character brought over from an earlier save gets them too.
 void grant_missing();

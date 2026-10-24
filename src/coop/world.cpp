@@ -83,6 +83,7 @@ bool g_death_finished = false;  // finish_death ran for this death
 bool g_return_cleared = false;  // finish_death cleared a stale return to the title for this death
 bool g_rest_heard = false;
 double g_limbo_since = 0;
+bool g_trip_release = false;  // the host's trip home came while we were down (trip_release): no limbo until we live
 std::map<uint32_t, int> g_scaled;  // EnemyIns -> applied effect id
 std::set<uint32_t> g_fill_hp;      // enemies to top up after their max HP grew
 std::map<uint32_t, int> g_base_max;     // EnemyIns -> its max HP before our scaling (when first applied)
@@ -316,10 +317,36 @@ __declspec(naked) void hk_regene() {
     }
 }
 
+// ---------------------------------------------------------------- the return to the bonfire
+// PlayerIns's effect update (0xE51100) asks 0xDC2A40 every frame whether an effect with stateInfo 16 (row +0x156) is
+// on the character; for the local player it then calls 0xD76390(1) (esi = [0x137D790]), which clears the summon
+// state and kicks WarpNextStageKick (0xD62930) to the last bonfire. The call site, `push edi ; call 0xD76390`:
+constexpr uint32_t kHomewardStateCall = 0x00E5143C;
+constexpr uint32_t kHomewardWarp = 0x00D76390;
+uint32_t g_homeward_warp = kHomewardWarp;
+bool g_homeward_hooked = false;
+bool (*g_homeward_state)() = nullptr;
+uint8_t g_homeward_skip = 0;
+
+void __cdecl homeward_state_decide() { g_homeward_skip = g_homeward_state && g_homeward_state() ? 1 : 0; }
+
+__declspec(naked) void hk_homeward_state() {
+    __asm {
+        pushad
+        call homeward_state_decide
+        popad
+        cmp byte ptr [g_homeward_skip], 0
+        jne skip
+        jmp dword ptr [g_homeward_warp]
+    skip:
+        ret 4
+    }
+}
+
 // ---------------------------------------------------------------- limbo
 // The respawn warp waits instead of the death itself: only when the death event cannot be held (spectate.cpp).
 bool limbo_wanted() {
-    return g_active && !g_invader && local_dead() && g_players >= 2 && !g_everyone_dead &&
+    return g_active && !g_invader && !g_trip_release && local_dead() && g_players >= 2 && !g_everyone_dead &&
            (boss_fight() || rules::state().teammate_boss_fight || g_invader_present);
 }
 
@@ -1021,6 +1048,11 @@ bool install() {
     if (!redirect_call(kLightCall, kChrLight, reinterpret_cast<void*>(&hk_chr_light))) {
         LOG_ERROR("[coop] Shared light: the character update's light call did not match this build (not shared)");
     }
+    g_homeward_hooked = redirect_call(kHomewardStateCall, kHomewardWarp, reinterpret_cast<void*>(&hk_homeward_state));
+    if (!g_homeward_hooked) {
+        LOG_ERROR("[coop] Homeward miracle: the return-to-bonfire call did not match this build (not usable in a "
+                  "session)");
+    }
     if (failed) LOG_ERROR("[coop] %d world rule hook(s) did not match this build", failed);
     return failed == 0;
 }
@@ -1059,7 +1091,10 @@ void tick() {
             release_limbo("time limit");
         }
     }
-    if (!local_dead()) g_team_asked = false;  // alive again, or loading (no character)
+    if (!local_dead()) {  // alive again, or loading (no character)
+        g_team_asked = false;
+        g_trip_release = false;
+    }
     deadlist::tick();
     death_watch_tick();
     reset_tick();
@@ -1102,6 +1137,10 @@ void set_session(bool active, bool invader, bool invader_present) {
 void set_players(int coop_players) { g_players = std::max(1, coop_players); }
 void set_everyone_dead(bool all_dead) { g_everyone_dead = all_dead; }
 void set_rest_handler(void (*fn)()) { g_rest_fn = fn; }
+bool set_homeward_state_handler(bool (*fn)()) {
+    g_homeward_state = fn;
+    return g_homeward_hooked;
+}
 void set_before_rest_handler(void (*fn)()) { g_before_rest_fn = fn; }
 void set_death_handler(void (*fn)()) { g_death_fn = fn; }
 void set_blossom_counter(int (*fn)()) { g_blossom_count_fn = fn; }
@@ -1169,6 +1208,11 @@ bool local_dead() {
 }
 
 bool in_limbo() { return g_limbo; }
+
+void trip_release() {
+    g_trip_release = true;
+    release_limbo("the host's trip home");
+}
 
 void warp_now(int map, int point) {
     // This warp replaces a respawn that waits for the team (the trip home): it must not go as well.

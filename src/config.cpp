@@ -30,6 +30,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.bonfire_animations = settings_parse_bool(val);
         } else if (key == "overheadplayerdisplay") {
             c.overhead_display = std::atoi(val.c_str());
+        } else if (key == "networktickrate") {
+            c.net_rate = std::atoi(val.c_str());
         } else if (key == "enemyhealthscaling") {
             c.enemy_health = std::atoi(val.c_str());
         } else if (key == "enemydamagescaling") {

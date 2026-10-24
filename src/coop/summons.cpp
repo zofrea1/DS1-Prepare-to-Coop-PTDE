@@ -393,6 +393,7 @@ void own_refresh() {
                          it->second.ph.entity);
             }
             it->second.away = true;
+            it->second.back_at = 0;  // the 10 s below count one visit of a copy that will not take the summon
             continue;
         }
         // A character that is not a phantom: the same one stopped being one (the game dismissed it), or its block

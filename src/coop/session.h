@@ -19,6 +19,7 @@ struct Config {
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
     int overhead_display = 4;
     int max_players = 4;  // PTDE keeps three remote players (GameDataMan+0xC holds 3 x 0x4C0)
+    int net_rate = 6;     // NetworkTickRate: the session's updates a second (netrate.h), sent to the others
     // Hidden test keys: pretend to speak another protocol / be another version (0 / empty: the real ones).
     int test_protocol = 0;
     std::string test_version;
@@ -71,10 +72,12 @@ void close_world();  // the host's Black Separation Crystal: every other player 
 void cycle_rules();  // Ominous Tome: none -> allies hostile -> teams -> none
 void taunt();        // Dried Fingers
 void curse_world();  // Cursed Pendant: curses our own world (offline or hosting), or lifts the curse
-// The host used a Homeward Bone in a session, or the Darksign (which also costs every soul and all humanity when
-// the trip goes): the host and every guest go to the host's last bonfire. The trip takes the travel slot at once
-// and goes on the next tick; false (and the host told why) when no trip can go now.
-bool host_homeward(bool darksign);
+// The host used a Homeward Bone in a session (one bone from every player), the Darksign (every soul and all humanity
+// from every player, taken when the trip goes) or the Homeward miracle (no cost but the cast): the host and every
+// guest go to the host's last bonfire. The trip takes the travel slot at once and goes on the next tick; false (and
+// the host told why) when no trip can go now.
+enum HomewardKind { kHomeBone, kHomeDarksign, kHomeMiracle };
+bool host_homeward(HomewardKind kind);
 
 // Item rules (Remastered Seamless Co-op's): a session is established (we host one or we are in one).
 bool in_session();
@@ -83,6 +86,9 @@ bool guest();
 bool active();       // any role, including searching and joining
 bool idle();         // no role at all (the session items may start one)
 bool invader();      // we invade
+// The updates a second our game sends (netrate.h): the host's NetworkTickRate in its session (for a guest or an
+// invader, as the host's state says; a host of 1.2.0 or older says nothing, which leaves the game's own rate).
+int net_rate();
 
 // Kept for the session text. The on-screen box that used to draw these lines is not shown; soul level and
 // ping are appended to the name on each companion's floating health bar instead.

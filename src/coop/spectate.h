@@ -29,6 +29,9 @@ void set_teammates(const std::vector<Teammate>& teammates);
 void tick();
 // Another player rested at a bonfire: a death that waits goes ahead.
 void someone_rested();
+// The host's trip home (Homeward Bone, Darksign, Homeward miracle) reached us while we are down: our death goes
+// ahead now and is not held again until we live (we follow once back on our feet).
+void trip_release();
 // Our death waits (we spectate).
 bool holding();
 // The death event can be held. Without it, world.cpp holds the respawn warp instead (the old limbo).

@@ -52,6 +52,9 @@ bool menu_open();
 // This game reloads after a lost boss fight (a rest while its boss was awake) and is waiting to do it.
 bool reset_pending();
 bool in_limbo();
+// The host's trip home reached us while we are down: a respawn waiting in limbo goes now, and limbo does not hold
+// again until we live (spectate::trip_release for a held death).
+void trip_release();
 // Shared light: the local player's own light (0x08 Cast Light or the Sunlight Maggot, 0x10 the Skull Lantern;
 // 1.0.0 sent bits 0 to 2, which are ignored), and showing the other players' lights on their characters here.
 struct RemoteLight {
@@ -60,6 +63,11 @@ struct RemoteLight {
 };
 int local_lights();
 void share_lights(const std::vector<RemoteLight>& peers);
+
+// Our character's return-to-bonfire state (stateInfo 16: the Homeward Bone's, the Darksign's and the Homeward
+// miracle's effects) is about to send us to our last bonfire. `fn` returns true to stop the game's own warp. False
+// when that call could not be hooked (`fn` is never asked).
+bool set_homeward_state_handler(bool (*fn)());
 
 // Warps that must not wait in limbo (going home, following the host).
 void warp_now(int map, int point);

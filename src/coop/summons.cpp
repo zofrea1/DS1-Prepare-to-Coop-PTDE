@@ -65,6 +65,20 @@ std::map<int32_t, uint32_t> g_made;        // entity -> the character we turned 
 std::map<uint32_t, double> g_gone_since;   // our NPC party entries (handle) the host no longer lists, since when
 std::set<uint32_t> g_told_waiting;         // characters we said could not become a phantom yet
 bool g_heard = false;                      // a list came from the host (a 1.2.0 host sends none)
+// Our own world: the NPC phantoms of our party as we last saw them loaded. Solaire follows his summoner anywhere in
+// a session (no walls keep phantoms in an area, and the party is not reset at a map-block change), so his own map
+// block can unload under him while he is still summoned: his character is gone until the block streams back, and
+// comes back as a fresh, unsummoned copy. The summon goes on through that: it is still announced to the others,
+// still counts and stays through the session's end, and the fresh copy becomes the phantom again. A real load (a
+// death, a rest, travel) forgets all of this, so it ends the summon as the game's own party reset would.
+struct Own {
+    Phantom ph;
+    uint32_t chr = 0;
+    bool away = false;  // its block has unloaded since we last saw it as a phantom
+    double back_at = 0; // when its block came back with a copy that would not become the phantom yet
+};
+std::map<uint32_t, Own> g_own;  // handle -> what it is
+uint32_t g_own_player = 0;      // our character when g_own was last brought up to date (another one: a load)
 int g_lines = 0;
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -328,29 +342,100 @@ __declspec(naked) void hk_recv_state() {
     }
 }
 
-}  // namespace
+bool own_kept(uint32_t handle) {
+    const auto it = g_own.find(handle);
+    return it != g_own.end() && it->second.away && !chr_by_handle(handle);
+}
 
-std::vector<Phantom> ours() {
-    std::vector<Phantom> out;
+// Brings g_own up to date (our own world, every frame and before each list we send).
+void own_refresh() {
+    const uint32_t me = game::player();
+    if (game::loading() || !me || me != g_own_player) {
+        if (!g_own.empty()) LOG_INFO("[coop] A load: our NPC phantoms' summons are over (%u)", unsigned(g_own.size()));
+        g_own.clear();
+        g_own_player = me;
+        return;
+    }
     const uint32_t p = party();
-    if (!p || game::loading()) return out;
+    if (!p || !game::own_world()) {
+        g_own.clear();
+        return;
+    }
+    std::set<uint32_t> present;
+    bool revived = false;
     for (int i = 0; i < kEntryCount; ++i) {
         const uint32_t e = p + kEntries + i * kEntrySize;
         uint32_t h = 0, type = 0, f1 = 0, f2 = 0;
         if (!read32(e, &h) || h == 0xFFFFFFFF || !read32(e + 4, &type) || type != kTypeNpc) continue;
-        const uint32_t chr = chr_by_handle(h);
-        const int32_t entity = chr ? entity_of(h) : -1;
-        const int32_t t = chr_type(chr);
-        if (entity < 0 || (t != 1 && t != 2)) continue;
+        present.insert(h);
         read32(e + 0xC, &f1);
         read32(e + 0x10, &f2);
-        Phantom ph;
-        ph.entity = entity;
-        ph.handle = h;
-        ph.kind = chr_type(chr);
-        ph.f1 = static_cast<int32_t>(f1);
-        ph.f2 = static_cast<int32_t>(f2);
-        out.push_back(ph);
+        const uint32_t chr = chr_by_handle(h);
+        const int32_t t = chr_type(chr);
+        auto it = g_own.find(h);
+        if (chr && (t == 1 || t == 2)) {
+            const int32_t entity = entity_of(h);
+            if (entity < 0) continue;
+            Own& o = g_own[h];
+            o.ph.entity = entity;
+            o.ph.handle = h;
+            o.ph.kind = t;
+            o.ph.f1 = static_cast<int32_t>(f1);
+            o.ph.f2 = static_cast<int32_t>(f2);
+            o.chr = chr;
+            o.away = false;
+            continue;
+        }
+        if (it == g_own.end()) continue;  // not one we knew as our phantom: own_world_sweep decides
+        if (!chr) {
+            if (!it->second.away) {
+                LOG_INFO("[coop] Our NPC phantom %d: its map block has unloaded; the summon goes on",
+                         it->second.ph.entity);
+            }
+            it->second.away = true;
+            continue;
+        }
+        // A character that is not a phantom: the same one stopped being one (the game dismissed it), or its block
+        // came back with a fresh copy.
+        if (!it->second.away) {
+            g_own.erase(it);
+            continue;
+        }
+        if (make_phantom(h, it->second.ph.kind)) {
+            it->second.chr = chr;
+            it->second.away = false;
+            it->second.back_at = 0;
+            revived = true;
+            LOG_INFO("[coop] Our NPC phantom %d: its map block is back and its new character %08X is the phantom again",
+                     it->second.ph.entity, chr);
+        } else if (it->second.back_at == 0) {
+            it->second.back_at = now();
+        } else if (now() - it->second.back_at > 10.0) {
+            // The copy never took the summon (its events keep it out): the summon ends, as own_world_sweep sees.
+            LOG_INFO("[coop] Our NPC phantom %d: its new character %08X did not become the phantom again; the summon "
+                     "is over", it->second.ph.entity, chr);
+            g_own.erase(it);
+        }
+    }
+    if (revived) recount(p);
+    for (auto it = g_own.begin(); it != g_own.end();) it = present.count(it->first) ? std::next(it) : g_own.erase(it);
+}
+
+}  // namespace
+
+std::vector<Phantom> ours() {
+    std::vector<Phantom> out;
+    own_refresh();
+    const uint32_t p = party();
+    if (!p || game::loading()) return out;
+    for (int i = 0; i < kEntryCount; ++i) {
+        uint32_t h = 0, type = 0;
+        if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF ||
+            !read32(p + kEntries + i * kEntrySize + 4, &type) || type != kTypeNpc) {
+            continue;
+        }
+        const auto it = g_own.find(h);
+        if (it != g_own.end()) out.push_back(it->second.ph);
     }
     return out;
 }
@@ -386,6 +471,7 @@ void note_host_list(const std::vector<Phantom>& list) {
 // Solaire's entry would have stayed with his health bar while he stood at his sign again. Vanilla clears the party
 // at that load. The scripted summon (+0x7C, 0xEA1F40) keeps its own type and is left alone.
 void own_world_sweep() {
+    own_refresh();
     static double last = 0;
     if (now() - last < 1.0) return;
     last = now();
@@ -404,6 +490,8 @@ void own_world_sweep() {
         const uint32_t chr = chr_by_handle(h);
         const int32_t t = chr_type(chr);
         if (!chr || t == 1 || t == 2) continue;
+        const auto known = g_own.find(h);
+        if (known != g_own.end() && known->second.away) continue;  // back from an unload: own_refresh revives it
         blank_entry(p, i);
         recount(p);
         LOG_INFO("[coop] NPC %08X is no longer a phantom here (type %d after a load): out of our party", h,
@@ -500,7 +588,7 @@ bool settle_party(uint32_t p) {
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF) continue;
         read32(p + kEntries + i * kEntrySize + 4, &type);
         const int32_t t = chr_type(chr_by_handle(h));
-        if (type == kTypeNpc && (t == 1 || t == 2)) kept = true;
+        if (type == kTypeNpc && (t == 1 || t == 2 || own_kept(h))) kept = true;
     }
     if (!kept) return false;
     int npcs = 0;
@@ -510,7 +598,7 @@ bool settle_party(uint32_t p) {
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF) continue;
         read32(p + kEntries + i * kEntrySize + 4, &type);
         const int32_t t = chr_type(chr_by_handle(h));
-        if (type == kTypeNpc && (t == 1 || t == 2)) {
+        if (type == kTypeNpc && (t == 1 || t == 2 || own_kept(h))) {
             ++npcs;
             continue;
         }

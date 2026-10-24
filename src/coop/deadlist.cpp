@@ -397,11 +397,10 @@ std::vector<uint8_t> build_hurt() {
 void note_hurt(uint64_t from, bool from_host, const uint8_t* data, size_t size) {
     HurtList list;
     if (!parse_hurt(data, size, &list)) return;
-    if (from_host) {
-        g_host_hurt = std::move(list);
-    } else {
-        g_mates_hurt[from] = std::move(list);
-    }
+    // Merged, not replaced: a list holds only the sender's loaded map blocks, and one sent after the sender walked
+    // away from an enemy simply leaves it out. That is no heal (only a rest heals, and note_rest clears the lists):
+    // the lower share of health wins, and an enemy a later list leaves out keeps what an earlier one said.
+    merge_hurt(from_host ? &g_host_hurt : &g_mates_hurt[from], list);
     // Until our load begins the newest lists count (an enemy hurt while we were on our way to the warp).
     if (g_hurt_armed && !g_hurt_loaded && from_host != g_hurt_own) collect_hurt(g_hurt_own);
 }

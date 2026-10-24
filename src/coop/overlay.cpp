@@ -29,15 +29,21 @@ constexpr int kPresentSlot = 17;
 PresentFn g_present = nullptr;
 ResetFn g_reset = nullptr;
 
-std::mutex g_mutex;
-std::vector<std::wstring> g_lines;
-bool g_dirty = false;
+// One box of text: its lines (under g_mutex), and the texture they were last rendered to (Present only).
+struct Box {
+    std::vector<std::wstring> lines;
+    bool dirty = false;
+    IDirect3DTexture9* tex = nullptr;
+    int tex_w = 0, tex_h = 0;
+    int text_w = 0, text_h = 0;
+    bool visible = false;
+    bool notice = false;  // larger, gold first line, more opaque, drawn at the top centre
+};
 
-IDirect3DTexture9* g_tex = nullptr;
+std::mutex g_mutex;
+Box g_panel;
+Box g_notice_box;
 IDirect3DStateBlock9* g_state = nullptr;
-int g_tex_w = 0, g_tex_h = 0;
-int g_text_w = 0, g_text_h = 0;
-bool g_visible = false;
 
 void* patch_slot(void* object, int slot, void* replacement) {
     void** vtable = *reinterpret_cast<void***>(object);
@@ -51,11 +57,11 @@ void* patch_slot(void* object, int slot, void* replacement) {
     return original;
 }
 
-// Renders the lines with GDI and uploads them as white text on a translucent dark box.
-void rebuild(IDirect3DDevice9* dev, const std::vector<std::wstring>& lines, int screen_h) {
-    g_visible = !lines.empty();
-    if (!g_visible) return;
-    const int px = std::max(14, screen_h / 54);
+// Renders the lines with GDI and uploads them as text on a translucent dark box (white; a notice's first line gold).
+void rebuild(IDirect3DDevice9* dev, Box& box, const std::vector<std::wstring>& lines, int screen_h) {
+    box.visible = !lines.empty();
+    if (!box.visible) return;
+    const int px = std::max(box.notice ? 16 : 14, screen_h / (box.notice ? 38 : 54));
     HDC dc = CreateCompatibleDC(nullptr);
     HFONT font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                              CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
@@ -66,13 +72,13 @@ void rebuild(IDirect3DDevice9* dev, const std::vector<std::wstring>& lines, int 
         GetTextExtentPoint32W(dc, l.c_str(), static_cast<int>(l.size()), &sz);
         w = std::max<int>(w, sz.cx);
     }
-    const int pad = px / 2;
-    g_text_w = w + 2 * pad;
-    g_text_h = static_cast<int>(lines.size()) * line_h + 2 * pad;
+    const int pad = box.notice ? px : px / 2;
+    box.text_w = w + 2 * pad;
+    box.text_h = static_cast<int>(lines.size()) * line_h + 2 * pad;
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = g_text_w;
-    bi.bmiHeader.biHeight = -g_text_h;
+    bi.bmiHeader.biWidth = box.text_w;
+    bi.bmiHeader.biHeight = -box.text_h;
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     void* bits = nullptr;
@@ -83,43 +89,45 @@ void rebuild(IDirect3DDevice9* dev, const std::vector<std::wstring>& lines, int 
         SelectObject(dc, old_font);
         DeleteObject(font);
         DeleteDC(dc);
-        g_visible = false;
+        box.visible = false;
         return;
     }
     HGDIOBJ old_bmp = SelectObject(dc, bmp);
-    std::memset(bits, 0, static_cast<size_t>(g_text_w) * g_text_h * 4);
+    std::memset(bits, 0, static_cast<size_t>(box.text_w) * box.text_h * 4);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(255, 255, 255));
     for (size_t i = 0; i < lines.size(); ++i) {
+        SetTextColor(dc, box.notice && i == 0 ? RGB(232, 196, 104) : RGB(255, 255, 255));
         TextOutW(dc, pad, pad + static_cast<int>(i) * line_h, lines[i].c_str(), static_cast<int>(lines[i].size()));
     }
     GdiFlush();
-    if (!g_tex || g_tex_w < g_text_w || g_tex_h < g_text_h) {
-        if (g_tex) g_tex->Release();
-        g_tex = nullptr;
-        g_tex_w = std::max(256, g_text_w);
-        g_tex_h = std::max(64, g_text_h);
-        if (FAILED(dev->CreateTexture(g_tex_w, g_tex_h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &g_tex, nullptr))) {
-            g_tex = nullptr;
+    if (!box.tex || box.tex_w < box.text_w || box.tex_h < box.text_h) {
+        if (box.tex) box.tex->Release();
+        box.tex = nullptr;
+        box.tex_w = std::max(256, box.text_w);
+        box.tex_h = std::max(64, box.text_h);
+        if (FAILED(dev->CreateTexture(box.tex_w, box.tex_h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &box.tex, nullptr))) {
+            box.tex = nullptr;
         }
     }
-    if (g_tex) {
+    if (box.tex) {
+        const uint32_t base = box.notice ? 175 : 110;  // the box's own opacity
         D3DLOCKED_RECT lr{};
-        if (SUCCEEDED(g_tex->LockRect(0, &lr, nullptr, 0))) {
-            for (int y = 0; y < g_tex_h; ++y) {
+        if (SUCCEEDED(box.tex->LockRect(0, &lr, nullptr, 0))) {
+            for (int y = 0; y < box.tex_h; ++y) {
                 auto* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch);
-                for (int x = 0; x < g_tex_w; ++x) {
-                    if (x >= g_text_w || y >= g_text_h) {
+                for (int x = 0; x < box.tex_w; ++x) {
+                    if (x >= box.text_w || y >= box.text_h) {
                         dst[x] = 0;
                         continue;
                     }
-                    const uint32_t s = static_cast<const uint32_t*>(bits)[y * g_text_w + x];
+                    // Text drawn on black: its brightest channel is how much of it covers the pixel.
+                    const uint32_t s = static_cast<const uint32_t*>(bits)[y * box.text_w + x];
                     const uint32_t c = std::max({s & 0xFF, (s >> 8) & 0xFF, (s >> 16) & 0xFF});
-                    const uint32_t a = 110 + c * 145 / 255;
-                    dst[x] = (a << 24) | (c << 16) | (c << 8) | c;
+                    const uint32_t a = base + c * (255 - base) / 255;
+                    dst[x] = (a << 24) | (s & 0xFFFFFF);
                 }
             }
-            g_tex->UnlockRect(0);
+            box.tex->UnlockRect(0);
         }
     }
     SelectObject(dc, old_bmp);
@@ -133,32 +141,52 @@ struct Vertex {
     float x, y, z, rhw, u, v;
 };
 
-void draw(IDirect3DDevice9* dev) {
-    D3DVIEWPORT9 vp{};
-    dev->GetViewport(&vp);
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_dirty) {
-            g_dirty = false;
-            rebuild(dev, g_lines, static_cast<int>(vp.Height));
-        }
-    }
-    if (!g_visible || !g_tex) return;
-    if (!g_state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_state))) {
-        g_state = nullptr;
-        return;
-    }
-    g_state->Capture();
+// Where a box goes on screen: the panel at the top right, a notice at the top centre.
+void place(const Box& box, const D3DVIEWPORT9& vp, float* x0, float* y0) {
     const float margin = vp.Height / 40.0f;
-    const float x1 = vp.X + vp.Width - margin, x0 = x1 - g_text_w;
-    const float y0 = vp.Y + margin * 3.0f, y1 = y0 + g_text_h;
-    const float u1 = static_cast<float>(g_text_w) / g_tex_w, v1 = static_cast<float>(g_text_h) / g_tex_h;
+    if (box.notice) {
+        *x0 = vp.X + (vp.Width - box.text_w) / 2.0f;
+        *y0 = vp.Y + margin * 3.0f;
+    } else {
+        *x0 = vp.X + vp.Width - margin - box.text_w;
+        *y0 = vp.Y + margin * 3.0f;
+    }
+}
+
+void draw_box(IDirect3DDevice9* dev, const Box& box, const D3DVIEWPORT9& vp) {
+    if (!box.visible || !box.tex) return;
+    float x0 = 0, y0 = 0;
+    place(box, vp, &x0, &y0);
+    const float x1 = x0 + box.text_w, y1 = y0 + box.text_h;
+    const float u1 = static_cast<float>(box.text_w) / box.tex_w, v1 = static_cast<float>(box.text_h) / box.tex_h;
     const Vertex quad[4] = {
         {x0 - 0.5f, y0 - 0.5f, 0, 1, 0, 0},
         {x1 - 0.5f, y0 - 0.5f, 0, 1, u1, 0},
         {x0 - 0.5f, y1 - 0.5f, 0, 1, 0, v1},
         {x1 - 0.5f, y1 - 0.5f, 0, 1, u1, v1},
     };
+    dev->SetTexture(0, box.tex);
+    dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+}
+
+void draw(IDirect3DDevice9* dev) {
+    D3DVIEWPORT9 vp{};
+    dev->GetViewport(&vp);
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (Box* box : {&g_panel, &g_notice_box}) {
+            if (box->dirty) {
+                box->dirty = false;
+                rebuild(dev, *box, box->lines, static_cast<int>(vp.Height));
+            }
+        }
+    }
+    if ((!g_panel.visible || !g_panel.tex) && (!g_notice_box.visible || !g_notice_box.tex)) return;
+    if (!g_state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_state))) {
+        g_state = nullptr;
+        return;
+    }
+    g_state->Capture();
     if (SUCCEEDED(dev->BeginScene())) {
         dev->SetVertexShader(nullptr);
         dev->SetPixelShader(nullptr);
@@ -176,7 +204,6 @@ void draw(IDirect3DDevice9* dev) {
         dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
         dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
         dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
-        dev->SetTexture(0, g_tex);
         dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
         dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
         dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
@@ -185,7 +212,8 @@ void draw(IDirect3DDevice9* dev) {
         dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
         dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
-        dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+        draw_box(dev, g_panel, vp);
+        draw_box(dev, g_notice_box, vp);
         dev->EndScene();
     }
     g_state->Apply();
@@ -209,7 +237,8 @@ HRESULT WINAPI hk_reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_dirty = true;  // re-render at the new size
+        g_panel.dirty = true;  // re-render at the new size
+        g_notice_box.dirty = true;
     }
     return g_reset(dev, pp);
 }
@@ -227,9 +256,17 @@ void attach(IDirect3DDevice9* device) {
 
 void set_lines(const std::vector<std::wstring>& lines) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (lines == g_lines) return;
-    g_lines = lines;
-    g_dirty = true;
+    if (lines == g_panel.lines) return;
+    g_panel.lines = lines;
+    g_panel.dirty = true;
+}
+
+void set_notice(const std::vector<std::wstring>& lines) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_notice_box.notice = true;
+    if (lines == g_notice_box.lines) return;
+    g_notice_box.lines = lines;
+    g_notice_box.dirty = true;
 }
 
 }  // namespace coop::overlay

@@ -112,6 +112,7 @@ In the `[PrepareToCoop]` section of `PTDE-FPS-Unlock.ini` (the FPS Unlock's sett
 | `BossHealthScaling`, `BossDamageScaling`, `BossPostureScaling` | `100`, `0`, `20` | The same for bosses. |
 | `SaveFileExtension` | `co2` | The save file while the co-op is on (vanilla: `sl2`). |
 | `CoopHotkeys` | `true` | The Ctrl+F1..F4 shortcuts. |
+| `CheckForUpdates` | `true` | At each start, look on the GitHub Releases page for a newer Prepare to Co-op, and say so on the title screen when there is one (until a character is loaded). One small request to api.github.com; `false` turns it off. |
 
 ## Notes and known limits
 

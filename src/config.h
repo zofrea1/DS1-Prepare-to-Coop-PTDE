@@ -43,9 +43,12 @@ struct CoopConfig {
     char save_extension[16] = "co2";
     // Keyboard shortcuts as well as the co-op items (Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave).
     bool hotkeys = true;
+    // At each start, ask GitHub for the latest release and say on the title screen when a newer one is out.
+    bool check_updates = true;
     // Hidden test keys (not in the shipped INI): TestProtocol / TestVersion make this game speak another co-op
     // protocol and report another version. TestProtocol shows the version mismatch notices between two copies of
-    // one build; versions alone are not compared for now (session.cpp, kRequireSameVersion).
+    // one build; versions alone are not compared for now (session.cpp, kRequireSameVersion). The update check
+    // compares the latest release with TestVersion too, so an older one shows its notice.
     int test_protocol = 0;
     char test_version[16] = {};
 };

@@ -15,6 +15,7 @@
 #include "steam.h"
 #include "summons.h"
 #include "text.h"
+#include "updates.h"
 #include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -294,6 +295,7 @@ void tick_body() {
     coop::deathtext::tick();
     coop::spectate::tick();
     coop::netrate::tick(coop::session::net_rate());
+    coop::updates::tick();
     if (g_items) {
         coop::items::tick();
         homeward_miracle_tick();
@@ -398,6 +400,11 @@ void coop_install(const CoopConfig& config) {
              std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)),
              std::max(0, std::min(coop::netrate::kMaxSmoothing, g_cfg.net_smoothing)));
     g_installed = true;
+    if (g_cfg.check_updates) {
+        coop::updates::start(g_cfg.test_version);
+    } else {
+        LOG_INFO("[coop] Update check: off (CheckForUpdates)");
+    }
     LOG_INFO("[coop] Ready. Co-op items %s. %sKeys: Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave, Ctrl+F4 invade%s.",
              g_items ? "given at every bonfire rest" : "UNAVAILABLE", texts ? "" : "(On-screen texts unavailable.) ",
              g_cfg.hotkeys ? "" : " (off)");

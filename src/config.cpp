@@ -59,6 +59,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             }
         } else if (key == "coophotkeys") {
             c.hotkeys = settings_parse_bool(val);
+        } else if (key == "checkforupdates") {
+            c.check_updates = settings_parse_bool(val);
         } else if (key == "testprotocol") {
             c.test_protocol = std::atoi(val.c_str());
         } else if (key == "testversion") {

@@ -2,9 +2,10 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #pragma once
 
-// A small text panel drawn over the game (top right) for seamless co-op: the session and the other players
-// with the details OverheadPlayerDisplay asks for (ping, soul level, deaths). Drawn with Direct3D 9 right
-// before the game presents a frame; the text is rendered with GDI into a texture when it changes.
+// Text drawn over the game with Direct3D 9 right before the game presents a frame; the text is rendered with GDI
+// into a texture when it changes. Two boxes: a small panel (top right) for seamless co-op, the session and the other
+// players with the details OverheadPlayerDisplay asks for (ping, soul level, deaths), and a notice (top centre,
+// larger, its first line gold) such as the update check's on the title screen.
 
 #include <string>
 #include <vector>
@@ -17,5 +18,7 @@ namespace coop::overlay {
 void attach(IDirect3DDevice9* device);
 // Replaces the panel's lines (any thread). An empty list hides the panel.
 void set_lines(const std::vector<std::wstring>& lines);
+// Replaces the notice's lines (any thread). An empty list hides it.
+void set_notice(const std::vector<std::wstring>& lines);
 
 }  // namespace coop::overlay

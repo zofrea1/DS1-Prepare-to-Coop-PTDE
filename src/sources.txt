@@ -21,3 +21,4 @@ src\coop\deadlist.cpp
 src\coop\deathtext.cpp
 src\coop\summons.cpp
 src\coop\netrate.cpp
+src\coop\updates.cpp

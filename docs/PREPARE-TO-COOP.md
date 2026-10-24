@@ -573,6 +573,17 @@ character is then drawn about one update interval plus the smoothing behind its 
 at thirty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
 older keeps sending six a second.
 
+### Update check
+
+Releases keep the co-op protocol as long as they can, so players of different versions still play together and a
+session never tells anyone to update. Instead, at each start (`CheckForUpdates`, on by default) a thread of the mod
+asks GitHub's API for the repository's latest release (`api.github.com/repos/zofrea1/DS1-Prepare-to-Coop-PTDE/
+releases/latest`, WinHTTP, 5 s timeouts, drafts and pre-releases left out) and compares its tag with this build's
+version. A newer one is announced in a box at the top of the title screen, drawn by the mod's Direct3D overlay (a
+Windows message box would take the focus from a game in exclusive fullscreen), until a character is loaded; an answer
+that comes during play waits for the next visit to the title screen. No answer (offline, a firewall) shows nothing;
+the log says what happened.
+
 ### World events
 
 Map events test the session through `EcTestMultiplayState::Test` (`0xBB3130`; the SKIP/END IF instructions call

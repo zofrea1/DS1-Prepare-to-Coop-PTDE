@@ -145,6 +145,9 @@ int travel_hold();
 bool darksign_held();
 // A lost boss fight's reload is pending: ours, or a living co-op teammate's.
 bool reload_hold();
+// What holds the host's Homeward Bone back: travel's holds, except a boss fight (the bone is the way out of one, as
+// in single player; a teammate who fell in it no longer holds it either).
+int bone_hold();
 // The line that tells the player why (a hold other than kHoldNone).
 const wchar_t* travel_hold_text(int hold);
 

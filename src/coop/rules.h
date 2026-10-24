@@ -103,6 +103,8 @@ void note_teammate_boss(int entity);
 // The next load is a living guest's reload at its bonfire in the host's world after a lost boss fight: it is placed
 // and its copy of the host's world starts over as after a death.
 void arm_reset_reload();
+// The next load follows the host's Homeward Bone or Darksign: the host's world's temporary flags start over in it.
+void arm_trip_reload();
 // Spectating: this frame's world is drawn as from the floor `chr` stands on (the draw groups, the area's light, the
 // connected blocks), instead of ours. Null when done, else why not (no floor, its block not loaded here).
 const char* draw_from(uint32_t chr);

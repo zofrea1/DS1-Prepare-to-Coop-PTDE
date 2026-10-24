@@ -1611,16 +1611,18 @@ void answer_travel(uint64_t to, uint32_t why) {
     send_to(to, a);
 }
 
-// Host: why no trip of the party's can start now (0: one can), a travel or a Homeward Bone's. The Darksign is the
-// way out of anything (user's rule, 2026-10-23): a boss fight, an invasion, a teammate who is down; only a lost
-// fight's reload, which takes everyone to their bonfires anyway, and our own game's state hold it.
-uint32_t trip_refusal(bool darksign = false) {
+// Host: why no trip of the party's can start now (0: one can): a travel, a Homeward Bone's or the Darksign's. The
+// Darksign is the way out of anything (user's rule, 2026-10-23): a boss fight, an invasion, a teammate who is down;
+// only a lost fight's reload, which takes everyone to their bonfires anyway, and our own game's state hold it. The
+// Homeward Bone is the way out of a boss fight, as in single player (session::bone_hold).
+enum TripKind { kTripTravel, kTripBone, kTripDarksign };
+uint32_t trip_refusal(TripKind kind) {
     if (!game::in_game() || game::loading() || world::local_dead() || rules::cutscene_playing() ||
         rules::cutscene_loading()) {
         return kTravelBusy;
     }
-    if (darksign) return reload_hold() ? kTravelReload : 0;
-    switch (travel_hold()) {
+    if (kind == kTripDarksign) return reload_hold() ? kTravelReload : 0;
+    switch (kind == kTripBone ? bone_hold() : travel_hold()) {
         case kHoldBossFight: return kTravelBossFight;
         case kHoldInvader: return kTravelInvader;
         case kHoldReload: return kTravelReload;
@@ -1635,7 +1637,7 @@ uint32_t trip_refusal(bool darksign = false) {
 // does (session::travel_hold). A trip that started a moment ago still has its load ahead: no other goes meanwhile.
 uint32_t travel_refusal(int bonfire, bool spot) {
     if (now() - g_travel_started < kTravelGap || g_homeward_at > 0) return kTravelBusy;
-    if (const uint32_t why = trip_refusal()) return why;
+    if (const uint32_t why = trip_refusal(kTripTravel)) return why;
     if (!spot && !rules::own_lordvessel()) return kTravelNoVessel;
     if (!rules::warp_destination(bonfire)) return kTravelNotThere;
     return 0;
@@ -1776,7 +1778,7 @@ void homeward_go(bool ready) {
     g_homeward_darksign = false;
     g_homeward_bumped = 0;
     const int bonfire = game::last_bonfire();
-    uint32_t why = ready ? trip_refusal(darksign) : kTravelBusy;
+    uint32_t why = ready ? trip_refusal(darksign ? kTripDarksign : kTripBone) : kTravelBusy;
     if (!why && bonfire < 0) why = kTravelNotThere;
     if (!why && !darksign && (items::count(kHomewardBone) < 1 || !guest_without_bone().empty())) why = kTravelNoBone;
     if (why) {
@@ -2425,6 +2427,7 @@ void guest_tick() {
                 g_follow_bonfire = -1;
                 g_guest_bonfire = bonfire;
                 *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
+                rules::arm_trip_reload();
                 world::warp_now(game::bonfire_map(bonfire), -1);
             }
             guest_travel_tick();
@@ -4136,7 +4139,9 @@ void curse_world() {
 
 bool host_homeward(bool darksign) {
     if (!hosting()) return false;
-    uint32_t why = now() - g_travel_started < kTravelGap || g_homeward_at > 0 ? kTravelBusy : trip_refusal(darksign);
+    uint32_t why = now() - g_travel_started < kTravelGap || g_homeward_at > 0
+                       ? kTravelBusy
+                       : trip_refusal(darksign ? kTripDarksign : kTripBone);
     if (!why && !darksign && !guest_without_bone().empty()) why = kTravelNoBone;
     if (why) {
         homeward_refused(why, darksign);
@@ -4370,6 +4375,21 @@ bool reload_hold() {
 }
 
 bool darksign_held() { return reload_hold(); }
+
+int bone_hold() {
+    if (g_role == Role::None || g_invade) return kHoldNone;
+    const auto& st = rules::state();
+    if (st.invader_present) return kHoldInvader;
+    if (reload_hold()) return kHoldReload;
+    // In a boss fight (ours, or a standing teammate's anywhere) the bone takes everyone out of it, a teammate who
+    // fell in it too: their held death goes ahead once the fight is gone, and they follow once back on their feet.
+    if (world::boss_fight() || st.teammate_boss_fight) return kHoldNone;
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (coop_member(p, members) && p.dead) return kHoldMateDown;
+    }
+    return kHoldNone;
+}
 
 int travel_hold() {
     if (g_role == Role::None || g_invade) return kHoldNone;

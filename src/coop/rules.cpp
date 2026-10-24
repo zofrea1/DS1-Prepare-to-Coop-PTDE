@@ -580,6 +580,7 @@ constexpr int kDeathLatch = 4000;     // OnEvent_4000 starts a death only while 
 std::set<int> g_awake_bosses;
 std::map<uint32_t, int> g_boss_of_chr;  // character -> its gauge boss entity, until the next load
 bool g_reset_reload = false;  // this load is a living guest's reload after a lost boss fight (arm_reset_reload)
+bool g_trip_reload = false;   // this load follows the host's Homeward Bone or Darksign (arm_trip_reload)
 
 void __cdecl before_map_load() {
     g_marked = false;
@@ -607,6 +608,14 @@ void __cdecl before_map_load() {
         if (g_place_bonfire) g_bonfire_spawn = true;
         g_place_warp = !g_place_bonfire && !g_state.invader && !g_state.leaving;
         LOG_INFO("[coop] Map load stays in the host's world");
+        if (!g_place_bonfire && g_trip_reload) {
+            // The host's trip was a load at home, which started its maps' temporary flags over; the bone or the
+            // Darksign may have left a boss fight, whose working flags would otherwise wake the boss early in our
+            // game when we come back (the stale-flag boss of the 2026-10-17 test).
+            const int n = clear_visited_temporary_flags();
+            LOG_INFO("[coop] Following the host's trip: the host's world's temporary flags (xxxx5xxx) start over, as "
+                     "the host's load did (%d block(s))", n);
+        }
         if (g_place_bonfire) {
             const int n = clear_visited_temporary_flags();
             const bool latch = game::flag(kDeathLatch);
@@ -625,6 +634,7 @@ void __cdecl after_map_load() {
     // The placement step is still ahead of this. It reads g_place_bonfire, which stays set.
     g_death_respawn = false;
     g_reset_reload = false;
+    g_trip_reload = false;
 }
 
 // True: jump to 0xEEFCFB. The compare itself is not executed, so the join map is left alone.
@@ -3195,6 +3205,11 @@ void arm_reset_reload() {
     if (!seamless_rules() || !g_state.guest || g_state.invader) return;
     g_death_respawn = true;
     g_reset_reload = true;
+}
+
+void arm_trip_reload() {
+    if (!seamless_rules() || !g_state.guest || g_state.invader) return;
+    g_trip_reload = true;
 }
 
 int awake_boss() {

@@ -27,6 +27,7 @@ namespace {
 constexpr wchar_t kHost[] = L"api.github.com";
 constexpr wchar_t kPath[] = L"/repos/zofrea1/DS1-Prepare-to-Coop-PTDE/releases/latest";
 constexpr wchar_t kReleasesPage[] = L"github.com/zofrea1/DS1-Prepare-to-Coop-PTDE/releases";
+constexpr wchar_t kNexusPage[] = L"nexusmods.com/darksouls/mods/1980";
 constexpr DWORD kTimeoutMs = 5000;
 constexpr size_t kMaxBody = 512 * 1024;
 
@@ -181,8 +182,8 @@ void tick() {
     if (title && !g_shown) {
         const std::wstring latest = text::widen(g_latest), current = text::widen(g_ours);
         overlay::set_notice({L"Prepare to Co-op Edition " + latest + L" is available",
-                             L"You have " + current + L". Download the new version from the Releases page:",
-                             kReleasesPage});
+                             L"You have " + current + L". Download the new version from GitHub or NexusMods:",
+                             kReleasesPage, kNexusPage});
         g_shown = true;
     } else if (!title && g_shown) {
         overlay::set_notice({});

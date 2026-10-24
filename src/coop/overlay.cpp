@@ -44,6 +44,7 @@ std::mutex g_mutex;
 Box g_panel;
 Box g_notice_box;
 IDirect3DStateBlock9* g_state = nullptr;
+bool g_notice_told = false;  // the notice's first frame since it was rendered was logged
 
 void* patch_slot(void* object, int slot, void* replacement) {
     void** vtable = *reinterpret_cast<void***>(object);
@@ -169,24 +170,75 @@ void draw_box(IDirect3DDevice9* dev, const Box& box, const D3DVIEWPORT9& vp) {
     dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
 }
 
+// What the game had bound when it presented, when that was not the whole back buffer (logged on each change, a few
+// times): on the title screen the box drawn into the game's own target and viewport was never seen.
+void note_target(IDirect3DSurface9* rt, IDirect3DSurface9* back, const D3DVIEWPORT9& vp, const D3DSURFACE_DESC& bd) {
+    static int logged = 0;
+    static bool last_other = false;
+    static D3DVIEWPORT9 last_vp{};
+    const bool other = rt != back;
+    const bool full = vp.X == 0 && vp.Y == 0 && vp.Width == bd.Width && vp.Height == bd.Height;
+    if (!other && full) return;
+    if (other == last_other && std::memcmp(&vp, &last_vp, sizeof(vp)) == 0) return;
+    last_other = other;
+    last_vp = vp;
+    if (logged >= 8) return;
+    ++logged;
+    D3DSURFACE_DESC rd{};
+    if (rt) rt->GetDesc(&rd);
+    LOG_INFO("[coop] Overlay: the game presented with %s %ux%u bound, viewport %lu,%lu %lux%lu (screen %ux%u); "
+             "drawing on the screen",
+             other ? "another target" : "the screen", rd.Width, rd.Height, vp.X, vp.Y, vp.Width, vp.Height,
+             bd.Width, bd.Height);
+}
+
 void draw(IDirect3DDevice9* dev) {
-    D3DVIEWPORT9 vp{};
-    dev->GetViewport(&vp);
+    // Drawn into the back buffer over all of it, whatever target, depth surface and viewport the game left bound.
+    IDirect3DSurface9* back = nullptr;
+    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) || !back) return;
+    D3DSURFACE_DESC bd{};
+    back->GetDesc(&bd);
+    const D3DVIEWPORT9 vp{0, 0, bd.Width, bd.Height, 0.0f, 1.0f};
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         for (Box* box : {&g_panel, &g_notice_box}) {
             if (box->dirty) {
                 box->dirty = false;
                 rebuild(dev, *box, box->lines, static_cast<int>(vp.Height));
+                if (box == &g_notice_box) g_notice_told = false;
             }
         }
     }
-    if ((!g_panel.visible || !g_panel.tex) && (!g_notice_box.visible || !g_notice_box.tex)) return;
-    if (!g_state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_state))) {
-        g_state = nullptr;
+    if ((!g_panel.visible || !g_panel.tex) && (!g_notice_box.visible || !g_notice_box.tex)) {
+        back->Release();
         return;
     }
-    g_state->Capture();
+    if (!g_state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_state))) {
+        g_state = nullptr;
+        back->Release();
+        return;
+    }
+    static DWORD targets = 0;
+    if (!targets) {
+        D3DCAPS9 caps{};
+        targets = SUCCEEDED(dev->GetDeviceCaps(&caps)) ? std::min<DWORD>(std::max<DWORD>(caps.NumSimultaneousRTs, 1), 4) : 1;
+    }
+    g_state->Capture();  // the viewport and every state below; targets and the depth surface are kept by hand
+    IDirect3DSurface9* old_rt[4] = {};
+    IDirect3DSurface9* old_ds = nullptr;
+    for (DWORD i = 0; i < targets; ++i) {
+        if (FAILED(dev->GetRenderTarget(i, &old_rt[i]))) old_rt[i] = nullptr;
+    }
+    if (FAILED(dev->GetDepthStencilSurface(&old_ds))) old_ds = nullptr;
+    D3DVIEWPORT9 game_vp{};
+    dev->GetViewport(&game_vp);
+    note_target(old_rt[0], back, game_vp, bd);
+    dev->SetRenderTarget(0, back);
+    for (DWORD i = 1; i < targets; ++i) {
+        if (old_rt[i]) dev->SetRenderTarget(i, nullptr);
+    }
+    dev->SetDepthStencilSurface(nullptr);
+    dev->SetViewport(&vp);
     if (SUCCEEDED(dev->BeginScene())) {
         dev->SetVertexShader(nullptr);
         dev->SetPixelShader(nullptr);
@@ -199,7 +251,10 @@ void draw(IDirect3DDevice9* dev) {
         dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
         dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
         dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        dev->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
         dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+        dev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+        dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
         dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
         dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
         dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
@@ -208,15 +263,36 @@ void draw(IDirect3DDevice9* dev) {
         dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
         dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
         dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        dev->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+        dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
         dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
         dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
         dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
         draw_box(dev, g_panel, vp);
         draw_box(dev, g_notice_box, vp);
         dev->EndScene();
+        if (!g_notice_told && g_notice_box.visible && g_notice_box.tex) {
+            g_notice_told = true;
+            LOG_INFO("[coop] Overlay: notice drawn (%dx%d on a %ux%u screen)", g_notice_box.text_w,
+                     g_notice_box.text_h, bd.Width, bd.Height);
+        }
     }
+    // The targets first (each SetRenderTarget resets the viewport), then the state block puts the viewport back.
+    dev->SetRenderTarget(0, old_rt[0] ? old_rt[0] : back);
+    for (DWORD i = 1; i < targets; ++i) {
+        if (old_rt[i]) dev->SetRenderTarget(i, old_rt[i]);
+    }
+    dev->SetDepthStencilSurface(old_ds);
+    for (IDirect3DSurface9* s : old_rt) {
+        if (s) s->Release();
+    }
+    if (old_ds) old_ds->Release();
     g_state->Apply();
+    back->Release();
 }
 
 HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty) {

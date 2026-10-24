@@ -156,10 +156,14 @@ int can_use(int32_t id) {
         // for the invasion (session.cpp, kInvaderEstus). Not in ds1sc.
         case 201: case 203: case 205: case 207: case 209: case 211: case 213: case 215:
             return invader && !coop::game::own_world() ? 1 : -1;
-        case 330:  // Homeward Bone: only the host, and it takes everyone, so not while travel waits (an invader too)
-        case 117:  // Darksign: the Homeward Bone's trip at the cost of every soul and all humanity (SpEffect 3226)
+        case 330:  // Homeward Bone: only the host, and it takes everyone, so not while travel waits (an invader too);
+                   // every co-op player needs a bone (session::host_homeward says who has none)
             if (!in_session) return -1;
             return host && session::travel_hold() == session::kHoldNone ? 1 : 0;
+        case 117:  // Darksign: the Homeward Bone's trip at the cost of every soul and all humanity (SpEffect 3226),
+                   // for everyone; the way out of a boss fight or an invasion too (invaders are sent home)
+            if (!in_session) return -1;
+            return host && !session::darksign_held() ? 1 : 0;
         case 115:  // Black Eye Orb
         case 116:
             if (!in_session) return -1;

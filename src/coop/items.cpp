@@ -11,6 +11,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -627,6 +628,20 @@ void remove_all(int32_t goods_id) {
     if (before > 0 || cleared > 0 || after > 0) {
         LOG_INFO("[coop] Crimson Blossoms withered (%d held, %d slot(s) cleared, %d left)", before, cleared, after);
     }
+}
+
+int take(int32_t goods_id, int n) {
+    if (!game::in_game() || n <= 0) return 0;
+    const int before = count(goods_id);
+    if (before <= 0) return 0;
+    __try {
+        using Fn = uint8_t(__stdcall*)(uint32_t, int32_t, int32_t);
+        reinterpret_cast<Fn>(kRemoveItem)(kGoodsCategory, goods_id, std::min(n, before));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("[coop] Taking item %d failed", goods_id);
+        return 0;
+    }
+    return before - count(goods_id);
 }
 
 void grant_missing() {

@@ -54,6 +54,7 @@ struct PeerInfo {
     double went_over_at = 0;    // when a respawn of theirs last went with a reload that starts the world over
     uint32_t dead_list_sent = 0;  // the list of our world's dead last sent them while they were down (0 none)
     uint32_t hurt_list_sent = 0;  // the list of our world's hurt enemies last sent them while they were down
+    int bones = -1;               // the Homeward Bones they hold, as they report it (1.3.0), -1 not reported
 };
 
 void configure(const Config& cfg);
@@ -139,6 +140,11 @@ bool others_wait_on_reset();
 // teammate's), or a teammate who is down (their respawn goes first, through its own waits). kHoldNone: travel is open.
 enum TravelHold : int { kHoldNone = 0, kHoldBossFight, kHoldInvader, kHoldReload, kHoldMateDown };
 int travel_hold();
+// The Darksign is held back only by a lost boss fight's reload that is pending (it takes everyone to their bonfires
+// anyway): not by a boss fight, an invader (it sends them home) or a teammate who is down.
+bool darksign_held();
+// A lost boss fight's reload is pending: ours, or a living co-op teammate's.
+bool reload_hold();
 // The line that tells the player why (a hold other than kHoldNone).
 const wchar_t* travel_hold_text(int hold);
 

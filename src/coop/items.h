@@ -57,6 +57,9 @@ int estus_charges();
 // bonfire's refill does. False when there is no flask or the game did not take it.
 bool set_estus_charges(int charges);
 void remove_all(int32_t goods_id);
+// Takes `n` of an item (not a key item) out of the inventory, as the game's own RemoveItem does. Returns how many
+// went (0 when none was held).
+int take(int32_t goods_id, int n);
 // A bonfire rest: every co-op item except the Crimson Blossom that is not in the inventory (one each). Checked
 // at every rest, so a character brought over from an earlier save gets them too.
 void grant_missing();

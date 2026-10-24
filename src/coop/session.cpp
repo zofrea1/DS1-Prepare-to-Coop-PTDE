@@ -91,6 +91,7 @@ enum MsgType : uint8_t {
     kTravelAnswer = 26,  // 1.2.0, host -> that guest: the travel waits for the host's menu, or why it cannot go
     kNpcPhantoms = 27,   // 1.3.0, host -> guests and invaders: the NPC phantoms in the host's party (summons.cpp)
     kHurtList = 28,      // 1.3.0: my world's hurt enemies, to a fallen teammate (as kDeadList; deadlist.cpp)
+    kSentHome = 29,      // 1.3.0, host -> an invader: the host's Darksign sends you home (no outcome)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -167,9 +168,21 @@ struct InfoMore2 {
     InfoMore more;
     int32_t event_anim;  // the event animation the sender's own character holds (motion::held_event_anim), 0 none
 };
+// 1.3.0, behind InfoMore2 the same way.
+struct InfoMore3 {
+    InfoMore2 more2;
+    int32_t bones;  // the Homeward Bones the sender holds (each one the host uses takes one from every player)
+};
 struct BonfireMsg {
     Header h;
     int32_t bonfire;
+};
+// kHomeward: BonfireMsg (all that 1.2.0 reads and sends) and what the trip costs every guest (1.3.0).
+struct HomewardMsg {
+    Header h;
+    int32_t bonfire;
+    uint8_t darksign;  // the Darksign's trip: every soul and all humanity are lost
+    uint8_t bone;      // a Homeward Bone's trip: one bone goes from every player
 };
 struct Simple {
     Header h;
@@ -221,6 +234,7 @@ enum TravelAnswer : uint32_t {
     kTravelInvader = 7,    // an invader is in the world (bonfires are out of use)
     kTravelMateDown = 8,   // a teammate is down: their respawn goes first
     kTravelReload = 9,     // a game reloads after a lost boss fight
+    kTravelNoBone = 10,    // (the host's own Homeward Bone, never sent) a co-op player holds no Homeward Bone
 };
 struct PlayerEvent {
     Header h;
@@ -286,6 +300,10 @@ constexpr const wchar_t* kMsgInvaderDied = L"Evil spirit {} has died";
 constexpr const wchar_t* kMsgGuestStart = L"Joining another world as a guest...";
 constexpr const wchar_t* kMsgGuestMission = L"Joined another world!";
 constexpr const wchar_t* kMsgHostWarpOut = L"The power of the homeward bone consumes you...";
+constexpr const wchar_t* kMsgDarksignOut = L"The Darksign consumes your souls and humanity...";
+constexpr const wchar_t* kMsgNoBone = L"Everyone needs a Homeward Bone: {} has none";
+constexpr const wchar_t* kMsgDarksignInvader = L"The host used the Darksign. Returning to your world...";
+constexpr const wchar_t* kMsgDarksignSends = L"The Darksign sends the invader away";
 constexpr const wchar_t* kMsgBreakInStart = L"Invading another world as an evil spirit";
 constexpr const wchar_t* kMsgBreakInMission = L"Invaded another world! Defeat {} players";
 constexpr const wchar_t* kMsgBreakInSuccess = L"Invasion success! Returning to your world";
@@ -496,6 +514,7 @@ bool g_invade_open = false;  // host: our lobby tells invaders' searches we take
 // kInvaderEstus charges: more are set aside on arrival and given back once home, so an invasion costs only what
 // was drunk. Kept in memory only: a crash or quit during the invasion leaves the flask at the cap until a rest.
 constexpr int kInvaderEstus = 5;
+constexpr int32_t kHomewardBone = 330;
 int g_estus_kept = 0;  // charges set aside for the trip home
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
@@ -1592,12 +1611,15 @@ void answer_travel(uint64_t to, uint32_t why) {
     send_to(to, a);
 }
 
-// Host: why no trip of the party's can start now (0: one can), a travel or a Homeward Bone's.
-uint32_t trip_refusal() {
+// Host: why no trip of the party's can start now (0: one can), a travel or a Homeward Bone's. The Darksign is the
+// way out of anything (user's rule, 2026-10-23): a boss fight, an invasion, a teammate who is down; only a lost
+// fight's reload, which takes everyone to their bonfires anyway, and our own game's state hold it.
+uint32_t trip_refusal(bool darksign = false) {
     if (!game::in_game() || game::loading() || world::local_dead() || rules::cutscene_playing() ||
         rules::cutscene_loading()) {
         return kTravelBusy;
     }
+    if (darksign) return reload_hold() ? kTravelReload : 0;
     switch (travel_hold()) {
         case kHoldBossFight: return kTravelBossFight;
         case kHoldInvader: return kTravelInvader;
@@ -1678,6 +1700,8 @@ void host_travel_request(uint64_t from, const TravelMsg& m) {
     host_travel_tick();
 }
 
+std::wstring guest_without_bone();
+
 // Host: a Homeward Bone's or the Darksign's trip cannot go (refused at the use or when it was to go).
 void homeward_refused(uint32_t why, bool darksign) {
     LOG_INFO("[coop] Host %s: no trip (%u)", darksign ? "Darksign" : "Homeward Bone", why);
@@ -1686,14 +1710,65 @@ void homeward_refused(uint32_t why, bool darksign) {
         case kTravelInvader: say(travel_hold_text(kHoldInvader)); break;
         case kTravelMateDown: say(travel_hold_text(kHoldMateDown)); break;
         case kTravelReload: say(travel_hold_text(kHoldReload)); break;
+        case kTravelNoBone: {
+            const std::wstring who = guest_without_bone();
+            say(who.empty() ? std::wstring(L"Nothing interesting happens") : fmt(kMsgNoBone, who));
+            break;
+        }
         default: say(kMsgTripBusy); break;
     }
 }
 
+// Host: the co-op guest without a Homeward Bone (their name), else empty. A player of 1.2.0 or older does not report
+// their bones: they neither hold the bone back nor pay one.
+std::wstring guest_without_bone() {
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (coop_member(p, members) && p.bones == 0) return shown_name(p);
+    }
+    return L"";
+}
+
+// Host: the Darksign sends every invader home first (message 29; a 1.2.0 invader ignores it and gets the host's
+// goodbye 5 s later, which it takes as the session's end). An invader sent home this way neither wins nor loses.
+std::vector<std::pair<uint64_t, double>> g_sent_home;  // invaders told to go, and when
+
+void send_invaders_home() {
+    Simple m{};
+    fill_header(&m, kSentHome);
+    int n = 0;
+    for (uint64_t id : g_admitted) {
+        if (!peer_is_invader(id)) continue;
+        send_to(id, m);
+        g_sent_home.push_back({id, now()});
+        LOG_INFO("[coop] Darksign: %s, the invader, is sent home", steam::persona(id).c_str());
+        ++n;
+    }
+    if (n) say(kMsgDarksignSends);
+}
+
+void sent_home_tick() {
+    for (auto it = g_sent_home.begin(); it != g_sent_home.end();) {
+        if (!admitted(it->first)) {
+            it = g_sent_home.erase(it);
+        } else if (now() - it->second > 5.0) {
+            Simple bye{};
+            fill_header(&bye, kBye);
+            send_to(it->first, bye);
+            LOG_INFO("[coop] The invader %s is still here 5 s after the Darksign: told the session is over for them",
+                     steam::persona(it->first).c_str());
+            it = g_sent_home.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 // Host: the trip of a Homeward Bone or the Darksign goes, unless something now holds the party's trips back (the
-// item can be used only when nothing does, but its animation takes a moment). The Darksign's cost is taken only
-// when the trip goes. The bone is not used up in a session (the game's UseGoods, which uses it up, is skipped), so
-// a refused trip costs nothing.
+// item can be used only when nothing does, but its animation takes a moment). Its cost is taken only when the trip
+// goes: the Darksign takes every soul and all humanity from the host and from every guest (each game its own), a
+// Homeward Bone one bone from each. The game's UseGoods, which would use the bone up, is skipped in a session, so a
+// refused trip costs nothing.
 void homeward_go(bool ready) {
     const bool darksign = g_homeward_darksign;
     const uint64_t bumped = g_homeward_bumped;
@@ -1701,22 +1776,30 @@ void homeward_go(bool ready) {
     g_homeward_darksign = false;
     g_homeward_bumped = 0;
     const int bonfire = game::last_bonfire();
-    uint32_t why = ready ? trip_refusal() : kTravelBusy;
+    uint32_t why = ready ? trip_refusal(darksign) : kTravelBusy;
     if (!why && bonfire < 0) why = kTravelNotThere;
+    if (!why && !darksign && (items::count(kHomewardBone) < 1 || !guest_without_bone().empty())) why = kTravelNoBone;
     if (why) {
         homeward_refused(why, darksign);
-        if (bumped && admitted(bumped)) answer_travel(bumped, why);
+        if (bumped && admitted(bumped)) answer_travel(bumped, why == kTravelNoBone ? kTravelBusy : why);
         return;
     }
     if (darksign) {
+        send_invaders_home();
         LOG_INFO("[coop] Darksign: %d souls and %d humanity lost", game::souls(), game::humanity());
         game::set_souls(0);
         game::set_humanity(0);
+    } else {
+        const int taken = items::take(kHomewardBone, 1);
+        LOG_INFO("[coop] Homeward Bone: %d taken from us (%d left); one goes from every guest", taken,
+                 items::count(kHomewardBone));
     }
     g_travel_started = now();
-    BonfireMsg m{};
+    HomewardMsg m{};
     fill_header(&m, kHomeward);
     m.bonfire = bonfire;
+    m.darksign = darksign ? 1 : 0;
+    m.bone = darksign ? 0 : 1;
     broadcast(m);
     LOG_INFO("[coop] Host %s: everyone goes to bonfire %d", darksign ? "Darksign" : "Homeward Bone", bonfire);
     world::warp_now(game::bonfire_map(bonfire), -1);
@@ -1730,6 +1813,7 @@ void host_tick() {
     if (g_step != Step::Hosting) return;
     host_world_tick();
     host_npc_tick();
+    sent_home_tick();
     host_travel_tick();
     host_hide_while_away();
     host_invasions_open();
@@ -2369,7 +2453,8 @@ void guest_tick() {
 
 // ---------------------------------------------------------------- shared
 void send_info() {
-    InfoMore2 more2{};
+    InfoMore3 more3{};
+    InfoMore2& more2 = more3.more2;
     InfoMore& more = more2.more;
     Info& i = more.info;
     fill_header(&i, kInfo);
@@ -2406,7 +2491,8 @@ void send_info() {
     const uint32_t me = game::player();
     const int held = me && !game::loading() ? motion::held_event_anim(me) : 0;
     more2.event_anim = held < 0 ? 1 : held;  // held with no id known: still "held" (-1 is "not reported")
-    broadcast(more2, false);
+    more3.bones = items::count(kHomewardBone);
+    broadcast(more3, false);
 }
 
 // The player an event is about, by their character's name when we know them (a 1.0.0 player's events carry its
@@ -2772,6 +2858,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 }
                 p->event_anim = more2.event_anim;
             }
+            InfoMore3 more3{};
+            p->bones = as(&more3) ? more3.bones : -1;
             p->boss_fight = more_ok && more.boss_fight != 0;
             p->team_respawn = more_ok && more.team_respawn != 0;
             if (more_ok && (more.respawn & kRespawnPhase) == kRespawnWent && g_role == Role::Guest && from == g_host) {
@@ -2973,9 +3061,20 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             break;
         }
         case kHomeward: {
-            BonfireMsg m;
-            if (from != g_host || !as(&m) || g_step != Step::InWorld || g_invade || m.bonfire < 0) return;
-            say(kMsgHostWarpOut);
+            HomewardMsg m{};  // a 1.2.0 host sends the BonfireMsg part only: no cost
+            if (size < sizeof(BonfireMsg)) return;
+            std::memcpy(&m, data, std::min<size_t>(size, sizeof(m)));
+            if (from != g_host || g_step != Step::InWorld || g_invade || m.bonfire < 0) return;
+            if (m.darksign) {
+                LOG_INFO("[coop] The host's Darksign: %d souls and %d humanity lost", game::souls(), game::humanity());
+                game::set_souls(0);
+                game::set_humanity(0);
+            } else if (m.bone) {
+                const int taken = items::take(kHomewardBone, 1);
+                LOG_INFO("[coop] The host's Homeward Bone: %d of ours taken (%d left)", taken,
+                         items::count(kHomewardBone));
+            }
+            say(m.darksign ? kMsgDarksignOut : kMsgHostWarpOut);
             g_travel_asked = 0;    // our own travel request is answered by this trip
             g_follow_travel = -1;  // the host's latest trip is the one followed
             g_follow_told = 0;
@@ -3089,6 +3188,11 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!as(&m) || (g_role == Role::Host && !admitted(from))) return;
             m.h.type = kPong;
             send_to(from, m, false);
+            break;
+        }
+        case kSentHome: {
+            if (from != g_host || g_role != Role::Guest || !g_invade) return;
+            guest_go_home(kMsgDarksignInvader, "the host's Darksign sent us home");
             break;
         }
         case kDropped: {
@@ -4032,7 +4136,8 @@ void curse_world() {
 
 bool host_homeward(bool darksign) {
     if (!hosting()) return false;
-    const uint32_t why = now() - g_travel_started < kTravelGap || g_homeward_at > 0 ? kTravelBusy : trip_refusal();
+    uint32_t why = now() - g_travel_started < kTravelGap || g_homeward_at > 0 ? kTravelBusy : trip_refusal(darksign);
+    if (!why && !darksign && !guest_without_bone().empty()) why = kTravelNoBone;
     if (why) {
         homeward_refused(why, darksign);
         return false;
@@ -4252,6 +4357,19 @@ bool others_wait_on_reset() {
     }
     return false;
 }
+
+// A lost boss fight's reload is pending: ours, or a living co-op teammate's.
+bool reload_hold() {
+    if (g_role == Role::None || g_invade) return false;
+    if (world::reset_pending()) return true;
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (coop_member(p, members) && !p.dead && (p.reset == kResetWaiting || p.reset == kResetReady)) return true;
+    }
+    return false;
+}
+
+bool darksign_held() { return reload_hold(); }
 
 int travel_hold() {
     if (g_role == Role::None || g_invade) return kHoldNone;

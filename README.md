@@ -106,10 +106,10 @@ In the `[PrepareToCoop]` section of `PTDE-FPS-Unlock.ini` (the FPS Unlock's sett
 | `GuestWorldEvents` | `true` | Guests run the world's scripted events in their own game, as the host does (bosses, lifts, cutscenes, the Hellkite). |
 | `BonfireAnimations` | `true` | The others see you sit, rest and stand at a bonfire. |
 | `OverheadPlayerDisplay` | `4` | Another player's health bar: their character's name, with 0 nothing more, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping. |
-| `NetworkTickRate` | `6` | How many times a second every game of your session sends where its player is (and the enemies it moves): 6, the game's own, up to 30. Higher draws the others closer to where they really are, for a little more upload; best when everyone has a low ping. The host's setting is used by the whole session (players of 1.2.0 or older still send 6). |
+| `NetworkTickRate` | `15` | How many times a second every game of your session sends where its player is (and the enemies it moves): 6, the game's own, up to 30. Higher draws the others closer to where they really are, for a little more upload; best when everyone has a low ping (lower it toward 6 if not). The host's setting is used by the whole session (players of 1.2.0 or older still send 6). |
 | `NetworkSmoothing` | `25` | Above 6 updates a second, how many ms other players' characters (and enemies other games move) stay behind their updates, as a margin for late ones: they are drawn about one update interval plus this behind, plus the ping (about 58 ms at 30 a second, 92 ms at 15; 6 a second stays the game's 200 ms). Each player's own, 0 to 200; raise it if others move in jerks. |
-| `EnemyHealthScaling`, `EnemyDamageScaling`, `EnemyPostureScaling` | `35`, `0`, `15` | Enemy scaling per extra player, in percent. |
-| `BossHealthScaling`, `BossDamageScaling`, `BossPostureScaling` | `100`, `0`, `20` | The same for bosses. |
+| `EnemyHealthScaling`, `EnemyDamageScaling`, `EnemyPostureScaling` | `40`, `0`, `25` | Enemy scaling per extra player, in percent. |
+| `BossHealthScaling`, `BossDamageScaling`, `BossPostureScaling` | `105`, `0`, `40` | The same for bosses. |
 | `SaveFileExtension` | `co2` | The save file while the co-op is on (vanilla: `sl2`). |
 | `CoopHotkeys` | `true` | The Ctrl+F1..F4 shortcuts. |
 | `CheckForUpdates` | `true` | At each start, look on the GitHub Releases page for a newer Prepare to Co-op, and say so on the title screen when there is one (until a character is loaded). One small request to api.github.com; `false` turns it off. |

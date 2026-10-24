@@ -28,17 +28,17 @@ struct CoopConfig {
     int overhead_display = 4;
     // Host: how many times a second every game of the session sends its player's character and the enemies it moves
     // (6, the game's own, to 30). Guests and invaders use their host's.
-    int net_rate = 6;
+    int net_rate = 15;
     // Each player's own: above the game's rate, the ms other players' characters (and the enemies other games move)
     // stay behind their updates as a margin for late ones (0 to 200).
     int net_smoothing = 25;
     // Enemy and boss scaling per extra player, in percent.
-    int enemy_health = 35;
+    int enemy_health = 40;
     int enemy_damage = 0;
-    int enemy_posture = 15;
-    int boss_health = 100;
+    int enemy_posture = 25;
+    int boss_health = 105;
     int boss_damage = 0;
-    int boss_posture = 20;
+    int boss_posture = 40;
     // Co-op characters live in their own save file (DRAKS0005.<extension>) so vanilla saves stay apart.
     char save_extension[16] = "co2";
     // Keyboard shortcuts as well as the co-op items (Ctrl+F1 host, Ctrl+F2 join, Ctrl+F3 leave).

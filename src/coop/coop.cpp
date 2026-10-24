@@ -209,27 +209,31 @@ int blossom_count() { return coop::items::count(coop::items::kBlossom); }
 // ---------------------------------------------------------------- the Homeward miracle
 // Homeward (Magic 5210) puts on effect 580, which turns into 581 after 0.6 s: stateInfo 16, the return to the last
 // bonfire, as the Homeward Bone's 3220. The game marks it unusable in multiplayer (enable_multi off). In a session the
-// host may cast it whenever the Homeward Bone could be used (session::bone_hold), and it takes everyone home as the
-// bone does, with no bone from anyone; nobody else casts it there.
+// host may cast it whenever the Homeward Bone could be used (session::bone_hold, and no trip of the party's started
+// a moment ago), and it takes everyone home as the bone does, with no bone from anyone; nobody else casts it there.
+// The cast spends a use, so it is closed beforehand rather than refused afterwards.
 constexpr int32_t kHomewardMiracle = 5210;
 bool g_miracle = false;  // the return-to-bonfire call is hooked (world::set_homeward_state_handler)
 
 void homeward_miracle_tick() {
     using namespace coop;
-    const bool allow = g_miracle && session::hosting() && session::bone_hold() == session::kHoldNone;
+    const bool allow = g_miracle && session::hosting() && session::bone_hold() == session::kHoldNone &&
+                       !session::trip_slot_busy();
     static int shown = -1;
     if (static_cast<int>(allow) != shown && items::set_magic_multi(kHomewardMiracle, allow)) shown = allow ? 1 : 0;
 }
 
 // The return-to-bonfire state on our character. In a session only the Homeward miracle gets here: the bone's and the
 // Darksign's effects are never put on there (use_item). The host's takes everyone to the host's bonfire; anyone
-// else's is dropped (the session stays). The state lasts a moment, so one cast is one trip.
+// else's is dropped (the session stays). The state is on for a few frames: the first frame of each effect asks for
+// the trip, the frames after it in the same effect do not (a second ask would be refused, the trip being queued). A
+// gap of half a second ends an effect: two casts are seconds apart, and a frame hitch inside one is shorter.
 bool homeward_state() {
     using namespace coop;
     if (!session::in_session()) return false;
     static ULONGLONG last = 0;
     const ULONGLONG t = GetTickCount64();
-    const bool fresh = t - last > 3000;
+    const bool fresh = t - last > 500;
     last = t;
     if (fresh) {
         if (session::hosting()) {

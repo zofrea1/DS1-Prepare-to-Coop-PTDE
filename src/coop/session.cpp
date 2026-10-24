@@ -1648,7 +1648,7 @@ uint32_t trip_refusal(TripKind kind) {
 // world, so a guest cannot take the party further than the host's own warp could, and waits as the host's own warp
 // does (session::travel_hold). A trip that started a moment ago still has its load ahead: no other goes meanwhile.
 uint32_t travel_refusal(int bonfire, bool spot) {
-    if (now() - g_travel_started < kTravelGap || g_homeward_at > 0) return kTravelBusy;
+    if (trip_slot_busy()) return kTravelBusy;
     if (const uint32_t why = trip_refusal(kTripTravel)) return why;
     if (!spot && !rules::own_lordvessel()) return kTravelNoVessel;
     if (!rules::warp_destination(bonfire)) return kTravelNotThere;
@@ -4181,9 +4181,7 @@ void curse_world() {
 
 bool host_homeward(HomewardKind kind) {
     if (!hosting()) return false;
-    uint32_t why = now() - g_travel_started < kTravelGap || g_homeward_at > 0
-                       ? kTravelBusy
-                       : trip_refusal(kind == kHomeDarksign ? kTripDarksign : kTripBone);
+    uint32_t why = trip_slot_busy() ? kTravelBusy : trip_refusal(kind == kHomeDarksign ? kTripDarksign : kTripBone);
     if (!why && kind == kHomeBone && !guest_without_bone().empty()) why = kTravelNoBone;
     if (why) {
         homeward_refused(why, kind);
@@ -4213,6 +4211,8 @@ bool in_session() {
 }
 
 bool hosting() { return g_role == Role::Host && g_step == Step::Hosting && g_lobby != 0; }
+
+bool trip_slot_busy() { return now() - g_travel_started < kTravelGap || g_homeward_at > 0; }
 
 int net_rate() {
     if (g_role == Role::Host) return g_cfg.net_rate;

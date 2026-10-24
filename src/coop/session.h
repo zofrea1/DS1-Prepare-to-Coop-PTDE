@@ -78,6 +78,9 @@ void curse_world();  // Cursed Pendant: curses our own world (offline or hosting
 // the host told why) when no trip can go now.
 enum HomewardKind { kHomeBone, kHomeDarksign, kHomeMiracle };
 bool host_homeward(HomewardKind kind);
+// Host: a trip of the party's started less than 5 s ago (its load begins frames later) or the host's Homeward trip
+// waits to go on the next tick: no other trip can start (host_homeward and a guest's travel are refused).
+bool trip_slot_busy();
 
 // Item rules (Remastered Seamless Co-op's): a session is established (we host one or we are in one).
 bool in_session();

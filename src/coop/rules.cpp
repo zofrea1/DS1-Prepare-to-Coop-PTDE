@@ -323,6 +323,53 @@ bool install_blood_world() {
     return patch_call(kBloodWorldSite, k, sizeof(k), reinterpret_cast<void*>(&hk_blood_world));
 }
 
+// UpDateBloodMark (Lua, 0xD661F0 -> 0xD78B10) is the last step of SoloPlayDeath_2, after WarpNextStageKick and the
+// clearing of flag 4000. While our respawn waits (a team wipe, a lost boss fight's reload; world.cpp) the kick returns
+// without a warp, the player is still dead, and the death starts over about every five seconds ("YOU DIED", then
+// SoloPlayDeath_2 again). Each pass wrote the bloodstain anew with what the first had left: 0 souls and 0 humanity
+// (2026-10-23: the guest's 2594 souls and 2 humanity from the Taurus Demon fight were written over three times while
+// it waited for the host's reload, and the stain it took back held nothing). One bloodstain per death.
+constexpr uint32_t kUpdateBloodCall = 0x00D66204;  // call 0xD78B10 (eax = PlayerIns, push Lua events, push 1)
+constexpr uint32_t kUpdateBlood = 0x00D78B10;
+void* g_update_blood = reinterpret_cast<void*>(kUpdateBlood);
+bool g_stain_this_death = false;
+
+bool local_alive() {
+    const uint32_t me = game::player();
+    uint32_t hp = 0;
+    return me && read32(me + 0x2D4, &hp) && static_cast<int>(hp) > 0;
+}
+
+bool __cdecl stain_allowed() {
+    if (!g_stain_this_death) {
+        g_stain_this_death = game::player() != 0 && !local_alive();
+        return true;
+    }
+    static int lines = 0;
+    if (++lines <= 20) {
+        LOG_INFO("[coop] Our death went round again while its respawn waited: the bloodstain stays as it was (souls "
+                 "%d, humanity %d now)", game::souls(), game::humanity());
+    }
+    return false;
+}
+
+__declspec(naked) void hk_update_blood() {
+    __asm {
+        pushad
+        call stain_allowed
+        test al, al
+        popad
+        jz skip
+        jmp g_update_blood
+    skip:
+        ret 8
+    }
+}
+
+bool install_one_stain() {
+    return redirect_call(kUpdateBloodCall, kUpdateBlood, reinterpret_cast<void*>(&hk_update_blood));
+}
+
 // ParamInitialize (Lua, 0xD66360) runs on every map load and decides whether our bloodstain stays. A human keeps
 // it (0xD78B10 without a new record: the record stays and its marker is put back), and so does a hollow alone. A
 // hollow with anyone else in the party (PartyMemberInfo = [GameMan+0xBEC], +0x14 members > 1) loses it
@@ -3727,6 +3774,7 @@ int install() {
     }
     failed += install_one("member left (no return home for the master of the world)", install_master_left());
     failed += install_one("guest bloodstain position", install_blood_world());
+    failed += install_one("one bloodstain per death", install_one_stain());
     failed += install_one("bloodstain kept in a co-op party", install_param_party());
     {
         // mov eax, [esi+70h] ; sub eax, edi. The following je stays in place.
@@ -4107,6 +4155,7 @@ void tick() {
         track_own_chr_type();
     }
     track_bloodstain();
+    if (local_alive()) g_stain_this_death = false;
     track_watched_enemies();
     track_boss_control();
     own_gauge_tick();

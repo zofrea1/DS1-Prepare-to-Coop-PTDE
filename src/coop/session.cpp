@@ -12,6 +12,7 @@
 #include "rules.h"
 #include "spectate.h"
 #include "steam.h"
+#include "summons.h"
 #include "text.h"
 #include "world.h"
 #include "version.h"
@@ -88,6 +89,8 @@ enum MsgType : uint8_t {
     kHostWorld = 24,   // 1.2.0, host -> co-op guests: what the host's world has (key items, Lordvessel, warp bonfires)
     kTravel = 25,      // 1.2.0, guest -> host: my bonfire warp, take everyone to this bonfire (TravelMsg)
     kTravelAnswer = 26,  // 1.2.0, host -> that guest: the travel waits for the host's menu, or why it cannot go
+    kNpcPhantoms = 27,   // 1.3.0, host -> guests and invaders: the NPC phantoms in the host's party (summons.cpp)
+    kHurtList = 28,      // 1.3.0: my world's hurt enemies, to a fallen teammate (as kDeadList; deadlist.cpp)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -189,6 +192,19 @@ struct HostWorldMsg {
     uint32_t warps;      // bit i: the host has rested at the warp list's i-th bonfire (rules::own_warps)
     uint8_t keys;
     int32_t key[kHostKeysMax];
+};
+// kNpcPhantoms: sent when the host's NPC phantoms change and every few seconds while there are any (a player who
+// comes in later gets them too). Each is named by its entity id, which every game shares.
+constexpr int kNpcPhantomsMax = 4;
+struct NpcPhantomsMsg {
+    Header h;
+    uint8_t count;
+    struct {
+        int32_t entity;
+        uint32_t handle;  // its character handle in the host's game (packet 48 names it so)
+        int32_t kind;     // its character type as a phantom
+        int32_t f1, f2;   // its party entry's data
+    } p[kNpcPhantomsMax];
 };
 struct TravelMsg {
     Header h;
@@ -864,14 +880,17 @@ void share_dead_lists() {
     }
     if (g_role == Role::Guest && g_step != Step::InWorld) return;
     const std::vector<party::Remote> members = party::remotes();
-    std::vector<uint8_t> msg;
-    uint32_t hash = 0;
+    std::vector<uint8_t> msg, hurt_msg;
+    uint32_t hash = 0, hurt_hash = 0;
+    bool built = false;
     for (auto& p : g_peers) {
         if (!coop_member(p, members) || !p.dead || (g_role == Role::Guest && p.id != g_host)) {
             p.dead_list_sent = 0;
+            p.hurt_list_sent = 0;
             continue;
         }
-        if (msg.empty()) {
+        if (!built) {
+            built = true;
             const std::vector<uint8_t> list = deadlist::build();
             if (list.empty()) return;
             Header h{kMagic, kDeadList};
@@ -879,10 +898,81 @@ void share_dead_lists() {
             std::memcpy(msg.data(), &h, sizeof(h));
             std::memcpy(msg.data() + sizeof(h), list.data(), list.size());
             hash = list_hash(list);
+            // Their reload puts back the health of the enemies hurt here (1.3.0; older games ignore it).
+            const std::vector<uint8_t> hurt = deadlist::build_hurt();
+            if (!hurt.empty()) {
+                Header hh{kMagic, kHurtList};
+                hurt_msg.resize(sizeof(hh) + hurt.size());
+                std::memcpy(hurt_msg.data(), &hh, sizeof(hh));
+                std::memcpy(hurt_msg.data() + sizeof(hh), hurt.data(), hurt.size());
+                hurt_hash = list_hash(hurt);
+            }
         }
-        if (p.dead_list_sent == hash) continue;
-        if (steam::send(p.id, msg.data(), static_cast<uint32_t>(msg.size()), true)) p.dead_list_sent = hash;
+        if (p.dead_list_sent != hash &&
+            steam::send(p.id, msg.data(), static_cast<uint32_t>(msg.size()), true)) {
+            p.dead_list_sent = hash;
+        }
+        if (!hurt_msg.empty() && p.hurt_list_sent != hurt_hash &&
+            steam::send(p.id, hurt_msg.data(), static_cast<uint32_t>(hurt_msg.size()), true)) {
+            p.hurt_list_sent = hurt_hash;
+        }
     }
+}
+
+// ---------------------------------------------------------------- NPC phantoms (summons.cpp)
+// Host: the NPC phantoms in our party go to every admitted player (co-op guests and invaders) when they change and
+// every 3 s while there are any; an empty list once when the last has gone.
+std::vector<uint8_t> g_npc_sent;
+double g_npc_sent_at = 0;
+
+void host_npc_tick() {
+    static double polled = 0;
+    if (now() - polled < 0.5 || !game::in_game() || game::loading() || !game::own_world()) return;
+    polled = now();
+    NpcPhantomsMsg m{};
+    fill_header(&m, kNpcPhantoms);
+    for (const summons::Phantom& ph : summons::ours()) {
+        if (m.count >= kNpcPhantomsMax) break;
+        auto& e = m.p[m.count++];
+        e.entity = ph.entity;
+        e.handle = ph.handle;
+        e.kind = ph.kind;
+        e.f1 = ph.f1;
+        e.f2 = ph.f2;
+    }
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&m);
+    const std::vector<uint8_t> now_bytes(bytes, bytes + sizeof(m));
+    const bool changed = now_bytes != g_npc_sent;
+    if (!changed && (m.count == 0 || now() - g_npc_sent_at < 3.0)) return;
+    if (changed) {
+        static std::string logged = "none";
+        std::string ids;
+        for (int i = 0; i < m.count; ++i) ids += (ids.empty() ? "" : " ") + std::to_string(m.p[i].entity);
+        if (ids.empty()) ids = "none";
+        if (ids != logged) LOG_INFO("[coop] Our NPC phantoms: %s", ids.c_str());
+        logged = ids;
+    }
+    g_npc_sent = now_bytes;
+    g_npc_sent_at = now();
+    for (uint64_t id : g_admitted) {
+        if (!is_lost(id)) steam::send(id, &m, sizeof(m), true);
+    }
+}
+
+void on_npc_phantoms(const uint8_t* data, uint32_t size) {
+    NpcPhantomsMsg m{};
+    std::memcpy(&m, data, std::min<size_t>(size, sizeof(m)));
+    std::vector<summons::Phantom> list;
+    for (int i = 0; i < m.count && i < kNpcPhantomsMax; ++i) {
+        summons::Phantom ph;
+        ph.entity = m.p[i].entity;
+        ph.handle = m.p[i].handle;
+        ph.kind = m.p[i].kind;
+        ph.f1 = m.p[i].f1;
+        ph.f2 = m.p[i].f2;
+        list.push_back(ph);
+    }
+    summons::note_host_list(list);
 }
 
 // ---------------------------------------------------------------- a team wipe reloads every game at once
@@ -1144,15 +1234,19 @@ bool boss_fight_in_world() {
 // Where an invader arrives in our world, as the game's own invasions do: the black invasion point of the play
 // region we stand in (the collision's PlayRegionID, PlayerIns+0x284; one point per play region in the maps'
 // MSBs). Where our play region has none (connecting stretches the multiplayer walls used to close, Firelink
-// Shrine, the Undead Asylum), the nearest point within kNearPoint; with none in reach, on the host (false).
-constexpr float kNearPoint = 50.0f;
+// Shrine, the Undead Asylum), the nearest point of our own map within kNearPoint across and kNearRise up or down;
+// with none in reach, on the host (false). Until 1.3.0 that was any point within 50 m in a straight line: from
+// Firelink, the New Londo Ruins' points below it, and the invader stood behind a lift the host had not used yet.
+constexpr float kNearPoint = 30.0f;
+constexpr float kNearRise = 6.0f;
 
 bool invader_arrival(game::InvasionPoint* ip) {
     game::Vec3 me{};
     const int region = game::play_region();
-    if (!game::position(&me, nullptr) || !game::invasion_point(region, me, kNearPoint, ip)) {
-        LOG_INFO("[coop] No invasion point for play region %d or within %.0f m: the invader arrives on the host",
-                 region, kNearPoint);
+    const int map = game::map_id();
+    if (!game::position(&me, nullptr) || !game::invasion_point(region, me, map, kNearPoint, kNearRise, ip)) {
+        LOG_INFO("[coop] No invasion point for play region %d, nor one of map %08X within %.0f m (%.0f m up or down): "
+                 "the invader arrives on the host", region, map, kNearPoint, kNearRise);
         return false;
     }
     LOG_INFO("[coop] The invader arrives at invasion point %d (%s, %.0f m away, map %08X)", ip->id,
@@ -1168,7 +1262,8 @@ void host_answer(const Pending& p) {
     // room (kLobbyRoom), so this is what keeps the count; it used to be the lobby's size. Until 1.1.0 a second
     // check counted every non-invader in g_peers: that held players still knocking, and turned a joiner away as
     // full while there was room.
-    int in_session = 1;
+    // An NPC phantom in our party takes one of the game's places too (Solaire with two guests: no invader).
+    int in_session = 1 + summons::count();
     for (uint64_t id : g_admitted) in_session += id == p.from ? 0 : 1;
     if (in_session >= g_cfg.max_players) w.status = kFull;
     if (p.invade && !g_cfg.allow_invaders) w.status = kRefused;
@@ -1246,6 +1341,9 @@ void settle_party_counts() {
     const uint32_t gm = game::game_man();
     uint32_t party = 0;
     if (!gm || !read32(gm + game::kGmParty, &party) || party < 0x10000) return;
+    // An NPC phantom of ours stays summoned when the session ends (the Black Separation Crystal closed our world
+    // over Solaire: his health bar went, he stayed, 2026-10-23): the party is put back to one alone with it.
+    if (summons::settle_party(party)) return;
     uint32_t n10 = 0, n14 = 0, slot = 0;
     read32(party + 0x10, &n10);
     read32(party + 0x14, &n14);
@@ -1279,10 +1377,11 @@ void blank_party_handles(uint32_t party) {
 // the menu treats the game as multiplayer. Run for a while after every session (see tick).
 void settle_after_session() {
     if (game::session_state() != 0 || game::loading() || !game::remote_player_chrs().empty()) return;
-    settle_party_counts();
     const uint32_t gm = game::game_man();
     uint32_t party = 0;
-    if (gm && read32(gm + game::kGmParty, &party) && party > 0x10000) blank_party_handles(party);
+    if (gm && read32(gm + game::kGmParty, &party) && party > 0x10000 && summons::settle_party(party)) return;
+    settle_party_counts();
+    if (gm && party > 0x10000) blank_party_handles(party);
 }
 
 // ---------------------------------------------------------------- state probe (diagnostics)
@@ -1630,6 +1729,7 @@ void host_tick() {
     }
     if (g_step != Step::Hosting) return;
     host_world_tick();
+    host_npc_tick();
     host_travel_tick();
     host_hide_while_away();
     host_invasions_open();
@@ -2701,6 +2801,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                     g_world_sent.clear();  // what our world has, to the newcomer (and again to the others)
                     g_world_polled = 0;
                 }
+                g_npc_sent.clear();  // our NPC phantoms, to the newcomer at once
             } else if (from != g_host) {
                 return;
             }
@@ -2720,6 +2821,19 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (from_host || (g_role == Role::Host && !peer_is_invader(from))) {
                 deadlist::note_list(from, from_host, data + sizeof(Header), size - sizeof(Header));
             }
+            break;
+        }
+        case kHurtList: {
+            if (g_invade || size <= sizeof(Header)) return;
+            const bool from_host = g_role == Role::Guest && from == g_host;
+            if (from_host || (g_role == Role::Host && !peer_is_invader(from))) {
+                deadlist::note_hurt(from, from_host, data + sizeof(Header), size - sizeof(Header));
+            }
+            break;
+        }
+        case kNpcPhantoms: {
+            if (g_role != Role::Guest || from != g_host || size < sizeof(Header) + 1) return;
+            on_npc_phantoms(data, size);
             break;
         }
         case kRest: {
@@ -3647,6 +3761,8 @@ void tick() {
     // guest who fell and came back stayed an invisible, untouchable dead copy there with only their health bar
     // showing (2026-10-16 invasions; the game never sees a player come back within one session).
     party::tick(g_step == Step::Hosting || g_step == Step::InWorld, &peer_state);
+    // NPC phantoms of the host's party: ours turned into the same phantoms (also after our own loads).
+    summons::tick(g_role == Role::Guest && g_step == Step::InWorld);
     if (g_step == Step::Hosting || g_step == Step::InWorld) cutscene_tick();
     update_remote_players();
     {

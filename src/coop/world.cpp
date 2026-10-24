@@ -17,6 +17,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -84,6 +85,9 @@ bool g_rest_heard = false;
 double g_limbo_since = 0;
 std::map<uint32_t, int> g_scaled;  // EnemyIns -> applied effect id
 std::set<uint32_t> g_fill_hp;      // enemies to top up after their max HP grew
+std::map<uint32_t, int> g_base_max;     // EnemyIns -> its max HP before our scaling (when first applied)
+std::map<uint32_t, double> g_scaled_at; // EnemyIns -> when our scaling was first applied
+std::map<uint32_t, int> g_forced_max;   // EnemyIns -> the max HP we wrote while the game did not update it
 double g_last_scale = 0;
 int g_debuff_applied = 0;          // debuff effect id on the local player (0 none)
 
@@ -539,6 +543,51 @@ void enemy_hp_tick() {
     }
 }
 
+// The max HP our scaling row gives an enemy whose max HP is `base` (the game multiplies by the row's maxHpRate).
+int scaled_max(int base, int id) {
+    const int i = row_index(id);
+    if (i < 0 || !g_rows_ready) return base;
+    float rate = 1.0f;
+    std::memcpy(&rate, g_rows[i] + 0x10, 4);
+    return static_cast<int>(static_cast<float>(base) * rate);
+}
+
+// The game works out an enemy's max HP from its effects only while it updates the enemy: one far from this game's
+// player (its update rate) keeps the max HP it had, with our scaling effect on it. HP and damage go between the
+// games as numbers, so that copy was hurt by the same amounts as a nearby, scaled one and died first: in the
+// 2026-10-23 test the host at Firelink saw a Burg hollow die at 14/85 HP while the guest's copy stood at 43/114,
+// each down 71, and a Black Knight died in the host's game part of the way through the guest's fight. Such a copy
+// gets the scaled max HP here (the damage it took kept), as the game itself gives it once the enemy updates again.
+void settle_max(uint32_t chr, int want) {
+    const auto b = g_base_max.find(chr);
+    if (b == g_base_max.end() || b->second <= 0) return;
+    const int base = b->second, m = max_hp(chr), h = hp(chr);
+    const auto f = g_forced_max.find(chr);
+    if (!want) {
+        // Our scaling is off again: a max HP we wrote goes back, if the game has not changed it since.
+        if (f == g_forced_max.end()) return;
+        if (m == f->second && m > 0 && h > 0) {
+            *ptr<int>(chr + 0x2D8) = base;
+            *ptr<int>(chr + 0x2D4) = std::max(1, std::min(base, h >= m ? base : base - (m - h)));
+        }
+        g_forced_max.erase(f);
+        return;
+    }
+    const auto at = g_scaled_at.find(chr);
+    if (at == g_scaled_at.end() || now() - at->second < 1.5) return;
+    const int expected = scaled_max(base, want);
+    const bool stale = m == base || (f != g_forced_max.end() && m == f->second);
+    if (!stale || std::abs(m - expected) <= 1 || h <= 0) return;
+    *ptr<int>(chr + 0x2D8) = expected;
+    *ptr<int>(chr + 0x2D4) = std::max(1, std::min(expected, h >= m ? expected : expected - (m - h)));
+    g_forced_max[chr] = expected;
+    static int lines = 0;
+    if (++lines <= 20) {
+        LOG_INFO("[coop] An enemy this game does not update kept its own max HP: scaled here (%d/%d -> %d/%d)", h, m,
+                 hp(chr), expected);
+    }
+}
+
 void scale_tick() {
     enemy_hp_tick();
     if (now() - g_last_scale < 0.5) return;
@@ -566,25 +615,41 @@ void scale_tick() {
         }
         if (hp(chr) <= 0) return;
         // Applied once is not enough: an effect the game has since taken off the enemy is applied again.
-        if (want == have && (!want || find_effect(chr, want, nullptr))) return;
-        if (have) remove(chr, have);
-        const bool full = hp(chr) >= max_hp(chr) && hp(chr) > 0;
-        if (want && apply(chr, want)) {
-            g_scaled[chr] = want;
-            if (full) g_fill_hp.insert(chr);
-        } else {
-            g_scaled.erase(chr);
-            uint32_t handle = 0;
-            read32(chr + 0x78, &handle);
-            static int refused = 0;
-            if (want && ++refused <= 10) {
-                LOG_INFO("[coop] The game refused the scaling on an enemy (handle %d, HP %d/%d); trying again",
-                         static_cast<int>(handle), hp(chr), max_hp(chr));
+        if (!(want == have && (!want || find_effect(chr, want, nullptr)))) {
+            const int before = max_hp(chr);
+            if (have) remove(chr, have);
+            const bool full = hp(chr) >= max_hp(chr) && hp(chr) > 0;
+            if (want && apply(chr, want)) {
+                if (!have && !g_base_max.count(chr)) {
+                    g_base_max[chr] = before;
+                    g_scaled_at[chr] = now();
+                }
+                g_scaled[chr] = want;
+                if (full) g_fill_hp.insert(chr);
+            } else {
+                g_scaled.erase(chr);
+                uint32_t handle = 0;
+                read32(chr + 0x78, &handle);
+                static int refused = 0;
+                if (want && ++refused <= 10) {
+                    LOG_INFO("[coop] The game refused the scaling on an enemy (handle %d, HP %d/%d); trying again",
+                             static_cast<int>(handle), hp(chr), max_hp(chr));
+                }
             }
         }
+        if (!g_fill_hp.count(chr)) settle_max(chr, g_scaled.count(chr) ? want : 0);
     });
     for (auto it = g_scaled.begin(); it != g_scaled.end();) {
         it = seen.count(it->first) ? std::next(it) : g_scaled.erase(it);
+    }
+    for (auto it = g_base_max.begin(); it != g_base_max.end();) {
+        it = seen.count(it->first) ? std::next(it) : g_base_max.erase(it);
+    }
+    for (auto it = g_scaled_at.begin(); it != g_scaled_at.end();) {
+        it = seen.count(it->first) ? std::next(it) : g_scaled_at.erase(it);
+    }
+    for (auto it = g_forced_max.begin(); it != g_forced_max.end();) {
+        it = seen.count(it->first) ? std::next(it) : g_forced_max.erase(it);
     }
 }
 
@@ -1006,7 +1071,16 @@ void tick() {
             respawn_now();
         }
     }
-    if (!game::loading()) scale_tick();
+    if (!game::loading()) {
+        scale_tick();
+    } else {
+        // A load frees every enemy, and the next ones may get the same addresses: what we knew goes with them.
+        g_scaled.clear();
+        g_fill_hp.clear();
+        g_base_max.clear();
+        g_scaled_at.clear();
+        g_forced_max.clear();
+    }
 }
 
 void set_session(bool active, bool invader, bool invader_present) {
@@ -1066,6 +1140,17 @@ void remote_rest() {
         now() - g_death_at > 10.0) {
         finish_death("another player rested");
     }
+}
+
+bool scale_ready(uint32_t chr) {
+    int level = g_active ? g_players - 1 : 0;
+    level = std::max(0, std::min(5, level));
+    if (!level) return true;
+    const auto it = g_scaled.find(chr);
+    if (it == g_scaled.end() || g_fill_hp.count(chr)) return false;
+    const auto b = g_base_max.find(chr);
+    if (b == g_base_max.end()) return true;
+    return std::abs(max_hp(chr) - scaled_max(b->second, it->second)) <= 1;
 }
 
 bool boss_fight() { return boss_handle(0) != 0xFFFFFFFF || boss_handle(1) != 0xFFFFFFFF; }

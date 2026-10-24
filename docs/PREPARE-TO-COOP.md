@@ -76,7 +76,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | --- | --- |
 | Guests | Keep their own body (human or hollow), level, items and progress. They pick up items, get their own enemy drops and boss rewards, rest at bonfires, level up and talk to NPCs. |
 | Joining | A guest arrives at the host's last bonfire (where the host last rested). |
-| Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. A death keeps the world as it is: the enemies killed since the last rest stay dead in your reload, as they are for everyone else, host or guest. They come back at a rest, or for everyone after a team wipe. Every death is announced. After any load (a death, bonfire travel) each player's game builds the other players' characters again, and a player who died is rebuilt for the others as soon as they are back on their feet. |
+| Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. A death keeps the world as it is: the enemies killed since the last rest stay dead in your reload, as they are for everyone else, host or guest. They come back at a rest, or for everyone after a team wipe. The enemies the others had hurt keep their wounds in your reload too. Every death is announced. After any load (a death, bonfire travel) each player's game builds the other players' characters again, and a player who died is rebuilt for the others as soon as they are back on their feet. |
 | Messages | Joins, departures, deaths and the like appear in the box at the bottom of the screen that the game uses for "Phantom X summoned", and fade by themselves. The game's own summon texts and its "phantom returned home" / "sent home" boxes, which wait for a button, are not shown during a session. |
 | Bosses and areas | Defeating a boss or crossing into another area no longer ends the session. Joining is never locked. Players roam the host's world freely. |
 | Fog walls | The white walls that keep phantoms in the host's area are gone (boss fog stays). |
@@ -89,7 +89,8 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency (a player can also curse their own world without a session), and lifts the curse when used again: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster. Each area with black phantoms starts its own disaster when a player enters it; the game checks every 600 s whether the world is still black and ends the disaster only if not, so in a cursed world the phantoms stay. The curse lasts through sessions but is not saved: after the game is restarted, or another character is loaded, the world is no longer cursed and disasters left from the curse end; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). |
 | Spectating | Bosses and invaders are fought as one team. Falling during a boss fight (yours, or a teammate's anywhere in the world) or while an invader is in the world, with another co-op player (host or guest) still standing, you do not die yet: after your fall the camera follows a living teammate in full colour, turned with your own stick (D-pad left/right or the arrow keys switch between teammates). While you watch, your game draws the world around that teammate and updates their character every frame, so a teammate far away is seen in full detail and moves smoothly. Your death ("YOU DIED", the lost souls, the respawn) goes ahead once the fight is decided: the boss is gone and no invader is left, every co-op player has fallen, someone rests at a bonfire, or after ten minutes. When every co-op player has fallen (a team wipe), the death text says "YOUR TEAM DIED" (every other death keeps "YOU DIED"), each respawn waits after it until everyone's death has got there, and then every game reloads at once: the boss and the enemies start over for everyone, as after a death in single player. |
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used. Boss fogs stay shut for the host and the guests while an invader is in the world, and nobody joins while anyone in the world is in a boss fight: an invader tries another world (such a world is also hidden from invaders' searches), a co-op guest is told to come back when the fight is over. An invader arrives at the game's own black invasion point for the play region the host stands in, else at the nearest one within 50 m, else on the host (Firelink Shrine and the Undead Asylum have none; invasions are allowed there). The invader wins when every co-op player has fallen (the host's death alone does not end an invasion while a guest stands; with a 1.0.0 invader it still does); when the invader dies the invasion fails. An invader can drink from the Estus Flask (the game forbids it to invaders): up to 5 charges per invasion, any more are set aside on arrival and come back once home, so an invasion costs only what was drunk. With `InvasionRewards`, the winning side gets Humanity: the invader one per co-op player defeated (once home), or, when the invader falls, the host and every guest one each. |
-| Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. |
+| Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. Enemies far from a player get the same scaled health in that player's game, so a fight ends at the same time in every game. |
+| NPC summons | The host can summon NPC phantoms (Solaire and the other white signs). Every guest, and an invader, sees the same gold phantom, also when they join later or arrive somewhere else in the world, and he fights the invader. He stays when the host closes the world. He takes one of the four places. |
 | Shared light | Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game. |
 
 ## How it works
@@ -267,6 +268,24 @@ is part of the same wipe (in a wipe the host's warp goes first, and the guests' 
 is a wipe when every other co-op player is down. A player from before this gets no list and brings the world's
 dead back in their own game, as before.
 
+The hurt enemies go with the dead (1.3.0). A reload makes every character it brings back whole, so an enemy a
+teammate had worn down stood at full health in the fallen player's game alone while the other games went on from
+where it was: the Black Knight a guest had hit before dying stood whole for the guest, and died in the host's game
+part of the way through the guest's second fight (2026-10-23). While a co-op teammate is down each game also sends
+them its hurt enemies (message 28: the net handle `chr+0x78` = block << 11 | place, which the game's own HP and
+damage sync use to name a character in every game, with HP and max HP), and the reload that keeps the world puts
+each one down to the same share of its max HP once the scaling of its health is in place (the host takes the lowest
+share any guest reports). Health only goes down this way, and only within 20 s of the reload.
+
+The scaling of an enemy's health is an effect, and the game works an enemy's max HP out of its effects only while it
+updates that enemy: one far from the player of that game (its update rate) kept its unscaled max HP with the effect
+on it. HP and damage go between the games as plain numbers (`0xE40FE0` sends the session host's HP, `0xE413B0` the
+damage), so that copy took the same hits as a nearby, scaled one and died first: the host at Firelink saw a hollow
+of the Burg die at 14/85 HP while the guest's copy stood at 43/114, each down 71. Such a copy now gets the scaled
+max HP from the mod (the damage it took kept), 1.5 s after the scaling went on, as the game itself gives it once the
+enemy updates again; what the mod wrote is put back when the scaling comes off while the game still has not
+updated the enemy.
+
 **A rest after a lost boss fight reloads too.** Only a load puts a boss fight back to its start: the boss, its fog
 and its flags. A rest restarts some of the fight's events, but they end at once when the fight has begun (the Asylum
 Demon's `11810310` while `11810314` is on, the Taurus Demon's `11015382` while its own flag is on), or put the boss to
@@ -317,8 +336,12 @@ map base + 4000 + the play region's number (the Undead Burg's play regions 10100
 Shrine, the Undead Asylum and Ash Lake have none). The game keeps the player's play region at `PlayerIns+0x284`
 and turns it into the point's id the same way (`0xD6BB50`: id / 1000 * 9000 + 4000 + id). The host picks the
 point of its own play region from the loaded maps' regions (`WorldPointManImp`, `[0x137D6E8]`, as `0xD6C490`
-looks one up), else the nearest within 50 m, else its own position, and sends it in its answer as the invader's
-arrival (the game's summon position, `GameMan+0xA80`/`+0xAB0`, map `+0xAA4`).
+looks one up), else the nearest point of its own map within 30 m across and 6 m up or down, else its own position,
+and sends it in its answer as the invader's arrival (the game's summon position, `GameMan+0xA80`/`+0xAB0`, map
+`+0xAA4`). The play region's own point is the game's choice; the nearest point is the mod's, for the places that have
+none (Firelink Shrine, the Undead Asylum, Ash Lake, the stretches between play regions). Until 1.3.0 it was any
+point within 50 m in a straight line: from Firelink that could be one of the New Londo Ruins below, behind a lift
+the host had not used yet.
 
 A boss fog's entry is an EMEVD "Action Button - Boss Room" (`3[19]`). Its test (`EcTestActionButton`, `0xBBD7E0`)
 greys the button out for a Gravelord or Path of the Dragon phantom in the party (invade types 7 and 10) or state
@@ -402,6 +425,45 @@ The death penalty (`0xD78B10`, the event script's `UpDateBloodMark`) records the
 player's death replay (`PlayerIns+0x5E0`) in their own world, and at the place they were summoned from
 (`GameMan+0xAE0`) in someone else's. A co-op guest was never summoned from anywhere. As in ds1sc, that test answers "own world" for a co-op guest, so the stain is where they fell. Creating the marker
 (`0xDB6010`) and picking it up (`FrpgEventConditionSelfBlood`, `0xD5B330`) do not depend on whose world it is.
+
+`UpDateBloodMark` is the last step of `SoloPlayDeath_2`, after `WarpNextStageKick` and the clearing of flag 4000.
+While a respawn waits (a team wipe, the reload after a lost boss fight) the kick returns without a warp, the player is
+still dead, and the death starts over every five seconds or so; each pass wrote the stain again with what the first
+had left, 0 souls and 0 humanity (2026-10-23: a guest's 2594 souls and 2 humanity from the Taurus Demon fight were
+written over three times while it waited, and the stain it picked up held nothing). One stain per death is written
+now (the call at `0xD66204`); the next goes after the player has stood up again.
+
+### NPC summons
+
+The host summons an NPC phantom (Solaire and the other white signs) in its own game: the sign's NPC (`SosSignMan`,
+`0xDB3D7F`: entity at sign `+0x34`) becomes a phantom (`0xE407F0`: character type `+0x70`, team through `0xE66AB0`),
+joins the party (`0xEA2510`, entry type 2), and packet 48 tells the session {character handle, two party values, the
+type, the summon effect}; the host sends the same to every member who joins later (`0xEA2900` from the member-join
+handler). Each other game looks the handle up (`0xE3E340`) and does the same to its own copy of the NPC. Character
+handles are `0x10000000 | block << 14 | place`, the block numbered in the world's block list (WorldChrMan is made once
+with room for 27 blocks), so a handle names the same character in every game that has that block loaded. In vanilla
+every player stands in the host's map; a co-op guest or an invader who arrives somewhere else does not have the
+block, the lookup came back empty, and the packet loop read through it (`0xEE3036`, reading address 0x70): the
+guests' crash on joining a host with Solaire summoned (2026-10-23, two dumps). Now:
+
+- packet 48 goes ahead only with a character in our world (the call at `0xEE3023`); packet 49 (an NPC phantom's state,
+  `0xEA2DD0`, which looks the character up again) likewise (`0xEE30C0`);
+- the host sends which NPC each of its phantoms is (message 27: entity id, handle, type, party values; on a change,
+  to each newcomer, and every 3 s while there are any), and every guest's and invader's game turns its own copy into
+  the same phantom as soon as that NPC is in its world, also after its own loads (a reload makes a fresh, unsummoned
+  copy). An NPC the host no longer lists leaves their party the game's own way (`0xEA2A10`) after 3 s;
+- the party's update (`0xEA2FD0`) reads a member's character with no check in states 1, 3 and 4; a guest who walks
+  away from the NPC unloads its block, so an entry without a character waits (`0xEA2FFC`) until it is back;
+- the session's end keeps the host's NPC phantoms (and its own entry) in the party, as the game is when alone with a
+  summoned NPC: the Black Separation Crystal closed the world over Solaire and the mod's settling of the party took
+  his entry, so his health bar went and he stayed;
+- in one's own world, an NPC entry whose character is no longer a phantom (the host's own reload made it anew) leaves
+  the party, as the game's party reset at that load would have done;
+- an NPC phantom takes one of the game's four places: the host counts it when it answers joiners and invaders.
+
+An invader's game turns Solaire into a phantom too, so he is hostile to the invader there and his blows land (before,
+the invader saw a plain NPC who swung and never hit). Older hosts send no list: a 1.3.0 guest then follows packet 48
+alone, without the crash.
 
 ### Bonfire animations
 

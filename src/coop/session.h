@@ -53,6 +53,7 @@ struct PeerInfo {
     bool went_kept = false;     // their respawn went (respawn) with a reload that keeps the world's dead
     double went_over_at = 0;    // when a respawn of theirs last went with a reload that starts the world over
     uint32_t dead_list_sent = 0;  // the list of our world's dead last sent them while they were down (0 none)
+    uint32_t hurt_list_sent = 0;  // the list of our world's hurt enemies last sent them while they were down
 };
 
 void configure(const Config& cfg);

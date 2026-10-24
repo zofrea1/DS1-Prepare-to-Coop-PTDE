@@ -30,4 +30,12 @@ bool arm(bool own_world);
 // Per frame, game thread: drops the kept lists once we live again, and a list the load did not take.
 void tick();
 
+// The hurt enemies go with it. A reload makes every character it brings back whole: an enemy a teammate had worn
+// down stood at full health in the fallen player's game only, while the other games went on from where it was
+// (2026-10-23: the Black Knight the guest had hit stood whole for the guest after its death, and died in the
+// host's game part of the way through the guest's fight). While a teammate is down each game sends them its hurt
+// enemies (net handle, HP, max HP), as with the dead, and the reload that keeps the world puts that health back.
+std::vector<uint8_t> build_hurt();
+void note_hurt(uint64_t from, bool from_host, const uint8_t* data, size_t size);
+
 }  // namespace coop::deadlist

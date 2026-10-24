@@ -40,6 +40,9 @@ void clear_death_debuff();
 void remote_rest();
 
 bool boss_fight();
+// The co-op scaling of this enemy's health is in place in this game (or none is wanted): its max HP is the scaled
+// one, so health given as a share of it comes out right.
+bool scale_ready(uint32_t chr);
 bool local_dead();
 // The death we are in is part of a team wipe: every co-op player fell and the world starts over (session::wipe_reload).
 bool team_wipe_death();

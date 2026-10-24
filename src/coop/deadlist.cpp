@@ -5,15 +5,18 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <utility>
+#include <vector>
 
 namespace coop::deadlist {
 
@@ -52,6 +55,127 @@ bool g_armed_own = false;          // ... the own world's copy (we host), else t
 bool g_loading_seen = false;       // a load began since
 
 double now() { return GetTickCount64() / 1000.0; }
+
+// ---- hurt enemies: {kHurtMagic, count}, then {net handle, HP, max HP} each. The net handle (chr+0x78: block << 11 |
+// place in the block) is what the game's own HP and damage sync use to name an enemy in every game.
+constexpr uint32_t kHurtMagic = 0x54525548;  // 'HURT'
+constexpr uint32_t kEnemyVtable = 0x0118979C;
+constexpr uint32_t kSetHp = 0x00E688E0;      // stdcall(chr, hp)
+constexpr double kHurtWindow = 20.0;         // after our reload, the health goes back within this time or not at all
+struct Hurt {
+    int32_t hp = 0;
+    int32_t max_hp = 0;
+};
+using HurtList = std::map<uint32_t, Hurt>;   // net handle -> health
+HurtList g_host_hurt;                         // a guest: the host's hurt enemies during our death
+std::map<uint64_t, HurtList> g_mates_hurt;   // the host: each guest's
+HurtList g_hurt_apply;                        // what our reload is to put back
+double g_hurt_until = 0;                      // 0: nothing to put back
+bool g_hurt_armed = false;                    // our respawn warp went with the world kept; lists still come in
+bool g_hurt_loaded = false;                   // ... and our load has begun since (the old world is gone)
+bool g_hurt_own = false;                      // the reload is in our own world (we host)
+int g_hurt_applied = 0;
+
+bool parse_hurt(const uint8_t* d, size_t size, HurtList* out) {
+    out->clear();
+    uint32_t head[2];
+    if (!d || size < 8) return false;
+    std::memcpy(head, d, 8);
+    if (head[0] != kHurtMagic || head[1] > 4096 || size < 8 + head[1] * 12ull) return false;
+    for (uint32_t i = 0; i < head[1]; ++i) {
+        int32_t w[3];
+        std::memcpy(w, d + 8 + i * 12, 12);
+        if (w[1] > 0 && w[2] > 0 && w[1] < w[2]) (*out)[static_cast<uint32_t>(w[0])] = Hurt{w[1], w[2]};
+    }
+    return true;
+}
+
+// Our character for a net handle, as the damage packets find it (0xE413B0): WorldChrMan+0x240 + block * 4.
+uint32_t chr_by_net(uint32_t handle) {
+    uint32_t wcm = 0, set = 0, n = 0, entries = 0, chr = 0, own = 0;
+    const uint32_t block = (handle >> 11) & 0x1F, at = handle & 0x7FF;
+    if (block > 0x1C || !read32(kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x240 + block * 4, &set) || !set ||
+        !read32(set, &n) || at >= n || !read32(set + 4, &entries) || !read32(entries + at * 0x20, &chr) || !chr ||
+        !read32(chr + 0x78, &own) || own != handle) {
+        return 0;
+    }
+    return chr;
+}
+
+void set_hp(uint32_t chr, int hp) {
+    using SetHpFn = void(__stdcall*)(uint32_t, int);
+    __try {
+        reinterpret_cast<SetHpFn>(kSetHp)(chr, hp);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// The lowest health any list gives an enemy (its share of its max HP).
+void merge_hurt(HurtList* base, const HurtList& add) {
+    for (const auto& [h, v] : add) {
+        auto it = base->find(h);
+        if (it == base->end() || static_cast<double>(v.hp) * it->second.max_hp <
+                                     static_cast<double>(it->second.hp) * v.max_hp) {
+            (*base)[h] = v;
+        }
+    }
+}
+
+void collect_hurt(bool own) {
+    g_hurt_apply.clear();
+    if (own) {
+        for (const auto& [id, mate] : g_mates_hurt) merge_hurt(&g_hurt_apply, mate);
+    } else {
+        g_hurt_apply = g_host_hurt;
+    }
+}
+
+// After our reload: each enemy on the list goes down to its share of health in the other games, once the co-op
+// scaling of its health is in place here. Health only ever goes down here.
+void hurt_tick() {
+    if (g_hurt_until == 0) return;
+    if (game::loading() || !game::player()) {
+        g_hurt_loaded = true;
+        g_hurt_until = now() + kHurtWindow;
+        return;
+    }
+    if (!g_hurt_loaded) {
+        g_hurt_until = now() + kHurtWindow;  // still in the old world, at the respawn warp
+        return;
+    }
+    g_hurt_armed = false;
+    if (now() > g_hurt_until || g_hurt_apply.empty()) {
+        if (!g_hurt_apply.empty() || g_hurt_applied) {
+            LOG_INFO("[coop] Our reload put back the health of %d hurt enemies (%u not found here)", g_hurt_applied,
+                     static_cast<unsigned>(g_hurt_apply.size()));
+        }
+        g_hurt_apply.clear();
+        g_hurt_until = 0;
+        g_hurt_applied = 0;
+        return;
+    }
+    static double last = 0;
+    if (now() - last < 0.25) return;
+    last = now();
+    for (auto it = g_hurt_apply.begin(); it != g_hurt_apply.end();) {
+        const uint32_t chr = chr_by_net(it->first);
+        uint32_t vt = 0, hp = 0, max_hp = 0;
+        if (!chr || !read32(chr, &vt) || vt != kEnemyVtable || !read32(chr + 0x2D4, &hp) ||
+            !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0 || !world::scale_ready(chr)) {
+            ++it;
+            continue;
+        }
+        if (static_cast<int>(hp) > 0) {
+            const double share = static_cast<double>(it->second.hp) / it->second.max_hp;
+            const int want = std::max(1, static_cast<int>(share * static_cast<int>(max_hp) + 0.5));
+            if (want < static_cast<int>(hp)) {
+                set_hp(chr, want);
+                ++g_hurt_applied;
+            }
+        }
+        it = g_hurt_apply.erase(it);
+    }
+}
 
 bool parse(const uint8_t* d, size_t size, List* out) {
     out->clear();
@@ -238,9 +362,58 @@ void note_list(uint64_t from, bool from_host, const uint8_t* data, size_t size) 
     if (g_armed && from_host != g_armed_own && game_list_size(g_armed_own)) give("A newer list came during our load");
 }
 
+std::vector<uint8_t> build_hurt() {
+    std::vector<uint8_t> out;
+    uint32_t wcm = 0, info = 0, blocks = 0;
+    if (game::loading() || !game::player() || !read32(kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x10, &info) ||
+        !info || !read32(info + 0xC, &blocks) || blocks > 0x1C) {
+        return out;
+    }
+    std::vector<int32_t> words;
+    for (uint32_t k = 0; k < blocks; ++k) {
+        uint32_t set = 0, n = 0, entries = 0;
+        if (!read32(wcm + 0x240 + k * 4, &set) || !set || !read32(set, &n) || !read32(set + 4, &entries) || n > 0x800) {
+            continue;
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t chr = 0, vt = 0, net = 0, hp = 0, max_hp = 0;
+            if (!read32(entries + i * 0x20, &chr) || !chr || !read32(chr, &vt) || vt != kEnemyVtable ||
+                !read32(chr + 0x78, &net) || static_cast<int>(net) < 0 || !read32(chr + 0x2D4, &hp) ||
+                !read32(chr + 0x2D8, &max_hp) || static_cast<int>(hp) <= 0 || hp >= max_hp) {
+                continue;
+            }
+            words.push_back(static_cast<int32_t>(net));
+            words.push_back(static_cast<int32_t>(hp));
+            words.push_back(static_cast<int32_t>(max_hp));
+        }
+    }
+    const uint32_t head[2] = {kHurtMagic, static_cast<uint32_t>(words.size() / 3)};
+    out.resize(8 + words.size() * 4);
+    std::memcpy(out.data(), head, 8);
+    if (!words.empty()) std::memcpy(out.data() + 8, words.data(), words.size() * 4);
+    return out;
+}
+
+void note_hurt(uint64_t from, bool from_host, const uint8_t* data, size_t size) {
+    HurtList list;
+    if (!parse_hurt(data, size, &list)) return;
+    if (from_host) {
+        g_host_hurt = std::move(list);
+    } else {
+        g_mates_hurt[from] = std::move(list);
+    }
+    // Until our load begins the newest lists count (an enemy hurt while we were on our way to the warp).
+    if (g_hurt_armed && !g_hurt_loaded && from_host != g_hurt_own) collect_hurt(g_hurt_own);
+}
+
 void note_rest() {
     g_host.clear();
     g_mates.clear();
+    g_host_hurt.clear();
+    g_mates_hurt.clear();
+    g_hurt_apply.clear();
+    g_hurt_until = 0;
+    g_hurt_armed = false;
     if (g_dead) g_rested = true;
     if (!g_armed) return;
     g_armed = false;
@@ -261,6 +434,16 @@ bool arm(bool own_world) {
     g_armed_own = own_world;
     g_loading_seen = false;
     g_armed = give("Our death's respawn warp goes");
+    if (g_armed) {
+        g_hurt_own = own_world;
+        g_hurt_armed = true;
+        g_hurt_loaded = false;
+        g_hurt_applied = 0;
+        collect_hurt(own_world);
+        g_hurt_until = now() + kHurtWindow;
+        LOG_INFO("[coop] Our reload is to put back the health of %u hurt enemies (%s)",
+                 static_cast<unsigned>(g_hurt_apply.size()), own_world ? "the guests' lists" : "the host's list");
+    }
     return g_armed;
 }
 
@@ -274,9 +457,14 @@ void tick() {
         g_rested = false;
         g_host.clear();
         g_mates.clear();
+        if (!g_hurt_armed) {
+            g_host_hurt.clear();
+            g_mates_hurt.clear();
+        }
     } else if (dead) {
         g_dead = true;
     }
+    hurt_tick();
     if (!g_armed) return;
     if (game::loading()) g_loading_seen = true;
     if (!game_list_size(g_armed_own)) {

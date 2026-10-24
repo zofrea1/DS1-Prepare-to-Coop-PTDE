@@ -7,6 +7,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cmath>
 #include <cstring>
 
 namespace coop::game {
@@ -134,12 +135,13 @@ uint32_t region_record(uint32_t wpm, uint32_t handle) {
     return field<uint32_t>(list, 0xC + index * 4, 0);
 }
 
-bool invasion_point(int region, const Vec3& from, float max_dist, InvasionPoint* out) {
+bool invasion_point(int region, const Vec3& from, int map, float max_dist, float max_rise, InvasionPoint* out) {
     const uint32_t wpm = deref(kWorldPointManVar);
     const int tables = field<int>(wpm, 0x24, 0);
     if (!wpm || tables <= 0 || tables > 64) return false;
     // The play region's own point: region 101010 (m10_01, play region 10) -> 1014010.
     const int wanted = region >= 0 ? (region / 1000) * 10000 + 4000 + region % 1000 : -1;
+    const int our_map = map == -1 ? -1 : static_cast<int>(static_cast<uint32_t>(map) & 0xFFFF0000u);
     bool found = false;
     float best = max_dist * max_dist;
     for (int t = 0; t < tables; ++t) {
@@ -153,16 +155,17 @@ bool invasion_point(int region, const Vec3& from, float max_dist, InvasionPoint*
             if (!rec) continue;
             const Vec3 pos = field<Vec3>(rec, 0x10, Vec3{0, 0, 0});
             const float dx = pos.x - from.x, dy = pos.y - from.y, dz = pos.z - from.z;
-            const float d = dx * dx + dy * dy + dz * dz;
+            const float d = dx * dx + dz * dz;
+            const int point_map = (id / 100000) << 24 | (id / 10000 % 10) << 16;
             const bool exact = id == wanted;
-            if (!exact && d >= best) continue;
+            if (!exact && (d >= best || std::fabs(dy) > max_rise || (our_map != -1 && point_map != our_map))) continue;
             best = d;
             out->id = id;
-            out->map = (id / 100000) << 24 | (id / 10000 % 10) << 16;
+            out->map = point_map;
             out->pos = pos;
             out->angle = field<float>(rec, 0x20, 0.0f) * 3.14159265f / 180.0f;
             out->exact = exact;
-            out->dist = d;
+            out->dist = d + dy * dy;
             found = true;
             if (exact) return true;
         }

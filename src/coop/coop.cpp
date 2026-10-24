@@ -12,6 +12,7 @@
 #include "session.h"
 #include "spectate.h"
 #include "steam.h"
+#include "summons.h"
 #include "text.h"
 #include "world.h"
 
@@ -292,10 +293,13 @@ void coop_install(const CoopConfig& config) {
     LOG_INFO("[coop] Guests run the world's events in their own game: %s", g_cfg.guest_world_events ? "yes" : "no (host only)");
     const bool texts = coop::text::install();
     const bool world = coop::world::install();
+    // NPC phantoms named by another game's handle (packets 48 and 49): without these a guest's game crashes on a
+    // host's summon whose map it has not loaded.
+    const bool summons = coop::summons::install();
     // Before the items and the rest handler that hands them out: with those in, a session could still start.
-    if (failed || !world) {
+    if (failed || !world || !summons) {
         LOG_ERROR("[coop] %d co-op hook(s) could not be installed; Prepare to Co-op is off to keep the game safe.",
-                  failed + (world ? 0 : 1));
+                  failed + (world ? 0 : 1) + (summons ? 0 : 1));
         return;
     }
     if (!coop::session::install_nameplate()) LOG_ERROR("[coop] Companion nameplates were not changed");

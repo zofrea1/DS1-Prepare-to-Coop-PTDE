@@ -725,6 +725,13 @@ to `items::travel_key` (an Ember, Lord Soul or the Lordvessel handed over there 
 - The Remastered mod's character-type condition list (`EcTestChrType`) is not decoded yet.
 - **The Cursed Pendant** also works without a session, and its curse lasts until the pendant lifts it (the
   Remastered mod's curse ends with the session).
+- **Posture scaling works** (1.3.0): an enemy's poise grows by `EnemyPostureScaling` / `BossPostureScaling`
+  percent of its own poise per extra player. The Remastered mod writes the posture into its rows'
+  `changeSuperArmorPoint` as `(short)(1 + n * percent)`, a point or two, and leaves their `stateInfo` at 0,
+  while the game adds that field only for effects of type 155 (the Wolf Ring's), so its posture setting
+  changes nothing. The port keeps those rows and replaces the poise sum (`0xDBF700`: the effects' poise
+  points, added to the character's own, vtable `+0x160`, NpcParam `+0x118` for an enemy) so that our rows add
+  their percent of the enemy's own poise.
 
 ## Troubleshooting
 

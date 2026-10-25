@@ -39,6 +39,8 @@ constexpr uint32_t kWorldReset = 0x2CC;            // WorldChrMan: 0 -> 1 respaw
 constexpr uint32_t kMenuManVar = 0x013786D0;       // boss gauges: handles at +0xF64 and +0xF78 (-1 none)
 constexpr uint32_t kEnemyVtable = 0x0118979C;      // EnemyIns
 constexpr int kApplySlot = 125;                     // ChrIns::ApplySpEffect(id, source, 0, 1,1,1, own)
+constexpr uint32_t kPoiseSum = 0x00DBF700;         // eax = a character's SpecialEffect: the poise they add (xmm0)
+constexpr uint32_t kOwnPoiseSlot = 0x160;           // ChrIns vtable: own poise (EnemyIns: NpcParam +0x118), x87
 
 // ---------------------------------------------------------------- our SpEffect rows
 // Remastered Seamless Co-op's rows and ids: enemy and boss scaling for 1..5 extra players, and the death debuff
@@ -140,6 +142,7 @@ void scale_row(uint8_t* r, int n, int health, int damage, int posture) {
     for (int off = 0x38; off <= 0x44; off += 4) put_f(r, off, dmg);   // physics/magic/fire/thunder attack rate
     for (int off = 0x48; off <= 0x54; off += 4) put_f(r, off, 1.0f);  // attack power rates
     for (int off = 0x108; off <= 0x114; off += 4) put_f(r, off, hp);  // poison/toxic/bleed/curse resist rate
+    // changeSuperArmorPoint as Remastered writes it; unread with stateInfo 0 (the posture is poise_sum's, below).
     put_s(r, 0x13A, static_cast<int16_t>(static_cast<int>(n * (posture / 100.0f) + 1.0f)));
 }
 
@@ -158,6 +161,75 @@ void build_rows() {
         debuff_row(g_rows[10 + k], k + 1);
     }
     g_rows_ready = true;
+}
+
+// ---------------------------------------------------------------- poise
+// A character's poise is its own (vtable +0x160) plus what 0xDBF700 sums over its active effects: the
+// changeSuperArmorPoint (+0x13A, int16 points) of each one whose stateInfo (+0x156) is 155, the Wolf Ring's type.
+// Our scaling rows are stateInfo 0, as in Remastered Seamless Co-op, so their field was never read, and as
+// (short)(1 + n * percent) it would only have added a point or two. 0xDBF700 is replaced: the game's sum is kept,
+// and our enemy and boss rows add their posture percent of the character's own poise for each extra player.
+
+// The posture rate of one of our scaling rows (n * percent / 100), 0 for any other row.
+float posture_rate(uint32_t row) {
+    const auto* r = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(row));
+    if (r < g_rows[0] || r >= g_rows[10]) return 0;  // the enemy rows 0..4 and the boss rows 5..9
+    const int i = static_cast<int>((r - g_rows[0]) / kRow);
+    const int percent = i < 5 ? g_cfg.enemy_posture : g_cfg.boss_posture;
+    const float rate = (i % 5 + 1) * (percent / 100.0f);
+    return rate < -1.0f ? -1.0f : rate;
+}
+
+float __stdcall poise_sum(uint32_t effects) {
+    using OwnPoiseFn = float(__thiscall*)(uint32_t chr);
+    const uint32_t flags = *ptr<uint32_t>(effects + 0x14);
+    float sum = 0, rate = 0;
+    for (uint32_t node = *ptr<uint32_t>(effects + 4); node; node = *ptr<uint32_t>(node + 0x30)) {
+        const uint32_t row = *ptr<uint32_t>(node + 0x2C);
+        if ((*ptr<uint32_t>(node + 0x14) & 0x800C0003) != 0 || !row) continue;  // ending or not in effect
+        if ((flags & 0xE00) != 0 && *ptr<uint8_t>(row + 0x156) == 155) sum += *ptr<int16_t>(row + 0x13A);
+        rate += posture_rate(row);
+    }
+    const uint32_t chr = *ptr<uint32_t>(effects + 0x10);  // set by the character when it makes its SpecialEffect
+    if (rate != 0 && chr && *ptr<uint32_t>(chr) == kEnemyVtable) {
+        const auto own = reinterpret_cast<OwnPoiseFn>(*ptr<uint32_t>(kEnemyVtable + kOwnPoiseSlot));
+        sum += own(chr) * rate;
+    }
+    return sum;
+}
+
+// eax = the SpecialEffect; returns in xmm0. Callers keep values in other xmm registers (the status screen's own
+// poise in xmm3) and on the x87 stack (the others' own poise) across the call.
+__declspec(naked) void hk_poise_sum() {
+    __asm {
+        push ecx
+        push edx
+        sub esp, 0x70
+        movups [esp], xmm1
+        movups [esp + 0x10], xmm2
+        movups [esp + 0x20], xmm3
+        movups [esp + 0x30], xmm4
+        movups [esp + 0x40], xmm5
+        movups [esp + 0x50], xmm6
+        movups [esp + 0x60], xmm7
+        push eax
+        call poise_sum
+        push eax
+        fstp dword ptr [esp]
+        movss xmm0, dword ptr [esp]
+        add esp, 4
+        movups xmm1, [esp]
+        movups xmm2, [esp + 0x10]
+        movups xmm3, [esp + 0x20]
+        movups xmm4, [esp + 0x30]
+        movups xmm5, [esp + 0x40]
+        movups xmm6, [esp + 0x50]
+        movups xmm7, [esp + 0x60]
+        add esp, 0x70
+        pop edx
+        pop ecx
+        ret
+    }
 }
 
 void* __stdcall our_fx_row(int32_t id) {
@@ -1025,6 +1097,12 @@ bool install() {
         static const uint8_t k[7] = {0x33, 0xC0, 0x53, 0x8B, 0x5C, 0x24, 0x08};
         g_fx_orig = detour(kSpEffectGetter, k, sizeof(k), reinterpret_cast<void*>(&hk_fx_row));
         if (!g_fx_orig) ++failed;
+    }
+    {
+        static const uint8_t k[7] = {0xF7, 0x40, 0x14, 0x00, 0x0E, 0x00, 0x00};  // test dword ptr [eax+14h],0E00h
+        if (!detour(kPoiseSum, k, sizeof(k), reinterpret_cast<void*>(&hk_poise_sum))) {
+            LOG_ERROR("[coop] Enemy scaling: the poise sum did not match this build (posture scaling is off)");
+        }
     }
     {
         // mov eax,[esp+4] ; mov [012DE2B0h],eax

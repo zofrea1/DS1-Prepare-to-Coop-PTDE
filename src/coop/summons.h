@@ -10,6 +10,8 @@
 // came back empty and the game read through it (the guests' crash on joining a host with Solaire, 2026-10-23). Here
 // the host also sends which NPC each of its phantoms is (kNpcPhantoms, by entity id): a player's game turns its copy
 // into the phantom when the NPC is in its world, also after its own loads (a reload makes a fresh, unsummoned copy).
+// Every copy goes in as a live summon does, with the summon-in animation: only that draws it in a guest's game, where
+// the NPC's own load event disabled it (the game's resend to a joining player skipped it: never seen).
 
 #include <cstddef>
 #include <cstdint>

@@ -28,8 +28,15 @@ constexpr uint32_t kChrByEntity = 0x00D6C360;  // eax = entity id -> character o
 // 0xE407F0: edx = handle, stdcall(type, kind): the character becomes a phantom of that type (+0x70, team through
 // 0xE66AB0), or 0 when it cannot (vt+0x9C).
 constexpr uint32_t kMakePhantom = 0x00E407F0;
-// 0xEA2510: stdcall(party, handle, chr type, 2 = NPC, f1, f2, f3); f3 < 0 shows "summoned" and the summon effect.
+// 0xEA2510: stdcall(party, handle, chr type, 2 = NPC, f1, f2, f3). f3 < 0 (a live summon: the sign table 0x12DED30
+// gives -1 for a white sign, -3 for a black one) is state 1: the summon-in event animation 6951/6952 (0xE69590) and
+// the "summoned" notice; f3 >= 0 is state 2 (sets flag f1) or 3 at once, with no animation.
 constexpr uint32_t kPartyAdd = 0x00EA2510;
+// Only the animation shows the copy in a guest's game: Solaire's own load event (m10_01 11015100) disables him there
+// (0xE69A40 through 2004[05]) unless his summon flag is already on, and his sign, whose fade enables him in the host's
+// game (0xDB4209), is only placed for the host. The resend to a joining player (0xEA2900) carries f3 = 0, so a guest
+// who joined after the summon had him in its party, a phantom, and never drawn (2026-10-24, and so in vanilla).
+constexpr uint32_t kSetDisabled = 0x00E69A40;  // edi = character, stdcall(disabled): bit 0 of [[chr+0xC]+0x14]
 // 0xEA2A10: eax = handle, stdcall(party): the member leaves; for an NPC (entry type 2) its character goes back to
 // what it was before the summon (+0x70 = 9, a full heal, the event notice 0xDA0770). Reads the character without a
 // check: only called with a character in this world.
@@ -44,6 +51,7 @@ constexpr uint32_t kTypeNpc = 2;
 // then 0xEA2510 with the character it returned (read without a check: the crash). Packet 49 = {handle, value} ->
 // 0xEA2DD0(party, handle, value) at kRecvState, which looks the character up again for an NPC entry.
 constexpr uint32_t kRecvMake = 0x00EE3023;
+constexpr uint32_t kRecvAdd = 0x00EE3042;   // its 0xEA2510 call: f3 from the packet
 constexpr uint32_t kRecvNext = 0x00EE3047;  // test esi, esi: the loop's next packet
 constexpr uint32_t kRecvState = 0x00EE30C0;
 constexpr uint32_t kPartyState = 0x00EA2DD0;
@@ -66,6 +74,8 @@ std::vector<Phantom> g_host;               // the host's NPC phantoms (we visit)
 std::map<int32_t, uint32_t> g_made;        // entity -> the character we turned into its phantom
 std::map<uint32_t, double> g_gone_since;   // our NPC party entries (handle) the host no longer lists, since when
 std::set<uint32_t> g_told_waiting;         // characters we said could not become a phantom yet
+std::map<uint32_t, double> g_listed_since; // characters of the host's phantoms in our party, since when (show_late)
+std::set<uint32_t> g_shown;                // characters show_late enabled
 bool g_heard = false;                      // a list came from the host (a 1.2.0 host sends none)
 // Our own world: the NPC phantoms of our party as we last saw them loaded. Solaire follows his summoner anywhere in
 // a session (no walls keep phantoms in an area, and the party is not reset at a map-block change), so his own map
@@ -218,12 +228,62 @@ uint32_t make_phantom(uint32_t handle, int32_t as_type) {
     return chr;
 }
 
+// The f3 of a live summon of a phantom of this type (white sign -1, black sign -3).
+int32_t summon_f3(int32_t type) { return type == 2 ? -3 : -1; }
+
 bool party_add(uint32_t p, uint32_t handle, int32_t type, int32_t f1, int32_t f2) {
     using AddFn = char(__stdcall*)(uint32_t, uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
     __try {
-        return reinterpret_cast<AddFn>(kPartyAdd)(p, handle, type, static_cast<int32_t>(kTypeNpc), f1, f2, 0) != 0;
+        return reinterpret_cast<AddFn>(kPartyAdd)(p, handle, type, static_cast<int32_t>(kTypeNpc), f1, f2,
+                                                   summon_f3(type)) != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
+    }
+}
+
+bool chr_disabled(uint32_t chr) {
+    uint32_t c = 0;
+    uint8_t flags = 0;
+    return chr && read32(chr + 0xC, &c) && read8(c + 0x14, &flags) && (flags & 1) != 0;
+}
+
+void set_enabled(uint32_t chr) {
+    __try {
+        __asm {
+            push edi
+            mov edi, chr
+            push 0
+            mov eax, kSetDisabled
+            call eax
+            pop edi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Packet 48 with f3 >= 0 is the resend to a joining player: it gets a live summon's f3, so its copy is summoned in.
+int32_t __cdecl recv_f3(uint32_t handle, int32_t type, int32_t f3) {
+    if (f3 < 0) return f3;
+    if (++g_lines <= 40) {
+        LOG_INFO("[coop] NPC phantom %08X was summoned before we came: it is summoned in here (f3 %d -> %d)", handle,
+                 f3, summon_f3(type));
+    }
+    return summon_f3(type);
+}
+
+// At kRecvAdd: [esp] = return, [esp+4] party, +8 handle, +0xC chr type, +0x10 2, +0x14 f1, +0x18 f2, +0x1C f3.
+__declspec(naked) void hk_recv_add() {
+    __asm {
+        pushad
+        push dword ptr [esp + 0x3C]  // f3
+        push dword ptr [esp + 0x30]  // chr type
+        push dword ptr [esp + 0x30]  // handle
+        call recv_f3
+        add esp, 12
+        mov [esp + 0x3C], eax
+        popad
+        mov eax, kPartyAdd
+        jmp eax
     }
 }
 
@@ -423,6 +483,26 @@ void own_refresh() {
     for (auto it = g_own.begin(); it != g_own.end();) it = present.count(it->first) ? std::next(it) : g_own.erase(it);
 }
 
+// A guest's or an invader's copy of a host's phantom, in our party: said once, and if it is still disabled 8 s on
+// (the summon-in animation takes a few) it is enabled as the host's sign does, once per character.
+void show_late(uint32_t p, int entry, int32_t entity, uint32_t chr) {
+    const auto it = g_listed_since.find(chr);
+    if (it == g_listed_since.end()) {
+        g_listed_since[chr] = now();
+        uint32_t state = 0;
+        read32(p + kEntries + entry * kEntrySize + 8, &state);
+        if (++g_lines <= 40) {
+            LOG_INFO("[coop] The host's NPC phantom %d is in our party (character %08X, entry state %u, %s)", entity,
+                     chr, state, chr_disabled(chr) ? "disabled" : "enabled");
+        }
+        return;
+    }
+    if (now() - it->second < 8.0 || !chr_disabled(chr) || !g_shown.insert(chr).second) return;
+    set_enabled(chr);
+    LOG_INFO("[coop] The host's NPC phantom %d (character %08X) was still disabled here 8 s after its summon: "
+             "enabled (%s)", entity, chr, chr_disabled(chr) ? "still disabled" : "now enabled");
+}
+
 }  // namespace
 
 std::vector<Phantom> ours() {
@@ -508,6 +588,8 @@ void tick(bool visitor) {
         g_made.clear();
         g_gone_since.clear();
         g_told_waiting.clear();
+        g_listed_since.clear();
+        g_shown.clear();
         g_entity_of.clear();
         g_heard = false;
         own_world_sweep();
@@ -520,6 +602,8 @@ void tick(bool visitor) {
     if (!p || game::loading() || !game::player()) {
         g_made.clear();  // a load makes every character anew
         g_told_waiting.clear();
+        g_listed_since.clear();
+        g_shown.clear();
         return;
     }
     std::set<int32_t> listed;
@@ -531,20 +615,31 @@ void tick(bool visitor) {
         uint32_t h = 0;
         if (!chr || !read32(chr + 4, &h) || h == 0xFFFFFFFF) continue;
         const bool phantom = chr_type(chr) == ph.kind;
-        const bool in_party = entry_of(p, h) >= 0;
-        if (phantom && in_party) continue;
+        const int entry = entry_of(p, h);
+        if (phantom && entry >= 0) {
+            show_late(p, entry, ph.entity, chr);
+            continue;
+        }
+        const bool was_hidden = chr_disabled(chr);
         if (!phantom && !make_phantom(h, ph.kind)) {
             if (g_told_waiting.insert(chr).second && ++g_lines <= 40) {
                 LOG_INFO("[coop] The host's NPC phantom %d (character %08X) cannot become one here yet", ph.entity, h);
             }
             continue;
         }
-        const bool added = in_party || party_add(p, h, chr_type(chr), ph.f1, ph.f2);
+        // A fresh copy (our own reload, its block back) under an entry the party kept: that entry is in state 3,
+        // which never shows the copy, so it goes and the copy is summoned in like any other.
+        if (entry >= 0) {
+            blank_entry(p, entry);
+            recount(p);
+        }
+        const bool added = party_add(p, h, chr_type(chr), ph.f1, ph.f2);
         if (added) g_entity_of[h] = ph.entity;
         auto it = g_made.find(ph.entity);
         if ((it == g_made.end() || it->second != chr) && ++g_lines <= 40) {
-            LOG_INFO("[coop] The host's NPC phantom %d is a phantom here too (character %08X, type %d%s)", ph.entity, h,
-                     static_cast<int>(chr_type(chr)), added ? "" : "; our party has no room");
+            LOG_INFO("[coop] The host's NPC phantom %d is a phantom here too (character %08X, type %d, %s, summoned "
+                     "in%s)", ph.entity, h, static_cast<int>(chr_type(chr)), was_hidden ? "was disabled" : "was enabled",
+                     added ? "" : "; our party has no room");
         }
         g_made[ph.entity] = chr;
     }
@@ -646,7 +741,8 @@ void solo_party(uint32_t p) {
 }
 
 bool install() {
-    const bool make = redirect_call(kRecvMake, kMakePhantom, reinterpret_cast<void*>(&hk_recv_make));
+    const bool make = redirect_call(kRecvMake, kMakePhantom, reinterpret_cast<void*>(&hk_recv_make)) &&
+                      redirect_call(kRecvAdd, kPartyAdd, reinterpret_cast<void*>(&hk_recv_add));
     const bool state = redirect_call(kRecvState, kPartyState, reinterpret_cast<void*>(&hk_recv_state));
     static const uint8_t k[7] = {0x8B, 0x45, 0x00, 0x48, 0x83, 0xF8, 0x05};
     uint8_t code[7] = {0xE8, 0, 0, 0, 0, 0x90, 0x90};

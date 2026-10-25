@@ -7,6 +7,7 @@
 #include "log.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 namespace coop::netrate {
@@ -22,9 +23,21 @@ constexpr uint8_t kReloadMov = 0xC7, kReloadAdd = 0x81;
 const uint8_t kReloadOperand[5] = {0x83, 0x34, 0x02, 0x00, 0x00};  // [ebx+234h]
 constexpr int32_t kUnit = 65536;
 
+// The send test before it (`cmp dword ptr [ebx+234h], 0`, then `jg` past the update). At most one update goes a frame,
+// so a game drawing fewer frames a second than the rate (the FPS Unlock capped at 30, a slow PC, a long frame) sends
+// every frame and, with the FPS Unlock's reload added on, the counter sinks further below zero each time: at 60 a
+// second and 30 FPS it wrapped round after 36 minutes, and then no update went for 18. A game that sped up again sent
+// every frame until it had made up the debt. The stub holds the counter at minus one reload, so a slow game simply
+// sends every frame; a game as fast as the rate or faster never reaches it, and its leftover part of a frame carries
+// on as before. (The game's own `mov` reload never goes below zero.)
+constexpr uint32_t kSendTest = 0x00E1DDE4;
+const uint8_t kSendTestCode[7] = {0x83, 0xBB, 0x34, 0x02, 0x00, 0x00, 0x00};
+
 // The enemies' positions (WorldChrMan+0x2B4, the table 0xE563D0 builds; 0xE57850 per frame): a round of updates
 // (0xE56BC0, packet type 3, 8 enemies a packet, one packet every other frame until the round is through) starts when
 // +0x1C4 has counted down by the frame time, and +0x1C4 is reloaded from +0x1BC, 0.25 s (from the shared 0x12DF764).
+// A round's first call is skipped when the last round's packet went the frame before (+0x1CC), so a round of up to 8
+// enemies goes every other frame at best: 30 a second at 60 FPS, 15 at 30 FPS, which a gap of 0.025 s reaches.
 // The receiver (0xE556F0) keeps only the newest position, which the enemy's copy moves to. (An enemy's actions are
 // messages of their own, sent the frame they start: 0xE56AB0, packet type 0x21.)
 constexpr uint32_t kChrTable = 0x2B4;
@@ -75,6 +88,22 @@ uint32_t g_pop = kPop;
 float g_gap = 0.0f;   // scratch
 double g_gap_d = 0.0;  // scratch
 double g_slack_d = 0.0;  // scratch
+int32_t g_send_floor = INT32_MIN;  // minus the send reload, once written (INT32_MIN: no floor)
+
+// The send test: the counter is held at g_send_floor or above, then compared with 0 for the game's `jg`.
+__declspec(naked) void send_test() {
+    __asm {
+        push eax
+        mov eax, dword ptr [g_send_floor]
+        cmp dword ptr [ebx + 234h], eax
+        jge keep
+        mov dword ptr [ebx + 234h], eax
+    keep:
+        pop eax
+        cmp dword ptr [ebx + 234h], 0
+        ret
+    }
+}
 
 __declspec(naked) void turn_fraction_xmm5() {
     __asm {
@@ -152,12 +181,13 @@ bool patch_call(uint32_t at, const uint8_t* expect, size_t n, void* fn) {
     code[0] = 0xE8;
     const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(fn) - (at + 5));
     std::memcpy(code + 1, &rel, 4);
-    return n == sizeof(code) && bytes_match(at, expect, n) && patch(at, expect, code, n);
+    return n >= 5 && n <= sizeof(code) && bytes_match(at, expect, n) && patch(at, expect, code, n);
 }
 
 bool g_turn = false;
 bool g_newest = false;
 bool g_cover = false;
+bool g_floor = false;
 int g_smooth_ms = 25;
 int g_applied = 0;  // the rate the send reload holds (0: not yet written)
 bool g_smoothing = false;
@@ -178,7 +208,9 @@ bool write_reload(int rate) {
     }
     uint32_t old = 0;
     if (!read32(kSendReload + 6, &old)) return false;
-    return static_cast<int32_t>(old) == value || patch(kSendReload + 6, &old, &value, sizeof(value));
+    if (static_cast<int32_t>(old) != value && !patch(kSendReload + 6, &old, &value, sizeof(value))) return false;
+    g_send_floor = -value;
+    return true;
 }
 
 void set_round_gap(float gap) {
@@ -214,6 +246,7 @@ bool install() {
     g_cover = bytes_match(kEnemyCover, kEnemyCoverCode, sizeof(kEnemyCoverCode)) &&
               patch_call(kPlayerCover, kPlayerCoverCode, sizeof(kPlayerCoverCode), reinterpret_cast<void*>(&cover_player)) &&
               patch_call(kEnemyCover, kEnemyCoverCode, sizeof(kEnemyCoverCode), reinterpret_cast<void*>(&cover_enemy));
+    g_floor = patch_call(kSendTest, kSendTestCode, sizeof(kSendTestCode), reinterpret_cast<void*>(&send_test));
     uint8_t op = 0;
     const bool send = read8(kSendReload, &op) && (op == kReloadMov || op == kReloadAdd) &&
                       bytes_match(kSendReload + 1, kReloadOperand, sizeof(kReloadOperand));
@@ -221,7 +254,8 @@ bool install() {
     if (!g_newest) LOG_ERROR("[coop] Network rate: the other players' update queue did not match this build");
     if (!g_cover) LOG_ERROR("[coop] Network rate: the movement toward updates did not match this build (no smoothing)");
     if (!send) LOG_ERROR("[coop] Network rate: the player update's reload did not match this build");
-    return g_turn && g_newest && g_cover && send;
+    if (!g_floor) LOG_ERROR("[coop] Network rate: the player update's send test did not match this build");
+    return g_turn && g_newest && g_cover && send && g_floor;
 }
 
 void set_smoothing(int ms) {

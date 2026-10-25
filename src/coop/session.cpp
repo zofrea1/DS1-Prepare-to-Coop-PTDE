@@ -2195,7 +2195,8 @@ void issue_search() {
         }
         // A 1.3.0 host's world in a boss fight (ptdesc_boss) or invaded lately (ptdesc_cooldown: until when, in Steam's
         // clock) is passed over without a knock and counted for the line the invader sees when no world can take them,
-        // with how long until the first world on cooldown opens.
+        // with how long until the first world on cooldown opens. The cooldown goes first, as in host_answer: a world in
+        // a boss fight keeps its cooldown running, and that wait is the least the invader still has.
         if (g_invade) {
             const uint32_t t = steam::server_time();
             std::vector<uint64_t> open;
@@ -2203,12 +2204,12 @@ void issue_search() {
             for (uint64_t l : found) {
                 const uint32_t until = static_cast<uint32_t>(
                     std::strtoul(steam::lobby_data(l, "ptdesc_cooldown").c_str(), nullptr, 10));
-                if (steam::lobby_data(l, "ptdesc_invade") != "1") {
-                    note_refusal(kBossFight, 0);
-                    ++fighting;
-                } else if (t && until > t) {
+                if (t && until > t) {
                     note_refusal(kCooldown, until - t);
                     ++cooling;
+                } else if (steam::lobby_data(l, "ptdesc_invade") != "1") {
+                    note_refusal(kBossFight, 0);
+                    ++fighting;
                 } else {
                     open.push_back(l);
                 }

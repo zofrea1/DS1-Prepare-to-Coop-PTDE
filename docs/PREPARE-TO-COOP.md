@@ -584,15 +584,20 @@ start whatever the rate. The update loop (`0xE1F950`) decodes every update that 
 `0xD30140`, back to `0xE1F980`); the gap is zeroed after each, so the second of two in one frame jumps. Enemies take
 only the newest position each frame (`0xE556F0` overwrites, `0xE55360` takes it once).
 
-`NetworkTickRate` (the host's, sent behind the state message, 1.3.0) sets the player update's reload to 30 / rate
-frames and the enemies' round to 0.25 x 6 / rate s in every game of the session. Above the game's own rate the
+`NetworkTickRate` (the host's, sent behind the state message, 1.3.0; 6 to 60, default 60) sets the player update's
+reload to 30 / rate frames and the enemies' round to 0.25 x 6 / rate s in every game of the session. One update goes a
+frame at most, so a game drawing fewer frames than the rate sends every frame; with the FPS Unlock's added reload its
+counter then sank a little further each frame and wrapped round (at 60 a second and 30 FPS after 36 minutes, with no
+update for 18 after), so a stub on the send test (`0xE1DDE4`) holds it at minus one reload. A round of enemy positions
+goes every other frame at best (a round's first call is skipped when the last round sent the frame before, `+0x1CC`):
+at 60 a second, 30 rounds a second at 60 FPS and 15 at 30 FPS. Above the game's own rate the
 receiving side changes too (`netrate.cpp`): the pop takes every update that is waiting and keeps the newest (each
 holds the whole state); the movement covers an update in at least the gap plus `NetworkSmoothing` (each player's
 own, default 25 ms; stubs at `0xE1F3A1` and `0xE21663`), where the game's 20% (10%) of slack is a few ms at thirty
 a second and an update a little late left the character standing; and the turn is a 30 FPS frame over the gap plus
 the smoothing (stubs at `0xE1F83C` and `0xE1F8CB`, never less than the game's fifth, at most the whole turn). A
-character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 58 ms
-at thirty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
+character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 42 ms
+at sixty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
 older keeps sending six a second.
 
 ### Update check

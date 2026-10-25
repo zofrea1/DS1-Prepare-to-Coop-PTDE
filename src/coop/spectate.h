@@ -8,7 +8,8 @@
 // held back, and the camera follows a living teammate. The death goes ahead once the fight is decided: the boss is
 // gone and no invader is left, every co-op player has fallen (a team wipe), someone rests at a bonfire, the session
 // ends, or after ten minutes. After a team wipe the respawns wait for each other, so that every game reloads its
-// world at once (session::team_respawn_wait, world.cpp). Invaders keep the game's own rules.
+// world at once (session::team_respawn_wait, world.cpp). Invaders are a team of their own (1.3.0, a host of 1.3.0 or
+// later): an invader who falls while another invader stands spectates them until the invasion is decided.
 
 #include <cstdint>
 #include <string>

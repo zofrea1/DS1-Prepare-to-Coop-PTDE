@@ -120,8 +120,9 @@ bool g_trip_release = false;  // the host's trip home came while we were down (t
 
 bool hold_wanted() {
     const auto& st = rules::state();
-    return st.active && !st.invader && !st.leaving && !g_trip_release && world::local_dead() && fight_on() &&
-           living_teammates() > 0;
+    if (!st.active || st.leaving || g_trip_release || !world::local_dead() || living_teammates() == 0) return false;
+    // We invade: our teammates are the other invaders, and the invasion is the fight (session's team_invasion).
+    return st.invader ? st.team_invasion : fight_on();
 }
 
 // ---------------------------------------------------------------- the camera
@@ -402,7 +403,8 @@ void start_hold() {
     g_fight_off_since = 0;
     g_view_at = now() + kViewDelay;
     g_told_waiting = false;
-    const char* during = world::boss_fight()                    ? "a boss fight"
+    const char* during = rules::state().invader             ? "our invasion"
+                         : world::boss_fight()                ? "a boss fight"
                          : rules::state().teammate_boss_fight ? "a teammate's boss fight"
                                                               : "an invasion";
     LOG_INFO("[coop] We fell during %s with %d teammate(s) still standing: our death waits", during,
@@ -505,7 +507,7 @@ void tick() {
     }
     if (!g_hold) return;
     const auto& st = rules::state();
-    if (fight_on()) {
+    if (st.invader ? st.team_invasion : fight_on()) {
         g_fight_off_since = 0;
     } else if (g_fight_off_since == 0) {
         g_fight_off_since = now();
@@ -518,7 +520,9 @@ void tick() {
     } else if (g_rested) {
         why = "someone rested at a bonfire";
     } else if (living_teammates() == 0) {
-        why = "every co-op player has fallen";
+        why = st.invader ? "every invader has fallen" : "every co-op player has fallen";
+    } else if (st.invader && !st.team_invasion) {
+        why = "the invasion is decided";
     } else if (g_fight_off_since && now() - g_fight_off_since >= kFightOffFor) {
         why = "the fight is over";
     } else if (now() - g_hold_since > kHoldLimit) {

@@ -88,6 +88,20 @@ int member_count() {
     return e >= b ? static_cast<int>((e - b) / 0x24) : 0;
 }
 
+uint32_t pending_send_bytes() {
+    const uint32_t s = sess_man();
+    const uint32_t head = field<uint32_t>(s, 0xBC, 0);
+    if (!s || !head) return 0;
+    uint32_t bytes = field<uint32_t>(s, 0xD4, 0);
+    uint32_t node = field<uint32_t>(head, 0, 0);
+    for (int guard = 0; node && node != head && guard < 64; ++guard) {
+        const uint32_t queue = field<uint32_t>(node, 8, 0);
+        if (queue) bytes += field<uint32_t>(queue, 0x34, 0);
+        node = field<uint32_t>(node, 0, 0);
+    }
+    return bytes;
+}
+
 bool own_world() { return field<uint8_t>(game_man(), kGmOwnWorld, 1) != 0; }
 int chr_type() { return field<int>(player(), 0x70, -1); }
 int map_id() { return field<int>(player(), 0x444, -1); }

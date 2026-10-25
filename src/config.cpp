@@ -22,6 +22,10 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.allow_invaders = settings_parse_bool(val);
         } else if (key == "invasionrewards") {
             c.invasion_rewards = settings_parse_bool(val);
+        } else if (key == "invasioncooldown") {
+            // Minutes, fractions allowed (1.5 = 90 s), 0 to 15.
+            const double minutes = std::atof(val.c_str());
+            c.invasion_cooldown_s = minutes <= 0 ? 0 : minutes >= 15 ? 900 : static_cast<int>(minutes * 60 + 0.5);
         } else if (key == "deathdebuffs") {
             c.death_debuffs = settings_parse_bool(val);
         } else if (key == "guestworldevents") {

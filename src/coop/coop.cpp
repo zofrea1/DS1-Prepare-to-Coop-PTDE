@@ -384,6 +384,7 @@ void coop_install(const CoopConfig& config) {
     cfg.password = g_cfg.password;
     cfg.allow_invaders = g_cfg.allow_invaders;
     cfg.invasion_rewards = g_cfg.invasion_rewards;
+    cfg.invasion_cooldown_s = g_cfg.invasion_cooldown_s;
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
@@ -395,6 +396,12 @@ void coop_install(const CoopConfig& config) {
     const int overhead = g_cfg.overhead_display >= 0 && g_cfg.overhead_display <= 4 ? g_cfg.overhead_display : 4;
     LOG_INFO("[coop] Companion health bars show the %s", kOverhead[overhead]);
     LOG_INFO("[coop] Invasion rewards: %s", g_cfg.invasion_rewards ? "Humanity for the side that wins" : "off");
+    if (g_cfg.invasion_cooldown_s > 0) {
+        LOG_INFO("[coop] Invasion cooldown: no other invader for %d:%02d after an invasion of this world "
+                 "(InvasionCooldown)", g_cfg.invasion_cooldown_s / 60, g_cfg.invasion_cooldown_s % 60);
+    } else {
+        LOG_INFO("[coop] Invasion cooldown: off (InvasionCooldown)");
+    }
     LOG_INFO("[coop] Network updates when hosting: %d a second (NetworkTickRate; guests use their host's); smoothing "
              "%d ms above 6 a second (NetworkSmoothing)",
              std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)),

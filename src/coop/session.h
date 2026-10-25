@@ -15,6 +15,7 @@ struct Config {
     std::string password;
     bool allow_invaders = true;
     bool invasion_rewards = true;  // Humanity for the side that wins an invasion
+    int invasion_cooldown_s = 180; // InvasionCooldown: after an invasion of our world, no other invader for this long
     bool death_debuffs = false;  // each death in a session adds a Crimson Blossom (up to five)
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
     int overhead_display = 4;
@@ -90,7 +91,8 @@ bool active();       // any role, including searching and joining
 bool idle();         // no role at all (the session items may start one)
 bool invader();      // we invade
 // The updates a second our game sends (netrate.h): the host's NetworkTickRate in its session (for a guest or an
-// invader, as the host's state says; a host of 1.2.0 or older says nothing, which leaves the game's own rate).
+// invader, as the host's state says, once in the host's world; a host of 1.2.0 or older says nothing, which leaves the
+// game's own rate).
 int net_rate();
 
 // Kept for the session text. The on-screen box that used to draw these lines is not shown; soul level and

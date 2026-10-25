@@ -259,6 +259,7 @@ bool ready() {
 }
 
 uint32_t app_id() { return g_utils ? g_utils->GetAppID() : g_app_id; }
+uint32_t server_time() { return g_utils ? g_utils->GetServerRealTime() : 0; }
 uint64_t self() { return g_user ? g_user->GetSteamID().ConvertToUint64() : 0; }
 
 std::string persona(uint64_t id) {

@@ -78,9 +78,29 @@ bool host_stays(uint32_t ret) {
     return true;
 }
 
+// The game's own ways out of a session that end a join or an invasion, by the return address of their leave call.
+const char* leave_name(uint32_t ret) {
+    switch (ret) {
+        case 0x00D2D310: return "OnIrregularLeaveSession: messages piling up for a member (0xD2D2F0)";
+        case 0x00D2EF4C: return "OnIrregularLeaveSession: network memory low (0xD2EF0C)";
+        case 0x00D2D16B: return "OnBeThxKickOut (0xD2D110)";
+        default: return "";
+    }
+}
+
 bool __stdcall allow_leave(uint32_t ret) {
     if (host_stays(ret)) return false;
-    if (!seamless_rules()) return true;
+    if (!seamless_rules()) {
+        // An invader's leaves (and a joiner's that we did not ask for) are the game's own: which one, for the joins that
+        // fell through in the 2026-10-25 test.
+        static int lines = 0;
+        if (g_state.active && !g_state.leaving && ++lines <= 30) {
+            LOG_INFO("[coop] Session leave from %08X (the game's own; %u bytes waiting to be sent, session state %d, "
+                     "join step %d) %s", ret, game::pending_send_bytes(), game::session_state(), game::join_step(),
+                     leave_name(ret));
+        }
+        return true;
+    }
     switch (ret) {
         case kRetStepEnd:
             // This destructor runs for a map load and again a few seconds after the last guest leaves.
@@ -98,7 +118,8 @@ bool __stdcall allow_leave(uint32_t ret) {
             if (++g_blocked_leaves <= 50) LOG_INFO("[coop] Kept the session (leave from %08X skipped)", ret);
             return false;
         default:
-            LOG_INFO("[coop] Session leave from %08X allowed", ret);
+            LOG_INFO("[coop] Session leave from %08X allowed (%u bytes waiting to be sent) %s", ret,
+                     game::pending_send_bytes(), leave_name(ret));
             return true;
     }
 }
@@ -3488,8 +3509,9 @@ uint32_t __stdcall hk_net_priority(uint32_t chr) {
     return bid;
 }
 
-// Which game moves the Hellkite (1010300), with where it is: logged when that changes and every 10 s while it
-// exists here, for the 2026-10-13 report (the dragon fell through the bridge after a rest).
+// Which game moves the Hellkite (1010300), with where it is: logged when that changes and every 60 s while it
+// exists here, for the 2026-10-13 report (the dragon fell through the bridge after a rest). Every 10 s until 1.3.0
+// filled a fifth of the 2026-10-25 host log with the same line.
 constexpr int kWatchedEnemies[] = {1010300};
 
 void track_watched_enemies() {
@@ -3509,7 +3531,7 @@ void track_watched_enemies() {
         }
         const int control = current == own_ai ? 1 : current == net_ai ? 2 : 0;
         auto& s = seen[entity];
-        if (control == s.first && t - s.second < 10.0) continue;
+        if (control == s.first && t - s.second < 60.0) continue;
         s = {control, t};
         game::position(&me, nullptr);
         read32(chr + 0x428, &no_sync);  // SetNoNetSync (low byte)

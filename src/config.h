@@ -16,6 +16,9 @@ struct CoopConfig {
     bool allow_invaders = true;
     // Humanity for the side that wins an invasion (the invader: one per co-op player defeated; else each co-op player).
     bool invasion_rewards = true;
+    // Host: after an invasion of the world ends, no other invader comes in for this long (InvasionCooldown, in minutes
+    // in the INI: 0 to 15).
+    int invasion_cooldown_s = 180;
     // Each death in a session adds a Crimson Blossom (up to five), lowering maximum HP until the next bonfire rest
     // (on by default since 1.1.0).
     bool death_debuffs = true;

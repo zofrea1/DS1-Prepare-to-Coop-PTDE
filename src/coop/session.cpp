@@ -97,8 +97,12 @@ enum MsgType : uint8_t {
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
 
-// kBossFight (1.1.0): a co-op guest waits for the host's or a guest's boss fight to end (1.0.0 takes it as a refusal).
-enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4, kBossFight = 5 };
+// kBossFight (1.1.0): a co-op guest waits for the host's or a guest's boss fight to end (1.0.0 takes it as a refusal);
+// from 1.3.0 an invader of 1.3.0 or later gets it too (older invaders get kRefused). kCooldown (1.3.0, invaders of
+// 1.3.0 or later): the world was invaded lately (InvasionCooldown), WelcomeMore says for how long still.
+enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4, kBossFight = 5, kCooldown = 6 };
+// The first version whose invaders know kBossFight and kCooldown.
+constexpr const char* kRefusalsVersion = "1.3.0";
 
 #pragma pack(push, 1)
 struct Header {
@@ -126,6 +130,12 @@ struct Welcome {
     uint8_t coop_players;
     uint32_t invitation_size;
     uint8_t invitation[512];
+};
+// 1.3.0, behind Welcome as StateMore is behind StateMsg: an older joiner reads the Welcome part, and an older host's
+// Welcome leaves wait_s 0.
+struct WelcomeMore {
+    Welcome w;
+    uint32_t wait_s;  // kCooldown: the seconds until the world takes invaders again
 };
 struct StateMsg {
     Header h;
@@ -323,6 +333,14 @@ constexpr const wchar_t* kMsgBreakInTimeout = L"Failed to find session to invade
 constexpr const wchar_t* kMsgConnectTimeout = L"Failed to connect";
 constexpr const wchar_t* kMsgNoOne = L"No sessions found";
 constexpr const wchar_t* kMsgBossFight = L"That world is in a boss fight. Try again when it is over";
+constexpr const wchar_t* kMsgCooldown = L"That world was invaded recently. Invaders can enter again in {}";
+constexpr const wchar_t* kMsgWorldFull = L"That world is full";
+constexpr const wchar_t* kMsgWorldBusy = L"That world's host is loading or has fallen. Try again in a moment";
+constexpr const wchar_t* kMsgNoInvaders = L"That world takes no invaders right now";
+constexpr const wchar_t* kMsgNoWorldInvade = L"No world can take an invader right now: {}";
+constexpr const wchar_t* kMsgNoWorldJoin = L"No world can take you right now: {}";
+constexpr const wchar_t* kMsgNextOpens = L"The next one takes invaders again in {}";
+constexpr const wchar_t* kMsgJoinRetry = L"The connection fell through. Trying again...";
 constexpr const wchar_t* kMsgTryAnother = L"Trying another world...";
 constexpr const wchar_t* kMsgReturnHome = L"Returning to your world...";
 constexpr const wchar_t* kMsgHostClosed = L"The host closed their world. Returning to your world...";
@@ -364,6 +382,7 @@ struct Pending {
     uint64_t from = 0;
     bool invade = false;
     double since = 0;
+    bool knows_refusals = false;  // 1.3.0 or later (kRefusalsVersion): an invader is told kBossFight and kCooldown
 };
 
 struct RestPoint {
@@ -394,11 +413,25 @@ std::vector<uint64_t> g_worlds;
 int g_world_tries = 0;   // worlds tried for this search
 int g_join_gen = 0;      // the current lobby join (an answer for an earlier one is stale)
 bool g_last_busy = false;  // the host's last answer was "busy"
+// Guest: why the worlds of this search could not take us (their answers, and the worlds an invader's search passed
+// over for InvasionCooldown), for the line shown when none could (finish_search).
+struct Refusals {
+    int cooldown = 0, boss = 0, full = 0, busy = 0, refused = 0;
+    double open_at = 0;  // the soonest a world on cooldown takes invaders again (now())
+};
+Refusals g_refusals;
+// Guest: this world's join has had its one retry (retry_join).
+bool g_join_retried = false;
 std::vector<Pending> g_pending;
 std::vector<PeerInfo> g_peers;
 // Host: the players it let in (a Welcome with kOk). Steam passes on packets from anyone in the lobby, so the host
 // takes world changes only from these. Kept apart from g_peers, which also holds players not let in.
 std::vector<uint64_t> g_admitted;
+// Host: InvasionCooldown. The invaders that arrived in our world (kArrived) until they leave it; the end of an
+// invasion, whichever way the invader goes (set_admitted), closes the world to invaders until g_invade_open_at. It
+// outlives the session: a host who closes the world and opens it again is still on cooldown.
+std::vector<uint64_t> g_invaders_in;
+double g_invade_open_at = 0;
 // A player whose connection went quiet is dropped (nothing heard for kLostQuiet s after Steam reported the link
 // lost, or for kLostSilent s in any case): the host tells the others and stops sending to them; a guest goes
 // home. Nothing is counted while this game itself was not running (a machine asleep, a long stall).
@@ -794,9 +827,36 @@ std::wstring shown_name(const PeerInfo& p) { return p.char_name.empty() ? text::
 
 bool admitted(uint64_t id) { return std::find(g_admitted.begin(), g_admitted.end(), id) != g_admitted.end(); }
 
+// Host: when InvasionCooldown ends, in Steam's clock, for the invaders' searches ("ptdesc_cooldown"; 0 open). Every
+// game reads the same clock, so a search can pass over the world without knocking (issue_search).
+void publish_cooldown() {
+    if (g_role != Role::Host || !g_lobby) return;
+    const double left = g_invade_open_at - now();
+    const uint32_t t = steam::server_time();
+    const uint32_t until = left > 0 && t ? t + static_cast<uint32_t>(std::ceil(left)) : 0;
+    steam::set_lobby_data(g_lobby, "ptdesc_cooldown", std::to_string(until).c_str());
+}
+
+// Host: an invader who arrived in our world has left it (won, lost, sent home, gone): InvasionCooldown begins.
+void invasion_over(uint64_t id) {
+    const auto it = std::find(g_invaders_in.begin(), g_invaders_in.end(), id);
+    if (it == g_invaders_in.end()) return;
+    g_invaders_in.erase(it);
+    if (g_cfg.invasion_cooldown_s <= 0) return;
+    g_invade_open_at = now() + g_cfg.invasion_cooldown_s;
+    publish_cooldown();
+    LOG_INFO("[coop] The invasion of %s is over: no other invader for %d s (InvasionCooldown)",
+             steam::persona(id).c_str(), g_cfg.invasion_cooldown_s);
+}
+
+// Every way a player leaves the session ends here (their leave, Bye, drop, a refused knock).
 void set_admitted(uint64_t id, bool on) {
     g_admitted.erase(std::remove(g_admitted.begin(), g_admitted.end(), id), g_admitted.end());
-    if (on) g_admitted.push_back(id);
+    if (on) {
+        g_admitted.push_back(id);
+    } else {
+        invasion_over(id);
+    }
 }
 
 bool peer_is_invader(uint64_t id) {
@@ -1106,6 +1166,10 @@ void reset_rules() {
 
 void finish(const std::wstring& why) {
     if (!why.empty()) say(why);
+    // A host closing its world over an invader: that invasion is over too (InvasionCooldown).
+    const std::vector<uint64_t> invaders = g_invaders_in;
+    for (uint64_t id : invaders) invasion_over(id);
+    g_invaders_in.clear();
     if (g_lobby) steam::leave_lobby(g_lobby);
     for (const auto& p : g_peers) steam::close(p.id);
     g_lobby = 0;
@@ -1183,7 +1247,9 @@ void host_open_lobby() {
         g_invade_open = g_cfg.allow_invaders;
         steam::set_lobby_data(lobby, "ptdesc_taunt", "0");  // stays 0: see kFingersWeight
         steam::set_lobby_data(lobby, "ptdesc_fingers", "0");
+        steam::set_lobby_data(lobby, "ptdesc_boss", "0");
         steam::set_lobby_joinable(lobby, true);
+        publish_cooldown();  // a cooldown from our last session goes on
         g_away_since = 0;
         g_hidden = false;
         auto& st = rules::state();
@@ -1298,12 +1364,20 @@ void host_answer(const Pending& p) {
     for (uint64_t id : g_admitted) in_session += id == p.from ? 0 : 1;
     if (in_session >= g_cfg.max_players) w.status = kFull;
     if (p.invade && !g_cfg.allow_invaders) w.status = kRefused;
+    // InvasionCooldown: no invader for a while after an invasion of our world ended. Checked before a boss fight: the
+    // wait is the least the invader has to wait in any case.
+    uint32_t wait = 0;
+    if (w.status == kOk && p.invade && now() < g_invade_open_at) {
+        wait = static_cast<uint32_t>(std::ceil(g_invade_open_at - now()));
+        w.status = p.knows_refusals ? kCooldown : kRefused;
+        LOG_INFO("[coop] An invader knocked during the invasion cooldown (%u s left): refused", wait);
+    }
     // Nobody joins a boss fight (ours or a guest's). An invader tries another world. A guest is told to come back
     // after it: one who arrived mid-fight ran the boss's opening in its own game on a boss already fighting (the
     // Asylum Demon's jump from its perch, from wherever it stood, through the floor; 2026-10-17 test). Remastered
     // Seamless Co-op also keeps invaders out of the Undead Asylum and Firelink Shrine; Prepare to Co-op lets them in.
     if (w.status == kOk && boss_fight_in_world()) {
-        w.status = p.invade ? kRefused : kBossFight;
+        w.status = p.invade && !p.knows_refusals ? kRefused : kBossFight;
         LOG_INFO("[coop] %s knocked during a boss fight: %s", p.invade ? "An invader" : "A guest",
                  p.invade ? "refused" : "told to come back after it");
     }
@@ -1358,7 +1432,10 @@ void host_answer(const Pending& p) {
         std::memcpy(w.invitation, inv.data(), inv.size());
     }
     set_admitted(p.from, w.status == kOk);
-    send_to(p.from, w);
+    WelcomeMore more{};
+    more.w = w;
+    more.wait_s = wait;
+    send_to(p.from, more);
     const PeerInfo* who = nullptr;
     for (const auto& q : g_peers) who = q.id == p.from ? &q : who;
     LOG_INFO("[coop] Answered %s (%s, character '%s'): status %u", steam::persona(p.from).c_str(),
@@ -1597,15 +1674,19 @@ void host_hide_while_away() {
 }
 
 // Invaders' searches skip a world that would refuse them: ptdesc_invade reads "0" while a boss fight is on (and
-// with AllowInvaders off). 1.0.0 invaders search on the same key.
+// with AllowInvaders off). 1.0.0 to 1.2.0 invaders search on that key. From 1.3.0 "ptdesc_boss" reads "1" during the
+// fight of a world that takes invaders otherwise: a 1.3.0 invader's search finds every world and tells the invader
+// why none could take them (issue_search).
 void host_invasions_open() {
     static double last = 0;
     if (now() - last < 1.0) return;
     last = now();
-    const bool open = g_cfg.allow_invaders && !boss_fight_in_world();
+    const bool fight = boss_fight_in_world();
+    const bool open = g_cfg.allow_invaders && !fight;
     if (open == g_invade_open) return;
     g_invade_open = open;
     steam::set_lobby_data(g_lobby, "ptdesc_invade", open ? "1" : "0");
+    steam::set_lobby_data(g_lobby, "ptdesc_boss", g_cfg.allow_invaders && fight ? "1" : "0");
     LOG_INFO("[coop] A boss fight %s: invaders %s our world", open ? "is over" : "is on",
              open ? "can find" : "cannot find");
 }
@@ -1953,6 +2034,64 @@ int knock_limit(bool busy) { return !can_try_another() ? 8 : busy ? 4 : 2; }
 
 void join_world(uint64_t lobby);
 
+// A world of this search could not take us (`status`, a WelcomeStatus; `wait_s` for kCooldown).
+void note_refusal(uint32_t status, uint32_t wait_s) {
+    Refusals& r = g_refusals;
+    switch (status) {
+        case kCooldown: {
+            ++r.cooldown;
+            const double at = now() + wait_s;
+            if (wait_s > 0 && (r.open_at == 0 || at < r.open_at)) r.open_at = at;
+            break;
+        }
+        case kBossFight: ++r.boss; break;
+        case kFull: ++r.full; break;
+        case kBusy: ++r.busy; break;
+        default: ++r.refused; break;
+    }
+}
+
+std::wstring minutes_seconds(int s) {
+    wchar_t b[16];
+    swprintf_s(b, L"%d:%02d", s / 60, s % 60);
+    return b;
+}
+
+// No world of this search could take us. When the worlds said why (InvasionCooldown, a boss fight, full, a host
+// loading or fallen), the player is told that, with the wait until the first world on cooldown opens; else `fallback`.
+void finish_search(const wchar_t* fallback) {
+    const Refusals r = g_refusals;
+    const int worlds = r.cooldown + r.boss + r.full + r.busy + r.refused;
+    const int wait = r.cooldown && r.open_at > 0 ? std::max(1, static_cast<int>(std::ceil(r.open_at - now()))) : 0;
+    if (worlds > 0) {
+        LOG_INFO("[coop] No world could take us: %d invaded recently (the next takes invaders in %d s), %d in a boss "
+                 "fight, %d full, %d busy, %d refused", r.cooldown, wait, r.boss, r.full, r.busy, r.refused);
+    }
+    if (worlds == 0) {
+        finish(fallback);
+    } else if (worlds == 1) {
+        finish(r.cooldown ? fmt(kMsgCooldown, minutes_seconds(wait))
+               : r.boss   ? std::wstring(kMsgBossFight)
+               : r.full   ? std::wstring(kMsgWorldFull)
+               : r.busy   ? std::wstring(kMsgWorldBusy)
+               : g_invade ? std::wstring(kMsgNoInvaders)
+                          : std::wstring(fallback));
+    } else {
+        std::wstring parts;
+        auto add = [&parts](int n, const wchar_t* what) {
+            if (n > 0) parts += (parts.empty() ? L"" : L", ") + std::to_wstring(n) + L" " + what;
+        };
+        add(r.cooldown, L"invaded recently");
+        add(r.boss, L"in a boss fight");
+        add(r.full, L"full");
+        add(r.busy, L"loading or fallen");
+        const bool invade = g_invade;  // finish clears it
+        add(r.refused, invade ? L"closed to invaders" : L"refused");
+        finish(fmt(invade ? kMsgNoWorldInvade : kMsgNoWorldJoin, parts));
+        if (wait) say(fmt(kMsgNextOpens, minutes_seconds(wait)));
+    }
+}
+
 bool try_next_world(const char* why) {
     if (!can_try_another()) return false;
     LOG_INFO("[coop] %s's world: %s; trying another (%zu more found)", g_host ? steam::persona(g_host).c_str() : "?",
@@ -1973,6 +2112,7 @@ bool try_next_world(const char* why) {
 void join_world(uint64_t pick) {
     g_worlds.erase(std::remove(g_worlds.begin(), g_worlds.end(), pick), g_worlds.end());
     ++g_world_tries;
+    g_join_retried = false;
     const int gen = ++g_join_gen;
     set_step(Step::LobbyJoin);
     steam::join_lobby(pick, [gen](bool ok, uint64_t lobby) {
@@ -1987,7 +2127,7 @@ void join_world(uint64_t pick) {
                 show_join_mismatch(g_mismatch.host);
                 return;
             }
-            if (!try_next_world("could not enter its lobby")) finish(kMsgConnectTimeout);
+            if (!try_next_world("could not enter its lobby")) finish_search(kMsgConnectTimeout);
             return;
         }
         g_lobby = lobby;
@@ -2005,7 +2145,9 @@ void issue_search() {
     ++g_search_waves;
     std::vector<std::pair<std::string, std::string>> filters;
     if (g_invade) {
-        filters.push_back({"ptdesc_invade", "1"});
+        // Every world (each version's lobby says "ptdesc"), not only those with ptdesc_invade "1" as until 1.2.0: a
+        // world in a boss fight is found too, so the invader can be told why it cannot take them.
+        filters.push_back({"ptdesc", "1"});
     } else {
         filters.push_back({"ptdesc_key", g_key});
     }
@@ -2018,6 +2160,15 @@ void issue_search() {
         found.erase(std::remove_if(found.begin(), found.end(),
                                    [me](uint64_t l) { return steam::lobby_owner(l) == me; }),
                     found.end());
+        // A world that takes no invaders at all (AllowInvaders off, or an older host's boss fight) is left out.
+        if (g_invade) {
+            found.erase(std::remove_if(found.begin(), found.end(),
+                                       [](uint64_t l) {
+                                           return steam::lobby_data(l, "ptdesc_invade") != "1" &&
+                                                  steam::lobby_data(l, "ptdesc_boss") != "1";
+                                       }),
+                        found.end());
+        }
         if (found.empty()) {
             finish(kMsgNoOne);
             return;
@@ -2042,6 +2193,36 @@ void issue_search() {
             g_mismatch.host = lobby_version(other.front());
             found.push_back(other.front());
         }
+        // A 1.3.0 host's world in a boss fight (ptdesc_boss) or invaded lately (ptdesc_cooldown: until when, in Steam's
+        // clock) is passed over without a knock and counted for the line the invader sees when no world can take them,
+        // with how long until the first world on cooldown opens.
+        if (g_invade) {
+            const uint32_t t = steam::server_time();
+            std::vector<uint64_t> open;
+            int cooling = 0, fighting = 0;
+            for (uint64_t l : found) {
+                const uint32_t until = static_cast<uint32_t>(
+                    std::strtoul(steam::lobby_data(l, "ptdesc_cooldown").c_str(), nullptr, 10));
+                if (steam::lobby_data(l, "ptdesc_invade") != "1") {
+                    note_refusal(kBossFight, 0);
+                    ++fighting;
+                } else if (t && until > t) {
+                    note_refusal(kCooldown, until - t);
+                    ++cooling;
+                } else {
+                    open.push_back(l);
+                }
+            }
+            if (cooling || fighting) {
+                LOG_INFO("[coop] Worlds passed over: %d invaded recently (InvasionCooldown), %d in a boss fight", cooling,
+                         fighting);
+            }
+            if (open.empty()) {
+                finish_search(kMsgNoOne);
+                return;
+            }
+            found.swap(open);
+        }
         const uint64_t pick = g_invade ? pick_invade_world(found) : found.front();
         g_worlds = found;
         g_world_tries = 0;
@@ -2051,6 +2232,7 @@ void issue_search() {
 
 void guest_search() {
     g_search_waves = 0;
+    g_refusals = Refusals{};
     set_step(Step::Searching);
     issue_search();
 }
@@ -2080,7 +2262,7 @@ void apply_host_rules(int world_rules, bool infection, bool taunt) {
     g_seen_infection = infection ? 1 : 0;
 }
 
-void guest_on_welcome(const Welcome& w) {
+void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
     if (g_step != Step::Hello) return;
     if (w.status == kBusy && g_hello_tries < knock_limit(true)) {
         g_last_busy = true;
@@ -2088,10 +2270,15 @@ void guest_on_welcome(const Welcome& w) {
         g_step_since = now() - 17.0;  // retry in 3 s
         return;
     }
-    if (w.status == kBossFight) {
-        LOG_INFO("[coop] The host's world is in a boss fight");
-        if (try_next_world("in a boss fight")) return;
-        finish(kMsgBossFight);
+    if (w.status == kBossFight || w.status == kCooldown) {
+        if (w.status == kBossFight) {
+            LOG_INFO("[coop] The host's world is in a boss fight");
+        } else {
+            LOG_INFO("[coop] The host's world was invaded recently: it takes invaders again in %u s", wait_s);
+        }
+        note_refusal(w.status, wait_s);
+        if (try_next_world(w.status == kBossFight ? "in a boss fight" : "invaded recently")) return;
+        finish_search(kMsgBossFight);
         return;
     }
     if (w.status == kVersion || (w.status != kOk && g_mismatch.active)) {
@@ -2103,8 +2290,9 @@ void guest_on_welcome(const Welcome& w) {
     }
     if (w.status != kOk) {
         LOG_INFO("[coop] The host refused us (status %u)", w.status);
+        note_refusal(w.status, 0);
         if (try_next_world(w.status == kFull ? "full" : w.status == kRefused ? "refused" : "busy")) return;
-        finish(w.status == kFull || w.status == kRefused ? kMsgNoOne : kMsgConnectTimeout);
+        finish_search(w.status == kFull || w.status == kRefused ? kMsgNoOne : kMsgConnectTimeout);
         return;
     }
     // The invitation's length comes from the host's packet: the game's reader would take it as the buffer's size.
@@ -2205,6 +2393,30 @@ void guest_go_home(const std::wstring& why, const char* reason) {
     } else {
         finish(L"");
     }
+}
+
+// The game session of our join ended before its load, with us still at home: we knock once more. In the 2026-10-25
+// test the first invasion of a world after an invasion of it always fell through this way (the game's own leave,
+// 0.5 to 3.5 s into the join), and the player's own retry always got in. Still in the host's lobby, so the hello goes
+// at once; the host answers with a new invitation. Once per world (join_world), then home as before.
+bool retry_join() {
+    if (g_join_retried || !g_host || !g_lobby || game::session_state() != 0 || !game::in_game() || game::loading() ||
+        !game::own_world()) {
+        return false;
+    }
+    g_join_retried = true;
+    LOG_INFO("[coop] The join fell through before the load (session state 0, join step %d): asking %s again",
+             game::join_step(), steam::persona(g_host).c_str());
+    // As before the join: guest_on_welcome put the host's bonfire into ours (a co-op guest's deaths respawn there),
+    // and set the rules that make us a guest or an invader.
+    if (!g_invade && g_home_bonfire >= 0) *ptr<int>(game::game_man() + game::kGmLastBonfire) = g_home_bonfire;
+    game::set_join_step(0);
+    reset_rules();
+    g_hello_tries = 0;
+    g_last_busy = false;
+    say(kMsgJoinRetry);
+    guest_send_hello();
+    return true;
 }
 
 void guest_arrived() {
@@ -2372,7 +2584,7 @@ void guest_tick() {
             break;
         case Step::LobbyJoin:
             if (in_step > 20.0 && !try_next_world("its lobby could not be entered")) {
-                finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
+                finish_search(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
             }
             break;
         case Step::Hello:
@@ -2382,8 +2594,9 @@ void guest_tick() {
             } else if (in_step > 20.0) {
                 if (g_hello_tries < knock_limit(g_last_busy)) {
                     guest_send_hello();
-                } else if (!try_next_world(g_last_busy ? "busy" : "no answer")) {
-                    finish(kMsgConnectTimeout);
+                } else {
+                    if (g_last_busy) note_refusal(kBusy, 0);
+                    if (!try_next_world(g_last_busy ? "busy" : "no answer")) finish_search(kMsgConnectTimeout);
                 }
             }
             break;
@@ -2400,7 +2613,7 @@ void guest_tick() {
         }
         case Step::Loading:
             if (game::session_state() != 6 && in_step > 5.0) {
-                guest_go_home(kMsgConnectTimeout, "the game session ended while loading");
+                if (!retry_join()) guest_go_home(kMsgConnectTimeout, "the game session ended while loading");
             } else if (game::join_step() == 4 && game::in_game() && !game::own_world()) {
                 guest_arrived();
             } else if (in_step > 180.0) {
@@ -2847,12 +3060,17 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             g_pending.erase(std::remove_if(g_pending.begin(), g_pending.end(),
                                            [from](const Pending& q) { return q.from == from; }),
                             g_pending.end());
-            g_pending.push_back(Pending{from, m.invade != 0, now()});
+            g_pending.push_back(Pending{from, m.invade != 0, now(), compare_versions(them.mod, kRefusalsVersion) >= 0});
             break;
         }
         case kWelcome: {
-            Welcome m;
-            if (from == g_host && as(&m)) guest_on_welcome(m);
+            WelcomeMore m{};
+            if (from != g_host) return;
+            if (as(&m)) {
+                guest_on_welcome(m.w, m.wait_s);
+            } else if (as(&m.w)) {
+                guest_on_welcome(m.w, 0);  // a host of 1.2.0 or older
+            }
             break;
         }
         case kState: {
@@ -2936,6 +3154,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                     send_world_flags(from);
                     g_world_sent.clear();  // what our world has, to the newcomer (and again to the others)
                     g_world_polled = 0;
+                } else if (std::find(g_invaders_in.begin(), g_invaders_in.end(), from) == g_invaders_in.end()) {
+                    g_invaders_in.push_back(from);  // its leave starts InvasionCooldown
                 }
                 g_npc_sent.clear();  // our NPC phantoms, to the newcomer at once
             } else if (from != g_host) {
@@ -3803,6 +4023,7 @@ void configure(const Config& cfg) {
     g_cfg = cfg;
     g_cfg.max_players = std::max(2, std::min(4, g_cfg.max_players));
     g_cfg.net_rate = std::max(netrate::kVanilla, std::min(netrate::kMax, g_cfg.net_rate));
+    g_cfg.invasion_cooldown_s = std::max(0, std::min(15 * 60, g_cfg.invasion_cooldown_s));
     g_key = password_key(g_cfg.password);
     if (cfg.test_protocol > 0) g_protocol = static_cast<uint32_t>(cfg.test_protocol);
     if (!cfg.test_version.empty()) g_version = cfg.test_version;
@@ -4228,9 +4449,12 @@ bool hosting() { return g_role == Role::Host && g_step == Step::Hosting && g_lob
 
 bool trip_slot_busy() { return now() - g_travel_started < kTravelGap || g_homeward_at > 0; }
 
+// A guest or an invader takes the host's rate once it stands in the host's world: during the join its game sends the
+// game's own six a second, as every older build did (the joins that fell through in the 2026-10-25 test were all at
+// thirty; see retry_join).
 int net_rate() {
     if (g_role == Role::Host) return g_cfg.net_rate;
-    if (g_role == Role::Guest && g_host_net_rate > 0) return g_host_net_rate;
+    if (g_role == Role::Guest && g_step == Step::InWorld && g_host_net_rate > 0) return g_host_net_rate;
     return netrate::kVanilla;
 }
 

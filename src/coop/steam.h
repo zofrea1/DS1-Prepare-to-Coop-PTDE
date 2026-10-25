@@ -24,6 +24,8 @@ bool ready();
 uint32_t app_id();
 uint64_t self();
 std::string persona(uint64_t id);
+// Steam's clock (Unix seconds), the same in every game; 0 when Steam cannot say.
+uint32_t server_time();
 
 // Lobbies. Results arrive on the game thread from inside SteamAPI_RunCallbacks.
 using LobbyResult = std::function<void(bool ok, uint64_t lobby)>;

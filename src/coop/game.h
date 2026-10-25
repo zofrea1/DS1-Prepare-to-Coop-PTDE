@@ -58,6 +58,10 @@ int session_state();
 int join_step();
 void set_join_step(int step);
 int member_count();            // session members including us
+// The session's messages waiting for a member's connection: SessMan+0xBC lists one queue per member (+0x34 its
+// bytes), plus +0xD4 (0xD29450 adds them). A reliable message that finds more than 1000 waiting leaves the session
+// (0xD2DAD1 -> 0xD2D2F0: Lua OnIrregularLeaveSession, then 0xD2B460).
+uint32_t pending_send_bytes();
 bool own_world();
 int chr_type();                // PlayerIns+0x70: 0 human, 1 white, 2 black, 8 hollow, 12 intruder
 int map_id();                  // PlayerIns+0x444

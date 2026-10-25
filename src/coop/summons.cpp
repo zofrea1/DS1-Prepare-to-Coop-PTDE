@@ -54,8 +54,10 @@ constexpr uint32_t kPartyState = 0x00EA2DD0;
 // waits (the loop's next entry) until its block is back; tick then makes the fresh copy a phantom again.
 constexpr uint32_t kUpdateState = 0x00EA2FFC;  // mov eax,[ebp] ; dec eax ; cmp eax,5 (ebp = entry + 8, edi = handle)
 constexpr uint32_t kUpdateNext = 0x00EA3340;   // add ebp,14h: the next entry
-// WorldChrMan's blocks: +0x70 count, +0x74 the blocks; each block's entity table +0x50 count, +0x54 pairs
-// {entity, handle} sorted by entity (0xE41E50 searches it).
+// WorldChrMan's blocks: +0x70 count, from +0x74 a pointer per block, in WorldChrMan itself (0xE3DC1F: lea edi,
+// [ebp+0x74]); each block's entity table +0x50 count, +0x54 pairs {entity, handle} sorted by entity (0xE41E50
+// searches it). Until the 2026-10-24 test this read +0x74 as a pointer to the list: no NPC phantom was ever named,
+// the host's list went out empty, and a guest's copy of Solaire left its party 3 s after his summon.
 constexpr uint32_t kBlockCount = 0x70, kBlocks = 0x74, kEntityCount = 0x50, kEntityPairs = 0x54;
 
 bool g_visitor = false;
@@ -133,11 +135,11 @@ uint32_t chr_by_entity(int32_t entity) {
 // The entity id the loaded blocks give `handle`, -1 none.
 int32_t entity_of(uint32_t handle) {
     const uint32_t w = wcm();
-    uint32_t n = 0, blocks = 0;
-    if (!w || !read32(w + kBlockCount, &n) || !read32(w + kBlocks, &blocks) || n > 64) return -1;
+    uint32_t n = 0;
+    if (!w || !read32(w + kBlockCount, &n) || n > 64) return -1;
     for (uint32_t b = 0; b < n; ++b) {
         uint32_t block = 0, count = 0, pairs = 0;
-        if (!read32(blocks + b * 4, &block) || !block || !read32(block + kEntityCount, &count) ||
+        if (!read32(w + kBlocks + b * 4, &block) || !block || !read32(block + kEntityCount, &count) ||
             !read32(block + kEntityPairs, &pairs) || !pairs || count > 0x4000) {
             continue;
         }
@@ -374,8 +376,7 @@ void own_refresh() {
         const int32_t t = chr_type(chr);
         auto it = g_own.find(h);
         if (chr && (t == 1 || t == 2)) {
-            const int32_t entity = entity_of(h);
-            if (entity < 0) continue;
+            const int32_t entity = entity_of(h);  // -1 if no table names it: the others go by the handle
             Own& o = g_own[h];
             o.ph.entity = entity;
             o.ph.handle = h;
@@ -522,9 +523,11 @@ void tick(bool visitor) {
         return;
     }
     std::set<int32_t> listed;
+    std::set<uint32_t> listed_handles;
     for (const Phantom& ph : g_host) {
         listed.insert(ph.entity);
-        const uint32_t chr = chr_by_entity(ph.entity);
+        listed_handles.insert(ph.handle);
+        const uint32_t chr = ph.entity >= 0 ? chr_by_entity(ph.entity) : chr_by_handle(ph.handle);
         uint32_t h = 0;
         if (!chr || !read32(chr + 4, &h) || h == 0xFFFFFFFF) continue;
         const bool phantom = chr_type(chr) == ph.kind;
@@ -554,8 +557,10 @@ void tick(bool visitor) {
         const uint32_t chr = chr_by_handle(h);
         const auto known = g_entity_of.find(h);
         const int32_t entity = chr ? entity_of(h) : known != g_entity_of.end() ? known->second : -1;
-        // Listed, or not known while its block is away: it stays (its update waits, hk_update_state).
-        if ((entity >= 0 && listed.count(entity)) || (entity < 0 && !chr) || !g_heard) {
+        // Listed (by its entity, or by the host's handle, which names the same character here), or not known while
+        // its block is away: it stays (its update waits, hk_update_state).
+        const bool on_list = (entity >= 0 && listed.count(entity)) || listed_handles.count(h);
+        if (on_list || (entity < 0 && !chr) || !g_heard) {
             g_gone_since.erase(h);
             continue;
         }
@@ -607,17 +612,37 @@ bool settle_party(uint32_t p) {
         blank_entry(p, i);
         changed = true;
     }
-    uint32_t before10 = 0, before14 = 0, n = 0;
+    // +0x14 is the game's: every party update (0xEA3381 -> 0xEA18A0) makes it the session's members (at least 1)
+    // plus the NPC summons (+0x74). Writing +0x10 into it lasted one frame (the log said so every second).
+    uint32_t before10 = 0, n = 0;
     read32(p + 0x10, &before10);
-    read32(p + 0x14, &before14);
     recount(p);
     read32(p + 0x10, &n);
-    *ptr<uint32_t>(p + 0x14) = n;
-    if (changed || n != before10 || n != before14) {
-        LOG_INFO("[coop] The session is over: the party keeps our %d NPC phantom(s) (party %u/%u -> %u)", npcs,
-                 before10, before14, n);
+    if (changed || n != before10) {
+        LOG_INFO("[coop] The session is over: the party keeps our %d NPC phantom(s) (party entries %u -> %u)", npcs,
+                 before10, n);
     }
     return true;
+}
+
+// Quit destroys the characters and then counts whoever the party's handles still name, so the other players'
+// handles go. Until the 2026-10-24 test this was 0xEA1900, which blanks all four, ours too, for 20 s after every
+// session: a reload in that time lost our entry for good (the game makes it only with our character), the next
+// session counted one short, and after its disband Solaire's entry alone counted 1. HasPartyMembers (0xD2A4B0:
+// session members, or +0x10 >= 2) was false and the Black Separation Crystal stayed grey with him still here.
+void solo_party(uint32_t p) {
+    if (p < 0x10000) return;
+    uint32_t local = 0;
+    const uint32_t me = game::player();
+    if (me) read32(me + 4, &local);
+    bool changed = false;
+    for (int i = 0; i < kEntryCount; ++i) {
+        uint32_t h = 0;
+        if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF || (local && h == local)) continue;
+        blank_entry(p, i);
+        changed = true;
+    }
+    if (changed) recount(p);
 }
 
 bool install() {

@@ -1387,24 +1387,10 @@ void settle_party_counts() {
              static_cast<int>(n14), static_cast<int>(slot));
 }
 
-// 0xEA1900 writes -1 over the four party member handles and does not touch the characters. Quit destroys
-// the characters and then counts whoever those handles still name.
-void blank_party_handles(uint32_t party) {
-    if (party < 0x10000) return;
-    __try {
-        __asm {
-            mov eax, party
-            mov edx, 0x00EA1900
-            call edx
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-}
-
 // Once a session is over (the game session is solo and no other player's character is left in our world) the
-// party is put back to a solo game's: counts 1, no slot, no member handles. The game lowers the counts as each
-// member's character goes, but not in every way a session ends (a guest's own leave, a host left alone), and
-// a party that still counts two keeps HasPartyMembers true: the bonfire is unusable, talk refuses service and
+// party is put back to a solo game's: counts 1, no slot, no member handle but our own. The game lowers the counts
+// as each member's character goes, but not in every way a session ends (a guest's own leave, a host left alone),
+// and a party that still counts two keeps HasPartyMembers true: the bonfire is unusable, talk refuses service and
 // the menu treats the game as multiplayer. Run for a while after every session (see tick).
 void settle_after_session() {
     if (game::session_state() != 0 || game::loading() || !game::remote_player_chrs().empty()) return;
@@ -1412,7 +1398,7 @@ void settle_after_session() {
     uint32_t party = 0;
     if (gm && read32(gm + game::kGmParty, &party) && party > 0x10000 && summons::settle_party(party)) return;
     settle_party_counts();
-    if (gm && party > 0x10000) blank_party_handles(party);
+    if (gm && party > 0x10000) summons::solo_party(party);
 }
 
 // ---------------------------------------------------------------- state probe (diagnostics)
@@ -1446,6 +1432,33 @@ uint32_t peek8(uint32_t addr) {
     return v;
 }
 
+// The party's four entries, written whenever they change: which members the count +0x10 stands for (0xEA2510's
+// entry types: 0 our own character, 1 another player, 2 an NPC). After the second disband of the 2026-10-24 test
+// only Solaire's entry was left, so the Black Separation Crystal stayed grey, and the log could not say whose
+// entry had gone.
+void log_party_entries(uint32_t party) {
+    static std::string previous;
+    static int lines = 0;
+    std::string s;
+    char one[48];
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t e = party + 0x18 + i * 0x14;
+        const uint32_t h = peek32(e);
+        if (h == 0xFFFFFFFF) continue;
+        const uint32_t type = peek32(e + 4);
+        _snprintf_s(one, sizeof(one), _TRUNCATE, "%s[%d] %08X %s/%d", s.empty() ? "" : ", ", i, h,
+                    type == 0 ? "self" : type == 1 ? "player" : type == 2 ? "NPC" : "?",
+                    static_cast<int>(peek32(e + 8)));
+        s += one;
+    }
+    if (s.empty()) s = "none";
+    if (s == previous) return;
+    previous = s;
+    if (++lines > 300) return;
+    const uint32_t me = game::player();
+    LOG_INFO("[coop] Party entries: %s (our character %08X)", s.c_str(), me ? peek32(me + 4) : 0);
+}
+
 void probe_state(bool force) {
     static double last = 0;
     static std::string previous;
@@ -1464,6 +1477,7 @@ void probe_state(bool force) {
     if (party > 0x10000) {
         put(" party %d/%d slot %d", static_cast<int>(peek32(party + 0x10)), static_cast<int>(peek32(party + 0x14)),
             static_cast<int>(peek32(party + 0x7C)));
+        log_party_entries(party);
     }
     put(" hasparty %d remote %d", raw_has_party() ? 1 : 0, static_cast<int>(game::remote_player_chrs().size()));
     put(" rules %s%s%s%s%s", st.active ? "A" : "-", st.host ? "H" : "-", st.guest ? "G" : "-", st.leaving ? "L" : "-",

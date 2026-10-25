@@ -35,6 +35,9 @@ void tick(bool visitor);
 // The session is over (settle): every party entry goes but our NPC phantoms (and our own entry), as when the
 // game is alone with a summoned NPC. Only in our own world.
 bool settle_party(uint32_t party);
+// The session is over with no NPC phantom of ours: every party entry goes but our own (type 0, which the game makes
+// with our character at 0xEFCB64 and takes out only at the world's teardown, 0xEFC942).
+void solo_party(uint32_t party);
 // Packet 48 and 49 handlers: the host's handle is put into ours, and a packet for an NPC this game cannot find
 // waits for tick.
 bool install();

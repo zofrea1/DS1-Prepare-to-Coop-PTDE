@@ -23,7 +23,7 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
         } else if (key == "invasionrewards") {
             c.invasion_rewards = settings_parse_bool(val);
         } else if (key == "invasioncooldown") {
-            // Minutes, fractions allowed (1.5 = 90 s), 0 to 15.
+            // Minutes, fractions allowed (1.5 = 90 s), 0 to 10.
             const double minutes = std::atof(val.c_str());
             c.invasion_cooldown_s = minutes <= 0 ? 0 : minutes >= 10 ? 600 : static_cast<int>(minutes * 60 + 0.5);
         } else if (key == "deathdebuffs") {

@@ -93,6 +93,16 @@ std::map<uint32_t, double> g_scaled_at; // EnemyIns -> when our scaling was firs
 std::map<uint32_t, int> g_forced_max;   // EnemyIns -> the max HP we wrote while the game did not update it
 double g_last_scale = 0;
 int g_debuff_applied = 0;          // debuff effect id on the local player (0 none)
+void (*g_wither_fn)() = nullptr;   // the Crimson Blossoms leave the inventory (coop.cpp)
+const char* g_wither_pending = nullptr;  // they are to wither once we have a character again (why)
+bool g_wither_tell = false;
+// The health the death debuff took, given back once our max HP is whole again (wither_blossoms).
+struct Refill {
+    int blossoms = 0;   // the debuff's strength when it came off; 0 nothing to give back
+    int hp = 0, max = 0;  // our health and max HP then
+    bool grow = false;  // the effect was on: the game raises the max first
+    double until = 0;
+} g_refill;
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -422,18 +432,61 @@ bool limbo_wanted() {
            (boss_fight() || rules::state().teammate_boss_fight || g_invader_present);
 }
 
+bool debuff_on(uint32_t me) {
+    for (int id = kDebuff; id < kDebuff + 5; ++id) {
+        if (find_effect(me, id, nullptr)) return true;
+    }
+    return false;
+}
+
+// The Crimson Blossoms wither outside our own rest (before_rest withers them there, and the rest heals): another
+// player's rest, or a death whose reload starts the world over (a team wipe, or no teammate to keep the world for).
+// The debuff is the price of a death that keeps the world; once the world's enemies are back, it goes. While we
+// live, the health it took comes back with the bar (a reload starts at full health anyway).
+void wither_blossoms(const char* why, bool tell) {
+    if (!g_wither_fn) return;
+    const uint32_t me = game::player();
+    if (!me || game::loading()) {
+        g_wither_pending = why;
+        g_wither_tell = tell;
+        return;
+    }
+    g_wither_pending = nullptr;
+    const int held = g_blossom_count_fn ? g_blossom_count_fn() : 0;
+    if (held > 0) {
+        LOG_INFO("[coop] %d Crimson Blossom(s) wither: %s", held, why);
+        if (g_cfg.death_debuffs && hp(me) > 0) {
+            g_refill.blossoms = std::min(5, held);
+            g_refill.hp = hp(me);
+            g_refill.max = max_hp(me);
+            g_refill.grow = debuff_on(me);
+            g_refill.until = now() + 3.0;
+        }
+        g_wither_fn();
+        if (tell) text::show(L"Another player rested: your Crimson Blossoms withered");
+    }
+    clear_death_debuff();
+}
+
 // Our death's respawn warp goes. In a session with a co-op teammate the reload keeps the world's dead characters
 // dead, as they are in the other games (deadlist.cpp): a death costs a Crimson Blossom, not the world. A team wipe
 // starts the world over in every game, and so does a rest (deadlist::note_rest). Decided now, when the warp goes,
 // after any wait: the teammates whose respawn went before ours say how theirs went, and ours follows them
-// (session::wipe_reload). True when the reload keeps the world (the others are told with our "went").
+// (session::wipe_reload). True when the reload keeps the world (the others are told with our "went"). When it
+// does not, the Crimson Blossoms wither, as at a rest.
 bool keep_dead_on_reload() {
-    if (!g_active || g_invader || !local_dead() || g_players < 2) return false;
-    if (session::wipe_reload(g_fell_at)) {
+    if (!g_active || g_invader || !local_dead()) return false;
+    bool keep = false;
+    if (g_players < 2) {
+        wither_blossoms("our reload starts the world over (no teammate)", false);
+    } else if (session::wipe_reload(g_fell_at)) {
         LOG_INFO("[coop] Team wipe: our reload starts the world over");
-        return false;
+        wither_blossoms("team wipe", false);
+    } else {
+        keep = deadlist::arm(game::own_world());
+        if (!keep) wither_blossoms("our reload starts the world over", false);
     }
-    return deadlist::arm(game::own_world());
+    return keep;
 }
 
 // The game's own ways of sending a summoned player home (the host left or died, the room is gone, a kick) end
@@ -497,7 +550,13 @@ char __cdecl hk_warp_kick() {
     }
     // Before the original body sets the warp request. A death is aimed at the bonfire; the empty map is not loaded.
     if (!g_bypass && rules::prepare_warp_kick(local_dead())) return 1;
-    if (!g_bypass && g_active && local_dead()) session::note_respawn_went(keep_dead_on_reload());
+    if (!g_bypass && local_dead()) {
+        if (g_active) {
+            session::note_respawn_went(keep_dead_on_reload());
+        } else {
+            wither_blossoms("our death's reload starts the world over", false);
+        }
+    }
     return g_warp_orig();
 }
 
@@ -874,6 +933,27 @@ void debuff_tick(uint32_t me) {
     if (g_debuff_applied) remove(me, g_debuff_applied);
     g_debuff_applied = 0;
     if (want && apply(me, want)) g_debuff_applied = want;
+}
+
+// The health the death debuff took comes back once our max HP is whole again (wither_blossoms): the bar grows and
+// fills with it, for the share of the max the debuff had (10% a Blossom).
+void refill_tick(uint32_t me) {
+    if (!g_refill.blossoms) return;
+    const int m = me ? max_hp(me) : 0;
+    if (!me || game::loading() || hp(me) <= 0 || now() > g_refill.until) {
+        LOG_INFO("[coop] The death debuff's health was not given back (%s)",
+                 !me || game::loading() ? "a load" : hp(me) <= 0 ? "we fell" : "our max HP did not grow back");
+        g_refill = {};
+        return;
+    }
+    if (g_refill.grow && m <= g_refill.max) return;  // the game has not raised the max yet
+    const int share = static_cast<int>(m * 0.1 * g_refill.blossoms + 0.5);
+    const int target = std::min(m, g_refill.hp + share);
+    const int was = hp(me);
+    if (was < target) *ptr<int>(me + 0x2D4) = target;
+    LOG_INFO("[coop] The death debuff's health came back: %d -> %d of %d (max was %d)", was, std::max(was, target), m,
+             g_refill.max);
+    g_refill = {};
 }
 
 // ---------------------------------------------------------------- shared light
@@ -1264,12 +1344,14 @@ void tick() {
         if (g_active && g_death_fn) g_death_fn();
     }
     if (me) g_was_alive = alive;
+    if (g_wither_pending && me && !game::loading()) wither_blossoms(g_wither_pending, g_wither_tell);
     // The debuff follows the Crimson Blossoms in the inventory (effects do not survive a map load).
     if (me && alive && !game::loading()) {
         debuff_tick(me);
     } else if (!me) {
         g_debuff_applied = 0;
     }
+    refill_tick(me);
     if (g_limbo) {
         if (!local_dead()) {
             g_limbo = false;
@@ -1338,6 +1420,7 @@ bool set_homeward_state_handler(bool (*fn)()) {
 void set_before_rest_handler(void (*fn)()) { g_before_rest_fn = fn; }
 void set_death_handler(void (*fn)()) { g_death_fn = fn; }
 void set_blossom_counter(int (*fn)()) { g_blossom_count_fn = fn; }
+void set_blossom_wither(void (*fn)()) { g_wither_fn = fn; }
 
 void clear_death_debuff() {
     const uint32_t me = game::player();
@@ -1363,6 +1446,8 @@ void remote_rest() {
         LOG_INFO("[coop] Another player rested: the world resets");
     }
     g_rest_heard = true;
+    // Anyone's rest brings the world's enemies back: everyone's Crimson Blossoms wither, as the one who rested.
+    if (g_active && !g_invader) wither_blossoms("another player rested", true);
     deadlist::note_rest();
     spectate::someone_rested();
     reset_after_rest("Another player");

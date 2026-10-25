@@ -30,7 +30,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
    | Dried Fingers | Host: taunt invaders; an invader searching for a world is 50% more likely to pick yours. | host |
    | Cursed Pendant | Curse your own world: it counts as pure black World Tendency until you use the pendant again, and the NPC invaders come even while you are hollow. | your own world: alone or as host |
-   | Crimson Blossom | Not used: one blooms with each death in a session (up to five), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0). They wither at a bonfire. | never |
+   | Crimson Blossom | Not used: one blooms with each death in a session (up to five), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0). They wither when anyone in the session rests (the health they took comes back) or the whole team falls. | never |
    | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
 
    The items are used like any other item (quick slot, the item animation); when one cannot be used it is
@@ -724,7 +724,10 @@ to `items::travel_key` (an Ember, Lord Soul or the Lordvessel handed over there 
 ### World rules
 
 - **Rest:** Lua `Util_RequestRegene` (`0xD5D820`, the bonfire rest event) first gives the items and withers the
-  blossoms, then tells the others, who reset their world the way a rest does (`WorldChrMan+0x2CC`). The bonfire's
+  blossoms, then tells the others, who reset their world the way a rest does (`WorldChrMan+0x2CC`) and wither their
+  blossoms too (`world::wither_blossoms`). The health the debuff took comes back: once the debuff's effect is off and
+  the game has raised the max HP, the player gets 10% of the new max per Blossom, up to the max. A death whose reload
+  starts the world over (a team wipe, or no co-op teammate in the session) withers them when its warp goes. The bonfire's
   "enemies about" test (`0xE3DF90` from `0xD58B49`) also answers yes while a living teammate reports a boss gauge
   (the 1.1.0 player report), so nobody rests during someone else's boss fight. A rest after a lost boss fight also
   reloads every game in which the boss is awake (see Spectating). The same answer stands a sitting player up: every

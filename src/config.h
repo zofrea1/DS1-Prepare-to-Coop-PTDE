@@ -19,8 +19,8 @@ struct CoopConfig {
     // Host: after an invasion of the world ends, no other invader comes in for this long (InvasionCooldown, in minutes
     // in the INI: 0 to 10).
     int invasion_cooldown_s = 180;
-    // Each death in a session adds a Crimson Blossom (up to five), lowering maximum HP until the next bonfire rest
-    // (on by default since 1.1.0).
+    // Each death in a session adds a Crimson Blossom (up to five), lowering maximum HP until anyone in the session
+    // rests or the whole team falls (on by default since 1.1.0).
     bool death_debuffs = true;
     // Guests run the world's events in their own game as the host does (Remastered Seamless Co-op's
     // rule): bosses, lifts, cutscenes, scripted enemies. false = the game's own co-op (host only).
@@ -39,7 +39,7 @@ struct CoopConfig {
     int enemy_health = 40;
     int enemy_damage = 0;
     int enemy_posture = 25;
-    int boss_health = 105;
+    int boss_health = 115;
     int boss_damage = 0;
     int boss_posture = 40;
     // Co-op characters live in their own save file (DRAKS0005.<extension>) so vanilla saves stay apart.

@@ -16,7 +16,7 @@ namespace coop::world {
 struct Config {
     bool death_debuffs = false;
     int enemy_health = 40, enemy_damage = 0, enemy_posture = 25;
-    int boss_health = 105, boss_damage = 0, boss_posture = 40;
+    int boss_health = 115, boss_damage = 0, boss_posture = 40;
 };
 
 bool install();
@@ -34,9 +34,12 @@ void set_before_rest_handler(void (*fn)());
 void set_death_handler(void (*fn)());
 // How many Crimson Blossoms the player carries (the death debuff's strength).
 void set_blossom_counter(int (*fn)());
+// Takes every Crimson Blossom out of the inventory: besides our own rest, another player's rest and a death whose
+// reload starts the world over (a team wipe) wither them, and the health the debuff took comes back.
+void set_blossom_wither(void (*fn)());
 // A bonfire rest: take off every death-debuff effect immediately. The inventory clear is separate.
 void clear_death_debuff();
-// Another player rested: reset this world (enemies respawn), clear rest-cured effects, end limbo.
+// Another player rested: reset this world (enemies respawn), wither the Crimson Blossoms, end limbo.
 void remote_rest();
 
 bool boss_fight();

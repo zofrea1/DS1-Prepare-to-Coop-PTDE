@@ -206,6 +206,7 @@ bool use_item(int32_t id) {
 }
 
 int blossom_count() { return coop::items::count(coop::items::kBlossom); }
+void wither_blossoms() { coop::items::remove_all(coop::items::kBlossom); }
 
 // ---------------------------------------------------------------- the Homeward miracle
 // Homeward (Magic 5210) puts on effect 580, which turns into 581 after 0.6 s: stateInfo 16, the return to the last
@@ -371,6 +372,7 @@ void coop_install(const CoopConfig& config) {
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
     coop::netrate::set_smoothing(g_cfg.net_smoothing);
     coop::world::set_blossom_counter(&blossom_count);
+    if (g_items) coop::world::set_blossom_wither(&wither_blossoms);
     coop::world::Config wc;
     wc.death_debuffs = g_cfg.death_debuffs;
     wc.enemy_health = g_cfg.enemy_health;

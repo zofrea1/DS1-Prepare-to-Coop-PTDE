@@ -96,7 +96,7 @@ const Def kDefs[kCount] = {
      L"In a cursed world the dark spirits come for the\nhollow as well as for the living."},
     {0, 0, 2033, L"Crimson Blossom", L"Accrues curse",
      L"A blood-red flower rooted in the Darksign, feeding\non its bearer.\n\nOne blooms with each death and saps "
-     L"the bearer's\nmaximum HP. They wither at a bonfire."},
+     L"the bearer's\nmaximum HP. They wither when anyone rests at a\nbonfire, or when the whole party has fallen."},
     {-93, 0, 2067, L"Parchment of Deliverance", L"Revives world allies",
      L"A parchment that calls back certain allies of the\nworld who have fallen.\n\nCosts souls, and returns you "
      L"to your last bonfire."},

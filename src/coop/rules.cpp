@@ -84,6 +84,8 @@ const char* leave_name(uint32_t ret) {
         case 0x00D2D310: return "OnIrregularLeaveSession: messages piling up for a member (0xD2D2F0)";
         case 0x00D2EF4C: return "OnIrregularLeaveSession: network memory low (0xD2EF0C)";
         case 0x00D2D16B: return "OnBeThxKickOut (0xD2D110)";
+        case 0x00D62919: return "LeaveSession, from an event script (0xD62900)";
+        case 0x00D62984: return "WarpNextStageKick, an event script sending this player home (0xD62930)";
         default: return "";
     }
 }
@@ -3407,6 +3409,79 @@ int apply_world_flag_snapshot(const uint8_t* data, size_t size) {
     return n;
 }
 
+// ---------------------------------------------------------------- the host's world state (flags 0-1999)
+// The flags below 10000 belong to no map (group 0, area 0, a block of 1000 per sub-block): the bosses killed (2-16),
+// the bells rung (812, 813), the state of every NPC (1000-1999). A summoned player is given the host's sub-blocks 0,
+// 1 and 5 by the game's join copy (0xD30A20 -> 0xD37F30), but a co-op guest of ours could keep the ones its visited-
+// world store held already (its own progress, or a world it had been in before). Its game ran the host's world's
+// events on that progress,
+// and the game's event sync took the runs into the host's world (hk_event_sync): Darksim arrived at Firelink Shrine
+// with both bells rung and the gargoyles dead in his copy, and the host's Lautrec went from his cell (1570) to Firelink
+// (1577) and on to "gone to Anor Londo" (1578), the state in which he has killed the Firekeeper; another NPC (6060)
+// moved on with them (2026-10-25, 11:18:08). The host sends its sub-blocks 0 and 1 to a co-op guest with the welcome
+// and again on arrival, and the guest's visited store takes them, all but the flags that belong to the player
+// (personal_flag), which come from the guest's own world.
+constexpr int kGlobalSubBlocks[] = {0, 1};
+constexpr size_t kGlobalEntry = 1 + kBlockBytes;  // sub-block, bits
+
+// Sub-block `sb` of the general block in a store (kStoreOwn or kStoreVisited), 0 if unreadable.
+uint32_t general_block(uint32_t efm, uint32_t store, int sb) {
+    uint32_t areas = 0, block = 0, size = 0;
+    if (!read32(efm + store, &areas) || !areas || !read32(areas + sb * 8, &block) ||
+        !read32(areas + sb * 8 + 4, &size) || size != kBlockBytes) {
+        return 0;
+    }
+    return block;
+}
+
+std::vector<uint8_t> world_global_snapshot() {
+    const uint32_t efm = game::event_flag_man();
+    if (!efm) return {};
+    std::vector<uint8_t> out(1, 0);
+    for (int sb : kGlobalSubBlocks) {
+        const uint32_t block = general_block(efm, kStoreOwn, sb);
+        uint8_t bits[kBlockBytes];
+        if (!block || !copy_from_game(bits, block, kBlockBytes)) return {};
+        out.push_back(static_cast<uint8_t>(sb));
+        out.insert(out.end(), bits, bits + kBlockBytes);
+        ++out[0];
+    }
+    return out;
+}
+
+int apply_world_globals(const uint8_t* data, size_t size, std::string* changes) {
+    const uint32_t efm = game::event_flag_man();
+    if (!efm || !data || size < 1 || size < 1 + data[0] * kGlobalEntry) return -1;
+    int changed = 0;
+    for (int i = 0; i < data[0]; ++i) {
+        const uint8_t* e = data + 1 + i * kGlobalEntry;
+        const int sb = e[0];
+        if (std::find(std::begin(kGlobalSubBlocks), std::end(kGlobalSubBlocks), sb) == std::end(kGlobalSubBlocks)) {
+            continue;
+        }
+        const uint32_t visited = general_block(efm, kStoreVisited, sb), own = general_block(efm, kStoreOwn, sb);
+        uint32_t want[kBlockBytes / 4], mine[kBlockBytes / 4], was[kBlockBytes / 4];
+        if (!visited || !own || visited == own || !copy_from_game(mine, own, kBlockBytes) ||
+            !copy_from_game(was, visited, kBlockBytes)) {
+            return -1;
+        }
+        std::memcpy(want, e + 1, kBlockBytes);
+        for (int idx = 0; idx < 1000; ++idx) {
+            const uint32_t mask = 1u << (31 - (idx & 31));  // the getter's bit (0xD38C40)
+            uint32_t& w = want[idx >> 5];
+            if (personal_flag(sb * 1000 + idx)) w = (w & ~mask) | (mine[idx >> 5] & mask);
+            if ((w & mask) != (was[idx >> 5] & mask)) {
+                if (++changed <= 24 && changes) {
+                    *changes += (changes->empty() ? "" : " ") + std::to_string(sb * 1000 + idx) +
+                                ((w & mask) ? "+" : "-");
+                }
+            }
+        }
+        if (!copy_to_game(visited, want, kBlockBytes)) return -1;
+    }
+    return changed;
+}
+
 // ---------------------------------------------------------------- who moves an enemy
 // In the game's co-op every game bids for the enemies around (WorldChrMan's update 0xE40A20 -> 0xE6D250,
 // stdcall(chr) ret 4: the authority level chr+0x204, plus 256 per step of the enemy's engagement (chr+0xF4), plus
@@ -3667,8 +3742,18 @@ int gauge_boss_of(uint32_t chr) {
     return 0;
 }
 
-// The boss of our first boss gauge (0 none), checked twice a second.
+bool chr_dead(uint32_t chr) {
+    int hp = 1;
+    return chr && read32(chr + 0x2D4, reinterpret_cast<uint32_t*>(&hp)) && hp <= 0;
+}
+
+// The boss of our first boss gauge (0 none), checked twice a second. A gauge whose boss is dead is no fight: a player
+// far from the Bell Gargoyles' fight had the second gargoyle's entry run end after the fight, and its game showed that
+// dead gargoyle's empty gauge when they walked up; their report told every game a boss fight was on (2026-10-25,
+// 11:41). The game takes a gauge down itself when its fight is won; one whose bosses have all been dead for 10 s is
+// taken down here (MenuMan +0xF60, two slots of 0x14: as the game's own clearing, 0xC2A460).
 int g_own_gauge_boss = 0;
+double g_dead_gauge_since = 0;
 
 void own_gauge_tick() {
     static double last = 0;
@@ -3677,21 +3762,176 @@ void own_gauge_tick() {
     last = t;
     g_own_gauge_boss = 0;
     uint32_t mm = 0;
-    if (game::loading() || !read32(kMenuManVar, &mm) || !mm) return;
+    if (game::loading() || !read32(kMenuManVar, &mm) || !mm) {
+        g_dead_gauge_since = 0;
+        return;
+    }
+    int shown = 0, dead = 0;
     for (uint32_t off : {0xF64u, 0xF78u}) {
         uint32_t h = 0xFFFFFFFF;
         if (!read32(mm + off, &h) || h == 0xFFFFFFFF) continue;
-        const int entity = gauge_boss_of(chr_of_handle(h));
+        ++shown;
+        const uint32_t chr = chr_of_handle(h);
+        const int entity = gauge_boss_of(chr);
+        if (chr_dead(chr)) {
+            ++dead;
+            continue;
+        }
         if (!entity) continue;
         if (!g_own_gauge_boss) g_own_gauge_boss = entity;
         mark_awake(entity, "our boss gauge");
     }
+    if (!shown || dead < shown) {
+        g_dead_gauge_since = 0;
+        return;
+    }
+    if (g_dead_gauge_since == 0) g_dead_gauge_since = t;
+    if (t - g_dead_gauge_since < 10.0) return;
+    g_dead_gauge_since = 0;
+    for (uint32_t slot = 0; slot < 2; ++slot) {
+        const uint32_t s = mm + 0xF60 + slot * 0x14;
+        *ptr<int32_t>(s) = -1;
+        *ptr<int32_t>(s + 4) = -1;
+        *ptr<int32_t>(s + 8) = 0;
+        *ptr<int32_t>(s + 0xC) = 0;
+        *ptr<uint8_t>(s + 0x10) = 0;
+    }
+    LOG_INFO("[coop] Boss gauge taken down: its boss has been dead for 10 s (the fight's own end did not come here)");
 }
 
 int own_gauge_boss() { return g_own_gauge_boss; }
 
+bool gauge_boss_dead(uint32_t handle) { return chr_dead(chr_of_handle(handle)); }
+
+// Diagnostic for the 2026-10-25 report (Solaire, summoned by the host, swung at a guest who came near him, neither
+// hurting the other): while an NPC is in the party, each entry's character type (+0x70) and team (+0x74, the relation
+// table's row; 0xE68C80 may answer otherwise) whenever they change.
+void party_team_tick() {
+    static double last = 0;
+    static std::string logged;
+    static int lines = 0;
+    const double t = seconds();
+    if (t - last < 1.0 || lines >= 40) return;
+    last = t;
+    uint32_t gm = game::game_man(), party = 0;
+    if (!g_state.active || game::loading() || !gm || !read32(gm + game::kGmParty, &party) || party < 0x10000) return;
+    std::string line;
+    bool npc = false;
+    for (uint32_t i = 0; i < 4; ++i) {
+        uint32_t handle = 0xFFFFFFFF, type = 0, chr_type = 0, team = 0;
+        if (!read32(party + 0x18 + i * 0x14, &handle) || handle == 0xFFFFFFFF) continue;
+        read32(party + 0x18 + i * 0x14 + 4, &type);
+        const uint32_t chr = chr_of_handle(handle);
+        if (chr) {
+            read32(chr + 0x70, &chr_type);
+            read32(chr + 0x74, &team);
+        }
+        npc |= type == 2;
+        char e[64];
+        std::snprintf(e, sizeof(e), "%s[%u] %s chr type %u team %u", line.empty() ? "" : ", ", i,
+                      chr == game::player() ? "us" : type == 2 ? "NPC" : "player", chr_type, team);
+        line += e;
+    }
+    if (!npc || line == logged) return;
+    logged = line;
+    ++lines;
+    LOG_INFO("[coop] Party teams: %s", line.c_str());
+}
+
 void note_teammate_boss(int entity) {
-    if (gauge_boss(entity) && chr_by_entity(entity)) mark_awake(entity, "a teammate's boss gauge");
+    const uint32_t chr = gauge_boss(entity) ? chr_by_entity(entity) : 0;
+    if (chr && !chr_dead(chr)) mark_awake(entity, "a teammate's boss gauge");
+}
+
+void gauge_boss_chrs(std::vector<uint32_t>* out) {
+    for (int e : kGaugeBosses) {
+        if (const uint32_t chr = chr_by_entity(e)) out->push_back(chr);
+    }
+}
+
+// A boss whose game changed (the bids: the player whose game moved it fell, or another player came nearer) starts in
+// the game that takes it with no one to fight: its own AI there had been idle while the network moved it. After the
+// host fell to the Bell Gargoyles, the guest's game took the second gargoyle, which walked back toward its perch past
+// the guest and fought only once the guest hit it (2026-10-25, 11:38-11:40). When this game takes a boss whose fight
+// began here, while our player stands within 40 m of it, the boss is turned on us with the event scripts' own
+// ForceChangeTarget (0xD61E00: stdcall(entity, target), the target 10000 = the local player; ret 8). At most every
+// 10 s per boss, so bosses passed between two players' games do not keep changing targets.
+constexpr uint32_t kForceChangeTarget = 0x00D61E00;
+std::map<uint32_t, std::pair<int, double>> g_boss_moved_by;  // chr -> who moves it (1 us, 2 network), last turned
+
+bool force_change_target(int entity, int target) {
+    __try {
+        return reinterpret_cast<bool(__stdcall*)(int, int)>(kForceChangeTarget)(entity, target);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void boss_handover_tick() {
+    static double last = 0;
+    const double t = seconds();
+    if (t - last < 0.25) return;
+    last = t;
+    const uint32_t me = game::player();
+    game::Vec3 mine{};
+    if (!seamless_rules() || game::loading() || !me || world::local_dead() || !game::position(&mine, nullptr)) {
+        g_boss_moved_by.clear();
+        return;
+    }
+    for (int e : kGaugeBosses) {
+        const uint32_t chr = chr_by_entity(e);
+        uint32_t current = 0, own_ai = 0, net_ai = 0;
+        if (!chr || !read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai)) {
+            continue;
+        }
+        const int by = current == own_ai ? 1 : current == net_ai ? 2 : 0;
+        auto& s = g_boss_moved_by[chr];
+        const int was = s.first;
+        s.first = by;
+        if (was != 2 || by != 1 || chr_dead(chr) || ai_off_here(chr) || !g_awake_bosses.count(e)) continue;
+        game::Vec3 at{};
+        if (!game::chr_position(chr, &at)) continue;
+        const float d = dist3(mine, at);
+        if (d > 40.0f || t - s.second < 10.0) continue;
+        s.second = t;
+        const bool turned = force_change_target(e, 10000);
+        LOG_INFO("[coop] Boss %d: this game moves it now (another game did); turned on our player %.0f m away%s", e, d,
+                 turned ? "" : " (refused)");
+    }
+}
+
+// An event waiting for an animation to end (Force Animation Playback with ShouldWaitForCompletion, 2003[18], and the
+// wait at 0xBC2D2B: 0xBB9A20, cdecl(entity, animation) -> the wait, which the callers do not keep). The end never comes
+// on a copy another game moves: the Bell Gargoyles' 11015396 brings the second gargoyle in with its animation 7001 and
+// only then takes its invincibility off and shows its gauge. In the game of a player far from the fight it waited
+// there the whole fight, so the gargoyle could not die in that game and its reward (11010750, lot 53500100) never came;
+// when the player walked up after the fight it went on and showed the dead gargoyle's gauge (2026-10-25). The Taurus
+// Demon's leap waited 81 s the same way (2026-10-18). Such a run goes on at once: the game that moves the character
+// plays the animation, and this game's copy follows the network.
+constexpr uint32_t kAnimWait = 0x00BB9A20;
+constexpr uint32_t kAnimWaitSites[] = {0x00BC1CAD, 0x00BC2D2B};
+uint32_t g_anim_wait = kAnimWait;
+
+bool moved_elsewhere(uint32_t chr) {
+    if (!chr || chr == game::player()) return false;
+    if (is_remote_player(chr)) return true;
+    uint32_t current = 0, net_ai = 0;
+    return read32(chr + 0x2C, &current) && read32(chr + 0x414, &net_ai) && current && current == net_ai;
+}
+
+uint32_t __cdecl hk_anim_wait(int entity, int anim) {
+    if (g_world_events && seamless_rules() && moved_elsewhere(chr_by_entity(entity))) {
+        static std::set<int64_t> logged;
+        const int64_t key = static_cast<int64_t>(entity) << 32 | static_cast<uint32_t>(anim);
+        if (logged.size() < 40 && logged.insert(key).second) {
+            uint32_t id = 0;
+            if (g_cur_event) read32(g_cur_event + 0x28, &id);
+            LOG_INFO("[coop] Event %d: no wait for animation %d on %d (another game moves it; ours follows)",
+                     static_cast<int>(id), anim, entity);
+        }
+        return 0;
+    }
+    return reinterpret_cast<uint32_t(__cdecl*)(int, int)>(g_anim_wait)(entity, anim);
 }
 
 void __stdcall note_ai_state(int entity, int state) {
@@ -4013,6 +4253,10 @@ int install() {
                                        &g_event_sync_orig));
     failed += install_one("random picks of another game's runs",
                           redirect_call(kRandomFlagSite, kRandomFlag, reinterpret_cast<void*>(&hk_random_flag)));
+    for (uint32_t site : kAnimWaitSites) {
+        failed += install_one("animation waits on copies another game moves",
+                              redirect_call(site, kAnimWait, reinterpret_cast<void*>(&hk_anim_wait)));
+    }
     failed += install_one("enemies moved by a game whose player is near",
                           redirect_call(kNetPrioritySite, kNetPriority, reinterpret_cast<void*>(&hk_net_priority)));
     failed += install_one("Black Separation Crystal (guest)",
@@ -4232,6 +4476,8 @@ void tick() {
     track_watched_enemies();
     track_boss_control();
     own_gauge_tick();
+    boss_handover_tick();
+    party_team_tick();
     anim_watch_tick();
     invader_walls_tick();
     if (!seamless_rules()) return;

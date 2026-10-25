@@ -12,15 +12,15 @@
 // came for a player in one frame only the newest is taken (the game took each, and the second jumped), and a
 // character covers each update in at least the gap plus the smoothing (the game's 20% of slack is a few ms at thirty
 // a second, so an update a little late made it stop and go). A character is then drawn about one update interval
-// plus the smoothing behind, plus the ping: about 42 ms at sixty a second with the default 25 ms.
+// plus the smoothing behind, plus the ping: about 65 ms at thirty a second with the default 32 ms.
 //
-// A game sends at most one update a frame: one drawing fewer frames a second than the rate sends every frame (30 a
-// second at 30 FPS), and the others' games take the gap as it comes.
+// A game sends at most one update a frame: one drawing fewer frames a second than the rate sends every frame (25 a
+// second at 25 FPS), and the others' games take the gap as it comes.
 
 namespace coop::netrate {
 
 constexpr int kVanilla = 6;         // the game's own rate: every 5 frames at 30 FPS
-constexpr int kMax = 60;            // once per 60 FPS frame
+constexpr int kMax = 30;            // once per 30 FPS frame
 constexpr int kMaxSmoothing = 200;  // ms
 
 // The receiving side's patches (newest update, movement and turn in the update's time). False when this build of the

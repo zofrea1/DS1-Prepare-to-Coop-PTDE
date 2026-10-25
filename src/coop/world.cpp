@@ -584,9 +584,25 @@ uint32_t boss_handle(int slot) {
 }
 
 // ---------------------------------------------------------------- scaling
-// Every enemy gets the scaling row for the number of other co-op players in the session (1..5); characters
-// on team 7 (bosses) get the boss row. As in Remastered Seamless Co-op.
+// Every enemy gets the scaling row for the number of other co-op players in the session (1..5); bosses get the boss
+// row, as in Remastered Seamless Co-op: characters on team 7, and every boss with a health bar (rules::gauge_boss_chrs),
+// since some are on the enemies' team 6: the Bell Gargoyles had the enemy row (2026-10-25: the second one died at
+// 1799 max HP, 999 x 1.8, against the boss row's 3097, and Solaire seemed to cut through it).
 constexpr int kBossTeam = 7;
+
+// The game's own boss buff for co-op (EMEVD 2009[04] Activate Multiplayer-dependant Buffs, at almost every boss fight's
+// start: 0xD77620, edx = the event proxy, stdcall(entity), runs the script Lua_MultiDoping) came on top of the boss row:
+// the first gargoyle's 2698 max HP was 999 x 1.8 x 1.5. Remastered Seamless Co-op makes its ApplyMultiDoping do
+// nothing; so do the two calls here (0xBC0189, 0xBC01A0) while Prepare to Co-op is on.
+constexpr uint32_t kMultiDoping = 0x00D77620;
+constexpr uint32_t kMultiDopingSites[] = {0x00BC0189, 0x00BC01A0};
+
+void __stdcall no_multi_doping(int entity) {
+    static std::set<int> logged;
+    if (logged.size() < 40 && logged.insert(entity).second) {
+        LOG_INFO("[coop] Boss %d: the game's own co-op buff left out (BossHealthScaling does it)", entity);
+    }
+}
 
 template <typename F>
 void each_enemy(F&& fn) {
@@ -699,11 +715,14 @@ void scale_tick() {
         g_logged_level = level;
     }
     std::set<uint32_t> seen;
+    std::vector<uint32_t> gauge_bosses;
+    rules::gauge_boss_chrs(&gauge_bosses);
     each_enemy([&](uint32_t chr) {
         seen.insert(chr);
         uint32_t team = 0;
         read32(chr + 0x74, &team);
-        const bool boss = static_cast<int>(team) == kBossTeam;
+        const bool boss = static_cast<int>(team) == kBossTeam ||
+                          std::find(gauge_bosses.begin(), gauge_bosses.end(), chr) != gauge_bosses.end();
         const int want = level ? (boss ? kScaleBoss : kScaleEnemy) + level - 1 : 0;
         auto it = g_scaled.find(chr);
         const int have = it == g_scaled.end() ? 0 : it->second;
@@ -750,6 +769,97 @@ void scale_tick() {
     for (auto it = g_forced_max.begin(); it != g_forced_max.end();) {
         it = seen.count(it->first) ? std::next(it) : g_forced_max.erase(it);
     }
+}
+
+// ---------------------------------------------------------------- our own world's bonfires
+// The bonfires' state lives in a table beside the event flags ([[0x137E204]+0xB48], a list at +0x24 of nodes {next,
+// ?, entry}; entry 0x14 bytes: +4 the bonfire object, +8/+0xA two counts, +0xC lit, +0xD state, +0xE kindle level;
+// 0xBD8870 finds one, 0xBD8960 sets +0xD/+0xE, the bonfire menu's Kindle reads +0xE). It is not part of the flag
+// stores, so a visit to another world can leave that world's bonfires in it: after the host invaded a world further on
+// (2026-10-25), their own Undead Burg bonfire gave 15 Estus (kindled twice), which no one had kindled. While we are in
+// our own world the table is copied twice a second; back home from another world, our bonfires whose kindling changed
+// meanwhile get theirs back. A change at home is logged with what the session was doing, to find any other way in.
+constexpr uint32_t kBonfireOwner = 0x0137E204;
+struct BonfireState {
+    uint16_t a = 0, b = 0;
+    uint8_t lit = 0, state = 0, kindle = 0;
+    bool operator==(const BonfireState& o) const {
+        return a == o.a && b == o.b && lit == o.lit && state == o.state && kindle == o.kindle;
+    }
+};
+std::map<int, BonfireState> g_home_bonfires;
+bool g_away_from_home = false;
+
+// Calls fn(entry address, bonfire object) for each entry; false if the table is not there.
+template <typename F>
+bool each_bonfire(F&& fn) {
+    uint32_t owner = 0, table = 0, head = 0, node = 0;
+    if (!read32(kBonfireOwner, &owner) || !owner || !read32(owner + 0xB48, &table) || !table ||
+        !read32(table + 0x24, &head) || !head || !read32(head, &node)) {
+        return false;
+    }
+    for (int guard = 0; node && node != head && guard < 512; ++guard) {
+        uint32_t entry = 0, object = 0;
+        if (read32(node + 8, &entry) && entry && read32(entry + 4, &object)) fn(entry, static_cast<int>(object));
+        if (!read32(node, &node)) return false;
+    }
+    return true;
+}
+
+BonfireState read_bonfire(uint32_t entry) {
+    BonfireState st;
+    uint32_t counts = 0;
+    read32(entry + 8, &counts);
+    st.a = static_cast<uint16_t>(counts & 0xFFFF);
+    st.b = static_cast<uint16_t>(counts >> 16);
+    read8(entry + 0xC, &st.lit);
+    read8(entry + 0xD, &st.state);
+    read8(entry + 0xE, &st.kindle);
+    return st;
+}
+
+void bonfire_tick() {
+    static double last = 0;
+    if (now() - last < 0.5) return;
+    last = now();
+    if (!game::in_game() || game::loading()) return;
+    if (!game::own_world()) {
+        g_away_from_home = true;  // the copy waits for us at home
+        return;
+    }
+    const bool back = g_away_from_home;
+    g_away_from_home = false;
+    std::map<int, BonfireState> now_seen;
+    const bool read = each_bonfire([&](uint32_t entry, int object) {
+        const BonfireState st = read_bonfire(entry);
+        const auto it = g_home_bonfires.find(object);
+        if (back && it != g_home_bonfires.end() && !(it->second == st)) {
+            // The kindling only: a bonfire lit in the host's world is lit in a guest's own world too (its flag).
+            BonfireState kept = st;
+            if (st.kindle != it->second.kindle || st.a != it->second.a || st.b != it->second.b) {
+                *ptr<uint16_t>(entry + 8) = it->second.a;
+                *ptr<uint16_t>(entry + 0xA) = it->second.b;
+                *ptr<uint8_t>(entry + 0xE) = it->second.kindle;
+                kept.a = it->second.a;
+                kept.b = it->second.b;
+                kept.kindle = it->second.kindle;
+            }
+            LOG_INFO("[coop] Bonfire %d: changed while we were away (kindle level %d -> %d%s; state %d -> %d, lit %d -> %d "
+                     "left as they are)", object, it->second.kindle, st.kindle,
+                     kept.kindle != st.kindle ? ", put back" : "", it->second.state, st.state, it->second.lit, st.lit);
+            now_seen[object] = kept;
+            return;
+        }
+        if (!back && it != g_home_bonfires.end() && it->second.kindle != st.kindle) {
+            LOG_INFO("[coop] Bonfire %d: kindle level %d -> %d at home (%s)", object, it->second.kindle, st.kindle,
+                     g_active ? (g_invader_present ? "in a session, an invader here" : "in a session") : "no session");
+        } else if (back && it == g_home_bonfires.end() && st.kindle > 0) {
+            LOG_INFO("[coop] Bonfire %d: new in our table after a visit, kindle level %d (left as it is)", object,
+                     st.kindle);
+        }
+        now_seen[object] = st;
+    });
+    if (read) g_home_bonfires.swap(now_seen);
 }
 
 // The death debuff: the row for the number of Crimson Blossoms the player carries. With DeathDebuffs off,
@@ -1093,6 +1203,11 @@ bool install() {
         ++failed;
         LOG_ERROR("[coop] Player param lookup guard did not match this build");
     }
+    for (uint32_t site : kMultiDopingSites) {
+        if (!redirect_call(site, kMultiDoping, reinterpret_cast<void*>(&no_multi_doping))) {
+            LOG_ERROR("[coop] Enemy scaling: the game's own boss co-op buff at %08X did not match this build", site);
+        }
+    }
     {
         static const uint8_t k[7] = {0x33, 0xC0, 0x53, 0x8B, 0x5C, 0x24, 0x08};
         g_fx_orig = detour(kSpEffectGetter, k, sizeof(k), reinterpret_cast<void*>(&hk_fx_row));
@@ -1141,6 +1256,7 @@ void configure(const Config& cfg) {
 }
 
 void tick() {
+    bonfire_tick();
     const uint32_t me = game::player();
     const bool alive = me && hp(me) > 0;
     if (me && g_was_alive && !alive) {
@@ -1270,7 +1386,14 @@ bool scale_ready(uint32_t chr) {
     return std::abs(max_hp(chr) - scaled_max(b->second, it->second)) <= 1;
 }
 
-bool boss_fight() { return boss_handle(0) != 0xFFFFFFFF || boss_handle(1) != 0xFFFFFFFF; }
+// A gauge counts unless its boss is here and dead (a gauge left up after its fight: rules::own_gauge_tick).
+bool boss_fight() {
+    for (int slot = 0; slot < 2; ++slot) {
+        const uint32_t h = boss_handle(slot);
+        if (h != 0xFFFFFFFF && !rules::gauge_boss_dead(h)) return true;
+    }
+    return false;
+}
 
 // The death we are in is part of a team wipe, as keep_dead_on_reload decides it when the warp goes (asked by the
 // death text, deathtext.cpp).
@@ -1284,6 +1407,8 @@ bool local_dead() {
     const uint32_t me = game::player();
     return me && hp(me) <= 0;
 }
+
+bool has_effect(uint32_t chr, int id) { return find_effect(chr, id, nullptr) != 0; }
 
 bool in_limbo() { return g_limbo; }
 

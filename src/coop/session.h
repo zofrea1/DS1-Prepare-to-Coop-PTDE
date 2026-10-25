@@ -57,6 +57,7 @@ struct PeerInfo {
     uint32_t dead_list_sent = 0;  // the list of our world's dead last sent them while they were down (0 none)
     uint32_t hurt_list_sent = 0;  // the list of our world's hurt enemies last sent them while they were down
     int bones = -1;               // the Homeward Bones they hold, as they report it (1.3.0), -1 not reported
+    bool disguised = false;       // Chameleon is on them (1.3.0): their floating health bar is hidden
 };
 
 void configure(const Config& cfg);

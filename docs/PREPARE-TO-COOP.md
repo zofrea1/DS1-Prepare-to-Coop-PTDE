@@ -37,7 +37,8 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    refused the way the game refuses any item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1**
    host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Each press is written to the log.
 3. Another player's floating health bar shows their character's name with their soul level and ping, or
-   ping, soul level or deaths alone (`OverheadPlayerDisplay`). Joins, departures, deaths and changes to the
+   ping, soul level or deaths alone (`OverheadPlayerDisplay`). Everyone sees everyone's, invaders included (the
+   game hides an invader's from the host and guests), except a player under Chameleon (SpEffect 1500), who has none. Joins, departures, deaths and changes to the
    world rules are told at the bottom of the screen, with character names (the game's own records of other
    players hold their Steam names).
 
@@ -89,7 +90,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | World rules | The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes the host's world pure black World Tendency (a player can also curse their own world without a session), and lifts the curse when used again: every map's disaster flag is cleared and the black phantoms of the current map die, as when the game's own events end a disaster. Each area with black phantoms starts its own disaster when a player enters it; the game checks every 600 s whether the world is still black and ends the disaster only if not, so in a cursed world the phantoms stay. The curse lasts through sessions but is not saved: after the game is restarted, or another character is loaded, the world is no longer cursed and disasters left from the curse end; otherwise white tendency events never happen and black ones only in a cursed world (with Prepare to Co-op on, world tendency is replaced in every world, as in ds1sc). In a cursed world the NPC invasions (Kirk, Paladin Leeroy, Maneater Mildred, Xanthous King Jeremiah) also come for a hollow player, whatever their covenant (the game has no covenant condition on them: their only tests are human form and the area's boss still alive); without the curse they need human form, as in the game. |
 | Spectating | Bosses and invaders are fought as one team. Falling during a boss fight (yours, or a teammate's anywhere in the world) or while an invader is in the world, with another co-op player (host or guest) still standing, you do not die yet: after your fall the camera follows a living teammate in full colour, turned with your own stick (D-pad left/right or the arrow keys switch between teammates). While you watch, your game draws the world around that teammate and updates their character every frame, so a teammate far away is seen in full detail and moves smoothly. Your death ("YOU DIED", the lost souls, the respawn) goes ahead once the fight is decided: the boss is gone and no invader is left, every co-op player has fallen, someone rests at a bonfire, the host takes everyone home (Homeward Bone, Darksign, Homeward miracle; you follow once back on your feet), or after ten minutes. When every co-op player has fallen (a team wipe), the death text says "YOUR TEAM DIED" (every other death keeps "YOU DIED"), each respawn waits after it until everyone's death has got there, and then every game reloads at once: the boss and the enemies start over for everyone, as after a death in single player. |
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used; the host's Darksign can, and sends the invaders home (nobody wins) before everyone goes to the host's bonfire at its usual cost. Boss fogs stay shut for the host and the guests while an invader is in the world, and nobody joins while anyone in the world is in a boss fight: an invader tries another world (a 1.3.0 invader's search passes over such a world; older invaders' searches do not list it), a co-op guest is told to come back when the fight is over. After an invasion ends, the world takes no other invader for `InvasionCooldown` minutes (default 3). An invader who finds no world that can take them is told why (a cooldown with the time left, a boss fight, a full world). An invader arrives at the game's own black invasion point for the play region the host stands in, else at the nearest one of the host's map within 30 m across and 6 m up or down, else on the host (Firelink Shrine and the Undead Asylum have none; invasions are allowed there). The invader wins when every co-op player has fallen (the host's death alone does not end an invasion while a guest stands; with a 1.0.0 invader it still does); when the invader dies the invasion fails. An invader can drink from the Estus Flask (the game forbids it to invaders): up to 5 charges per invasion, any more are set aside on arrival and come back once home, so an invasion costs only what was drunk. With `InvasionRewards`, the winning side gets Humanity: the invader one per co-op player defeated (once home), or, when the invader falls, the host and every guest one each. |
-| Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7. Enemies far from a player get the same scaled health in that player's game, so a fight ends at the same time in every game. |
+| Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7 and every boss with a health bar (the Bell Gargoyles are on team 6). The game's own co-op boss buff (2009[04], Lua_MultiDoping) is left out, as Remastered Seamless Co-op leaves out its ApplyMultiDoping: it came on top (the first gargoyle at 999 x 1.8 x 1.5). Enemies far from a player get the same scaled health in that player's game, so a fight ends at the same time in every game. |
 | NPC summons | The host can summon NPC phantoms (Solaire and the other white signs). Every guest, and an invader, sees the same gold phantom, also when they join later or arrive somewhere else in the world, and he fights the invader. He stays when the host closes the world. He takes one of the four places. |
 | Shared light | Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game. |
 
@@ -584,20 +585,21 @@ start whatever the rate. The update loop (`0xE1F950`) decodes every update that 
 `0xD30140`, back to `0xE1F980`); the gap is zeroed after each, so the second of two in one frame jumps. Enemies take
 only the newest position each frame (`0xE556F0` overwrites, `0xE55360` takes it once).
 
-`NetworkTickRate` (the host's, sent behind the state message, 1.3.0; 6 to 60, default 60) sets the player update's
+`NetworkTickRate` (the host's, sent behind the state message, 1.3.0; 6 to 30, default 30) sets the player update's
 reload to 30 / rate frames and the enemies' round to 0.25 x 6 / rate s in every game of the session. One update goes a
 frame at most, so a game drawing fewer frames than the rate sends every frame; with the FPS Unlock's added reload its
-counter then sank a little further each frame and wrapped round (at 60 a second and 30 FPS after 36 minutes, with no
-update for 18 after), so a stub on the send test (`0xE1DDE4`) holds it at minus one reload. A round of enemy positions
-goes every other frame at best (a round's first call is skipped when the last round sent the frame before, `+0x1CC`):
-at 60 a second, 30 rounds a second at 60 FPS and 15 at 30 FPS. Above the game's own rate the
+counter then sank a little further each frame and in the end wrapped round (no update for a quarter of an hour after),
+so a stub on the send test (`0xE1DDE4`) holds it at minus one reload. A round of enemy positions goes every other frame
+at best (a round's first call is skipped when the last round sent the frame before, `+0x1CC`): at 30 a second, 15 to
+20 rounds a second at 60 FPS and 15 at 30 FPS. (60 a second was tried: player animations missed steps at speed.)
+Above the game's own rate the
 receiving side changes too (`netrate.cpp`): the pop takes every update that is waiting and keeps the newest (each
 holds the whole state); the movement covers an update in at least the gap plus `NetworkSmoothing` (each player's
-own, default 25 ms; stubs at `0xE1F3A1` and `0xE21663`), where the game's 20% (10%) of slack is a few ms at thirty
+own, default 32 ms; stubs at `0xE1F3A1` and `0xE21663`), where the game's 20% (10%) of slack is a few ms at thirty
 a second and an update a little late left the character standing; and the turn is a 30 FPS frame over the gap plus
 the smoothing (stubs at `0xE1F83C` and `0xE1F8CB`, never less than the game's fifth, at most the whole turn). A
-character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 42 ms
-at sixty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
+character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 65 ms
+at thirty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
 older keeps sending six a second.
 
 ### Update check
@@ -653,6 +655,39 @@ bid the least instead (above). Each event animation on a boss or the Hellkite is
 In a guest's game the host's NPCs (teams 8 and 9) die only when the host's game says so (its HP report or its list
 of the dead) while the host is in the same map, also while the host's game is loading and has not reported them
 yet: Oscar otherwise died in the guest's game during the host's load and dropped his items under the living Oscar.
+
+The flags below 10000 belong to no map (group 0, area 0, a block per thousand): the bosses killed (2-16), the bells
+(812, 813) and every NPC's state (1000-1999). The game's join copy (`0xD30A20` -> `0xD37F30`) gives a summoned
+player the host's sub-blocks 0, 1 and 5, but a co-op guest could keep what its visited-world store held already. Its
+game then ran the host's world's events on that progress, and the event sync (`0xBC4000`, which moves another game's
+copy of an event past a condition that passed) took the runs into the host's world: a guest with both bells rung and
+the gargoyles dead arrived at Firelink Shrine, and the host's Lautrec went from his cell (1570) to Firelink (1577) and
+on to "gone to Anor Londo" (1578), the state in which he has killed the Firekeeper (2026-10-25). From 1.3.0 the host
+sends its sub-blocks 0 and 1 (`kWorldGlobals`) with the welcome and again on arrival; the guest's visited store takes
+them, all but the flags that belong to the player (`personal_flag`), which come from the guest's own world. A guest
+of 1.2.0 or older ignores the message.
+
+An event that waits for an animation to end (Force Animation Playback with ShouldWaitForCompletion; the wait is
+`0xBB9A20`, from `0xBC1CAD` and `0xBC2D2B`) waited for ever on a copy another game moves: the end only comes in the
+game that plays it. The Bell Gargoyles' 11015396 brings the second gargoyle in with its animation 7001 and only then
+takes its invincibility off and shows its gauge, so in the game of a player far from the fight the second gargoyle
+stayed invincible, never died there and its reward (11010750, item lot 53500100) never came; when that player walked
+up after the fight the event went on and showed the dead gargoyle's empty gauge, and their report put every game in a
+boss fight. Such a wait is skipped now for a character another game moves (an enemy on its NetAIManipulator, or
+another player). A gauge whose boss is dead is no fight (`world::boss_fight`, `rules::own_gauge_tick`), and one whose
+bosses have all been dead for 10 s is taken down.
+
+When a boss passes to this game (another game moved it: its player fell, or ours came nearer), its AI here had been
+idle and had no one to fight: after the host fell to the gargoyles, the guest's game took the second one, which walked
+back toward its perch and fought only once the guest hit it. A boss whose fight began here and that passes to this
+game while our player stands within 40 m is turned on our player with the event scripts' ForceChangeTarget
+(`0xD61E00`, stdcall(entity, 10000)), at most every 10 s per boss.
+
+The bonfires' state is a table beside the flag stores (`[[0x137E204]+0xB48]`, a list at +0x24; an entry holds the
+bonfire object at +4, two counts at +8 and +0xA, lit +0xC, state +0xD and the kindle level +0xE). A visit to another
+world can leave that world's states in it: after the host invaded a world further on, their own Undead Burg bonfire
+gave 15 Estus. While a player is in their own world the table is copied twice a second; back home from another world,
+the bonfires whose kindling changed meanwhile get theirs back (logged), and a kindle level that changes at home is logged.
 
 ### Items
 

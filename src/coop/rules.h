@@ -7,6 +7,7 @@
 // Remastered Seamless Co-op's world rules (teams, world tendency, bonfire warps and lighting).
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace coop::rules {
@@ -65,6 +66,18 @@ std::vector<uint8_t> world_flag_snapshot();
 // Guest: the host's snapshot replaces those groups in the visited world's store. Returns the blocks written,
 // or -1 for a snapshot that does not fit this store (nothing is written then).
 int apply_world_flag_snapshot(const uint8_t* data, size_t size);
+// Host: the world's state below the map flags (flags 0-1999: bosses, bells, NPCs) for a co-op guest; empty if
+// unreadable.
+std::vector<uint8_t> world_global_snapshot();
+// Guest: the host's world state replaces ours in the visited world's store, but for the flags that belong to the
+// player (kept from our own world). Returns how many flags changed (the first few in `changes`), -1 if unreadable.
+int apply_world_globals(const uint8_t* data, size_t size, std::string* changes);
+// A boss gauge's character is here and dead (a gauge left up after its fight).
+bool gauge_boss_dead(uint32_t handle);
+// The characters of the bosses with a health bar that are in this world now.
+void gauge_boss_chrs(std::vector<uint32_t>* out);
+// The character of a handle (0x10000000 | block << 14 | index), 0 if it is not in this world.
+uint32_t chr_of_handle(uint32_t handle);
 
 // Bonfire travel (WarpNextStage_Bonfire; `bonfire` is the warp's point, the bonfire object - 980): the host's own
 // warp goes ahead and `fn(bonfire)` tells the guests, who follow; a guest's own warp does not go ahead, `fn(bonfire)`

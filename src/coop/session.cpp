@@ -93,6 +93,7 @@ enum MsgType : uint8_t {
     kNpcPhantoms = 27,   // 1.3.0, host -> guests and invaders: the NPC phantoms in the host's party (summons.cpp)
     kHurtList = 28,      // 1.3.0: my world's hurt enemies, to a fallen teammate (as kDeadList; deadlist.cpp)
     kSentHome = 29,      // 1.3.0, host -> an invader: the host's Darksign sends you home (no outcome)
+    kWorldGlobals = 30,  // 1.3.0, host -> a co-op guest: the host's world state below the map flags (flags 0-1999)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -188,6 +189,11 @@ struct InfoMore2 {
 struct InfoMore3 {
     InfoMore2 more2;
     int32_t bones;  // the Homeward Bones the sender holds (each one the host uses takes one from every player)
+};
+struct InfoMore4 {
+    InfoMore3 more3;
+    uint8_t disguised;  // Chameleon is on the sender (SpEffect 1500): the others hide their floating health bar
+    uint8_t spare[3];
 };
 struct BonfireMsg {
     Header h;
@@ -558,6 +564,8 @@ bool g_invade_open = false;  // host: our lobby tells invaders' searches we take
 // was drunk. Kept in memory only: a crash or quit during the invasion leaves the flask at the cap until a rest.
 constexpr int kInvaderEstus = 5;
 constexpr int32_t kHomewardBone = 330;
+// Chameleon (sorcery 3550: its bullet 2700 puts SpEffect 1500 on the caster, which enemies neither see nor hear).
+constexpr int kChameleonEffect = 1500;
 int g_estus_kept = 0;  // charges set aside for the trip home
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
@@ -1351,6 +1359,8 @@ bool invader_arrival(game::InvasionPoint* ip) {
     return true;
 }
 
+void send_world_globals(uint64_t to);
+
 void host_answer(const Pending& p) {
     Welcome w{};
     fill_header(&w, kWelcome);
@@ -1436,6 +1446,7 @@ void host_answer(const Pending& p) {
     more.w = w;
     more.wait_s = wait;
     send_to(p.from, more);
+    if (w.status == kOk && !p.invade) send_world_globals(p.from);
     const PeerInfo* who = nullptr;
     for (const auto& q : g_peers) who = q.id == p.from ? &q : who;
     LOG_INFO("[coop] Answered %s (%s, character '%s'): status %u", steam::persona(p.from).c_str(),
@@ -2473,6 +2484,37 @@ void send_world_flags(uint64_t to) {
              static_cast<unsigned>(msg.size()), sent ? "" : ": send failed");
 }
 
+// Host: our world's state below the map flags (the bosses killed, the bells, every NPC's state) for a co-op guest,
+// with the welcome (before their game loads our world and runs its events) and again on arrival.
+void send_world_globals(uint64_t to) {
+    const std::vector<uint8_t> snap = rules::world_global_snapshot();
+    if (snap.empty()) {
+        LOG_ERROR("[coop] Could not read our world's state (flags 0-1999) for %s", steam::persona(to).c_str());
+        return;
+    }
+    std::vector<uint8_t> msg(sizeof(Header) + snap.size());
+    Header h{kMagic, kWorldGlobals};
+    std::memcpy(msg.data(), &h, sizeof(h));
+    std::memcpy(msg.data() + sizeof(h), snap.data(), snap.size());
+    if (!steam::send(to, msg.data(), static_cast<uint32_t>(msg.size()), true)) {
+        LOG_ERROR("[coop] Could not send our world's state to %s", steam::persona(to).c_str());
+    }
+}
+
+// Guest: the host's world state replaces what our copy of their world had (see rules::apply_world_globals).
+void on_world_globals(const uint8_t* data, uint32_t size) {
+    std::string changes;
+    const int changed = rules::apply_world_globals(data, size, &changes);
+    if (changed < 0) {
+        LOG_ERROR("[coop] The host's world state did not fit (%u bytes); our copy stays as it was", size);
+    } else if (changed > 0) {
+        LOG_INFO("[coop] Took the host's world state (flags 0-1999): %d differed from our copy (%s%s)", changed,
+                 changes.c_str(), changed > 24 ? " ..." : "");
+    } else {
+        LOG_INFO("[coop] Took the host's world state (flags 0-1999): our copy had it already");
+    }
+}
+
 // Guest: the host's map flags replace our copy of the host's world (every map, not only the one we joined in).
 void on_world_flags(const uint8_t* data, uint32_t size) {
     const int written = rules::apply_world_flag_snapshot(data, size);
@@ -2710,7 +2752,8 @@ void guest_tick() {
 
 // ---------------------------------------------------------------- shared
 void send_info() {
-    InfoMore3 more3{};
+    InfoMore4 more4{};
+    InfoMore3& more3 = more4.more3;
     InfoMore2& more2 = more3.more2;
     InfoMore& more = more2.more;
     Info& i = more.info;
@@ -2749,7 +2792,8 @@ void send_info() {
     const int held = me && !game::loading() ? motion::held_event_anim(me) : 0;
     more2.event_anim = held < 0 ? 1 : held;  // held with no id known: still "held" (-1 is "not reported")
     more3.bones = items::count(kHomewardBone);
-    broadcast(more3, false);
+    more4.disguised = me && !game::loading() && world::has_effect(me, kChameleonEffect) ? 1 : 0;
+    broadcast(more4, false);
 }
 
 // The player an event is about, by their character's name when we know them (a 1.0.0 player's events carry its
@@ -3127,6 +3171,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             }
             InfoMore3 more3{};
             p->bones = as(&more3) ? more3.bones : -1;
+            InfoMore4 more4{};
+            p->disguised = as(&more4) && more4.disguised != 0;
             p->boss_fight = more_ok && more.boss_fight != 0;
             p->team_respawn = more_ok && more.team_respawn != 0;
             if (more_ok && (more.respawn & kRespawnPhase) == kRespawnWent && g_role == Role::Guest && from == g_host) {
@@ -3152,6 +3198,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 name_event(&m);
                 broadcast(m, true, from);  // tell the other guests
                 if (!m.invader) {
+                    send_world_globals(from);
                     send_world_flags(from);
                     g_world_sent.clear();  // what our world has, to the newcomer (and again to the others)
                     g_world_polled = 0;
@@ -3170,6 +3217,11 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         case kWorldFlags: {
             if (from != g_host || g_role != Role::Guest || g_invade || g_step != Step::InWorld) return;
             on_world_flags(data + sizeof(Header), size - static_cast<uint32_t>(sizeof(Header)));
+            break;
+        }
+        case kWorldGlobals: {
+            if (from != g_host || g_role != Role::Guest || g_invade) return;
+            on_world_globals(data + sizeof(Header), size - static_cast<uint32_t>(sizeof(Header)));
             break;
         }
         case kDeadList: {
@@ -4840,7 +4892,76 @@ __declspec(naked) void hk_bar_type() {
     }
 }
 
+// An invader's floating bar (with its name, soul level and ping): vanilla hides it from the host and the guests (the
+// slot's +0x1C, set for a remote dark spirit, tested at 0xFA89E8). Everyone sees everyone's bar now, invaders
+// included. A player under Chameleon has none on anyone's screen: their own report (InfoMore4.disguised) or the
+// effect on their character here says so. Slot i is the party's entry i (0x1012C30 fills it from PartyMemberInfo).
+constexpr uint32_t kBarDarkTest = 0x00FA89E8;
+uint32_t g_bar_dark_on = 0x00FA8A00;    // the bar goes on to the game's other tests
+uint32_t g_bar_dark_off = 0x00FA8AC0;   // no bar (stores bl = 0)
+int g_bar_answer = 0;
+
+// 0 the game's own answer, 1 shown, 2 hidden.
+int __stdcall bar_answer(uint32_t rec) {
+    if (g_role == Role::None) return 0;
+    uint32_t mm = 0, gm = game::game_man(), party = 0, handle = 0xFFFFFFFF;
+    if (!read32(0x013786D0, &mm) || !mm || rec < mm + 0x8F4) return 0;  // MenuMan
+    const uint32_t slot = (rec - (mm + 0x8F4)) / 0x20;
+    if (slot > 3 || !gm || !read32(gm + game::kGmParty, &party) || party < 0x10000 ||
+        !read32(party + 0x18 + slot * 0x14, &handle)) {
+        return 0;
+    }
+    const uint32_t chr = rules::chr_of_handle(handle);
+    if (!chr) return 0;
+    const auto it = g_chr_peer.find(chr);
+    if (it != g_chr_peer.end()) {
+        for (const auto& p : g_peers) {
+            if (p.id == it->second && p.disguised) return 2;
+        }
+    }
+    if (world::has_effect(chr, kChameleonEffect)) return 2;
+    uint8_t dark = 0;
+    return read8(rec + 0x1C, &dark) && dark ? 1 : 0;
+}
+
+__declspec(naked) void hk_bar_dark() {
+    __asm {
+        mov bl, 1
+        mov byte ptr [esp + 13h], 0
+        mov byte ptr [esp + 14h], bl
+        pushad
+        push ebp
+        call bar_answer
+        mov dword ptr [g_bar_answer], eax
+        popad
+        cmp dword ptr [g_bar_answer], 2
+        je off
+        cmp dword ptr [g_bar_answer], 1
+        je on
+        cmp byte ptr [ebp + 1Ch], 0
+        je on
+    off:
+        xor bl, bl
+        jmp dword ptr [g_bar_dark_off]
+    on:
+        jmp dword ptr [g_bar_dark_on]
+    }
+}
+
 bool install_invader_bars() {
+    // cmp byte ptr [ebp+1Ch],0 ; mov bl,1 ; mov byte ptr [esp+13h],0 ; mov [esp+14h],bl ; je +7 ; xor bl,bl ; jmp
+    static const uint8_t kDark[19] = {0x80, 0x7D, 0x1C, 0x00, 0xB3, 0x01, 0xC6, 0x44, 0x24, 0x13,
+                                      0x00, 0x88, 0x5C, 0x24, 0x14, 0x74, 0x07, 0x32, 0xDB};
+    if (bytes_match(kBarDarkTest, kDark, sizeof(kDark))) {
+        uint8_t to[5] = {0xE9, 0, 0, 0, 0};
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_bar_dark) - (kBarDarkTest + 5));
+        std::memcpy(to + 1, &rel, 4);
+        if (patch(kBarDarkTest, kDark, to, sizeof(to))) {
+            LOG_INFO("[coop] The host and guests see invaders' health bars; Chameleon hides anyone's");
+        }
+    } else {
+        LOG_ERROR("[coop] Invaders' health bars stay hidden from the host and guests (code does not match this build)");
+    }
     // mov ecx,[eax+70h] ; cmp ecx,2 ; je +5 ; cmp ecx,0Ch ; jne +6
     static const uint8_t k[13] = {0x8B, 0x48, 0x70, 0x83, 0xF9, 0x02, 0x74, 0x05, 0x83, 0xF9, 0x0C, 0x75, 0x06};
     if (!bytes_match(kBarTypeTest, k, sizeof(k))) return false;

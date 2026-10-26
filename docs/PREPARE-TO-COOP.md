@@ -674,8 +674,15 @@ game that plays it. The Bell Gargoyles' 11015396 brings the second gargoyle in w
 takes its invincibility off and shows its gauge, so in the game of a player far from the fight the second gargoyle
 stayed invincible, never died there and its reward (11010750, item lot 53500100) never came; when that player walked
 up after the fight the event went on and showed the dead gargoyle's empty gauge, and their report put every game in a
-boss fight. Such a wait is skipped now for a character another game moves (an enemy on its NetAIManipulator, or
-another player). A gauge whose boss is dead is no fight (`world::boss_fight`, `rules::own_gauge_tick`), and one whose
+boss fight. `0xBB9A20` makes a condition object (vtable `0x11DD04C`, entity at `+0x1C`, animation at `+0x20`) that
+the event adds to its condition group and updates every frame (`vtable+4`); the group's test (`0xBBDA00`) reads bit 0
+of `+8`. In a session each such wait on a character gets a copy of that vtable with our update: the game's own check
+first, and when the animation ends in the game that moves the character, that game tells the others (message 31,
+`kAnimDone`, through the host). In a game whose copy another game moves (an enemy on its NetAIManipulator, or another
+player) the wait ends on that word, or after 10 s without one (a player of 1.2.0 or older, or a game that does not run
+the event), so what the event does next happens about when it does in the game that plays the animation. Ending the
+wait at once let the rest of such an event run ahead of the animation (a flag shared early, an AI switched on early),
+and returning no object crashed at `0x528B6F` (Sen's Fortress 11505051, 2026-10-25). A gauge whose boss is dead is no fight (`world::boss_fight`, `rules::own_gauge_tick`), and one whose
 bosses have all been dead for 10 s is taken down.
 
 When a boss passes to this game (another game moved it: its player fell, or ours came nearer), its AI here had been

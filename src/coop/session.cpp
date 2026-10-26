@@ -94,6 +94,7 @@ enum MsgType : uint8_t {
     kHurtList = 28,      // 1.3.0: my world's hurt enemies, to a fallen teammate (as kDeadList; deadlist.cpp)
     kSentHome = 29,      // 1.3.0, host -> an invader: the host's Darksign sends you home (no outcome)
     kWorldGlobals = 30,  // 1.3.0, host -> a co-op guest: the host's world state below the map flags (flags 0-1999)
+    kAnimDone = 31,      // 1.3.0, anyone -> all (through the host): an event's animation on a character I move ended
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -275,6 +276,11 @@ struct AnimMsg {
     uint8_t kind;  // 0 start, 1 stop
     int32_t anim;
     uint8_t loop;
+};
+struct AnimDoneMsg {
+    Header h;
+    int32_t entity;  // the character's entity id
+    int32_t anim;    // the animation the event waited for (rules.cpp, follow_wait)
 };
 struct CutFollowMsg {
     Header h;
@@ -3496,6 +3502,17 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             rules::remote_bonfire_lit(m.bonfire);
             break;
         }
+        case kAnimDone: {
+            AnimDoneMsg m;
+            if (!as(&m) || peer(from)->invader) return;
+            if (g_role == Role::Host) {
+                broadcast(m, true, from);
+            } else if (from != g_host) {
+                return;
+            }
+            if (!g_invade) rules::remote_anim_done(m.entity, m.anim);
+            break;
+        }
         case kCutFollow: {
             CutFollowMsg m;
             if (!as(&m) || peer(from)->invader) return;
@@ -3701,6 +3718,19 @@ void send_bonfire_lit(int bonfire) {
     BonfireMsg m{};
     fill_header(&m, kBonfireLit);
     m.bonfire = bonfire;
+    if (g_role == Role::Host) {
+        broadcast(m);
+    } else if (g_host && g_step == Step::InWorld && !g_invade) {
+        send_to(g_host, m);
+    }
+}
+
+void send_anim_done(int entity, int anim) {
+    if (g_role == Role::None || !g_lobby) return;
+    AnimDoneMsg m{};
+    fill_header(&m, kAnimDone);
+    m.entity = entity;
+    m.anim = anim;
     if (g_role == Role::Host) {
         broadcast(m);
     } else if (g_host && g_step == Step::InWorld && !g_invade) {
@@ -4106,6 +4136,7 @@ void set_callbacks() {
     rules::set_flag_listener(&queue_flag);
     rules::set_bonfire_warp_listener(&send_bonfire_warp);
     rules::set_bonfire_lit_listener(&send_bonfire_lit);
+    rules::set_anim_done_listener(&send_anim_done);
     rules::set_cutscene_listener(&on_cutscene);
     rules::set_separation_listener([](bool host) { g_separation = host ? 2 : 1; });
     steam::on_lobby_member([](uint64_t lobby, uint64_t user, bool entered) {

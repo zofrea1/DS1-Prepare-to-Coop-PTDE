@@ -42,6 +42,11 @@ bool disasters_active();
 int install();
 // Guests run the world's events in their own game (Remastered Seamless Co-op's rule; default on).
 void set_guest_world_events(bool on);
+// An event's wait for a character's animation ended in this game, which moves that character: `fn` tells the others,
+// whose copies never end it themselves (rules.cpp, follow_wait).
+void set_anim_done_listener(void (*fn)(int entity, int anim));
+// Another player's game said so: a wait of ours for that animation on our copy of the character ends.
+void remote_anim_done(int entity, int anim);
 // Per-frame upkeep (the room timer, the lock), game thread.
 void tick();
 // Flags that change in a session's world while seamless rules apply (game thread, value really changed).

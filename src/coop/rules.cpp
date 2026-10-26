@@ -3905,36 +3905,37 @@ void boss_handover_tick() {
 // 0x11DD04C: +0x1C entity, +0x20 animation), and the caller hands it to the event (0x528B60, eax), which adds it to
 // the event's condition group (+0x30) and updates it every frame (vtable +4, thiscall(dt, event)); the group's test
 // (0xBBDA00) reads bit 0 of +8, which the update sets once 0xD71970 says the animation is over. The end never comes on
-// a copy another game moves: the Bell Gargoyles' 11015396 brings the second gargoyle in with its animation 7001 and
-// only then takes its invincibility off and shows its gauge. In the game of a player far from the fight it waited
-// there the whole fight, so the gargoyle could not die in that game and its reward (11010750, lot 53500100) never came;
-// when the player walked up after the fight it went on and showed the dead gargoyle's gauge (2026-10-25). The Taurus
-// Demon's leap waited 81 s the same way (2026-10-18). Such a run goes on at once: the game that moves the character
-// plays the animation, and this game's copy follows the network. The event still needs its wait object (a null one
-// crashed at 0x528B6F: Sen's Fortress 11505051, animation 9001 on 1500101, 2026-10-25), so it gets the game's own with
-// a copy of its vtable whose update always says the animation is over.
+// a copy another game moves (its event animation stays held: the Hellkite's 7017 for the whole 8 s watch,
+// 2026-10-25): the Bell Gargoyles' 11015396 brings the second gargoyle in with its animation 7001 and only then takes
+// its invincibility off and shows its gauge. In the game of a player far from the fight it waited there the whole
+// fight, so the gargoyle could not die in that game and its reward (11010750, lot 53500100) never came; when the player
+// walked up after the fight it went on and showed the dead gargoyle's gauge (2026-10-25). The Taurus Demon's leap
+// waited 81 s the same way (2026-10-18).
+// In a session every such wait on a character gets a copy of the class's vtable with our update: the game's own
+// first, and when it says the animation is over in the game that moves the character, that game tells the others
+// (kAnimDone). In a game whose copy another game moves, the wait is over once that word comes, or after kAnimWaitCap
+// with none (an older player, or a game that does not run the event): what the event does next (an AI switched on, a
+// flag set, a character taken away) happens about when it does in the game that plays the animation. Ending such a
+// wait at once was not enough (no object at all crashed at 0x528B6F: Sen's Fortress 11505051, animation 9001 on
+// 1500101; ended at once, the rest of the event ran ahead of the animation, 2026-10-25).
 constexpr uint32_t kAnimWait = 0x00BB9A20;
 constexpr uint32_t kAnimWaitSites[] = {0x00BC1CAD, 0x00BC2D2B};
 constexpr uint32_t kAnimWaitVtable = 0x011DD04C;  // 4 methods: destructor, update, 2 more
+constexpr uint32_t kAnimWaitUpdate = 0x00BB9900;  // the class's update (vtable +4)
+constexpr double kAnimWaitCap = 10.0;   // no word from the game that moves the character: the wait ends anyway
+constexpr double kAnimDoneEarly = 3.0;  // that game's word may come this long before our wait began (its run went first)
 uint32_t g_anim_wait = kAnimWait;
-uint32_t g_done_wait_vtable[5] = {};  // [0] the class's object locator (vtable - 4), then its 4 methods
+uint32_t g_follow_vtable[5] = {};  // [0] the class's object locator (vtable - 4), then its 4 methods
+void (*g_anim_done_fn)(int entity, int anim) = nullptr;
 
-void __fastcall done_wait_update(uint32_t wait, uint32_t, float, uint32_t) { *ptr<uint8_t>(wait + 8) |= 1; }
-
-// Makes the game's wait object one that is over at once; false if it is not the object expected.
-bool make_wait_done(uint32_t wait) {
-    uint32_t vt = 0;
-    if (!wait || !read32(wait, &vt) || vt != kAnimWaitVtable) return false;
-    if (!g_done_wait_vtable[2]) {
-        for (int i = 0; i < 5; ++i) {
-            if (!read32(kAnimWaitVtable - 4 + i * 4, &g_done_wait_vtable[i])) return false;
-        }
-        g_done_wait_vtable[2] = reinterpret_cast<uint32_t>(&done_wait_update);
-    }
-    *ptr<uint32_t>(wait) = reinterpret_cast<uint32_t>(&g_done_wait_vtable[1]);
-    *ptr<uint8_t>(wait + 8) |= 1;
-    return true;
-}
+struct AnimWait {
+    int entity = 0, anim = 0, event = 0;
+    double started = 0;
+    bool reported = false;  // we moved the character and told the others it was over
+    bool done = false;      // over here on the other game's word or the time limit
+};
+std::map<uint32_t, AnimWait> g_anim_waits;  // the wait objects with our update
+std::map<std::pair<int, int>, std::vector<double>> g_anim_done_heard;  // (entity, animation) -> when its end was told
 
 bool moved_elsewhere(uint32_t chr) {
     if (!chr || chr == game::player()) return false;
@@ -3943,18 +3944,105 @@ bool moved_elsewhere(uint32_t chr) {
     return read32(chr + 0x2C, &current) && read32(chr + 0x414, &net_ai) && current && current == net_ai;
 }
 
+// Another game said this animation ended there, lately enough for a wait that began at `since`: the word is used up.
+bool take_anim_done(int entity, int anim, double since) {
+    const auto it = g_anim_done_heard.find({entity, anim});
+    if (it == g_anim_done_heard.end()) return false;
+    auto& times = it->second;
+    times.erase(std::remove_if(times.begin(), times.end(), [&](double t) { return t < since - kAnimDoneEarly; }),
+                times.end());
+    if (times.empty()) {
+        g_anim_done_heard.erase(it);
+        return false;
+    }
+    times.erase(times.begin());
+    return true;
+}
+
+void __fastcall follow_wait_update(uint32_t wait, uint32_t, float dt, uint32_t ev) {
+    reinterpret_cast<void(__fastcall*)(uint32_t, uint32_t, float, uint32_t)>(kAnimWaitUpdate)(wait, 0, dt, ev);
+    uint32_t entity = 0, anim = 0;
+    uint8_t bits = 0;
+    if (!read32(wait + 0x1C, &entity) || !read32(wait + 0x20, &anim) || !read8(wait + 8, &bits)) return;
+    AnimWait& w = g_anim_waits[wait];
+    if (w.started == 0 || w.entity != static_cast<int>(entity) || w.anim != static_cast<int>(anim)) {
+        w = AnimWait{};
+        w.entity = static_cast<int>(entity);
+        w.anim = static_cast<int>(anim);
+        w.started = seconds();
+    }
+    if (w.done) {
+        *ptr<uint8_t>(wait + 8) |= 1;
+        return;
+    }
+    if (!seamless_rules()) return;
+    const uint32_t chr = chr_by_entity(w.entity);
+    const bool elsewhere = moved_elsewhere(chr);
+    static int lines = 0;
+    if (bits & 1) {
+        // Over by the game's own check, in the game that moves the character: the others hear it.
+        if (!w.reported && chr && !elsewhere && g_anim_done_fn) {
+            w.reported = true;
+            g_anim_done_fn(w.entity, w.anim);
+            if (++lines <= 60) {
+                LOG_INFO("[coop] Event %d: animation %d on %d ended here after %.1f s; the others were told", w.event,
+                         w.anim, w.entity, seconds() - w.started);
+            }
+        }
+        return;
+    }
+    if (!elsewhere || !g_world_events) return;
+    const double waited = seconds() - w.started;
+    // Another player's character: their own game waits on it as its player (entity 10000), so no word of theirs can
+    // match ours; the wait ends at once, the animation playing on their screen.
+    const bool player = is_remote_player(chr);
+    const bool told = !player && take_anim_done(w.entity, w.anim, w.started);
+    if (!player && !told && waited < kAnimWaitCap) return;
+    w.done = true;
+    *ptr<uint8_t>(wait + 8) |= 1;
+    if (++lines <= 60) {
+        LOG_INFO("[coop] Event %d: animation %d on %d %s after %.1f s; ours goes on", w.event, w.anim, w.entity,
+                 player ? "is another player's" : told ? "ended in the game that moves it"
+                                                   : "had no word from the game that moves it",
+                 waited);
+    }
+}
+
+// The game's wait object with our update, for as long as it lives; false if it is not the object expected.
+bool follow_wait(uint32_t wait, int entity, int anim) {
+    uint32_t vt = 0;
+    if (!wait || !read32(wait, &vt) || vt != kAnimWaitVtable) return false;
+    if (!g_follow_vtable[2]) {
+        for (int i = 0; i < 5; ++i) {
+            if (!read32(kAnimWaitVtable - 4 + i * 4, &g_follow_vtable[i])) return false;
+        }
+        g_follow_vtable[2] = reinterpret_cast<uint32_t>(&follow_wait_update);
+    }
+    // The objects are freed with their event without our hearing of it: old entries go (a wait lasts seconds).
+    if (g_anim_waits.size() > 128) {
+        const double t = seconds();
+        for (auto it = g_anim_waits.begin(); it != g_anim_waits.end();) {
+            it = t - it->second.started > 600.0 ? g_anim_waits.erase(it) : std::next(it);
+        }
+    }
+    AnimWait w;
+    w.entity = entity;
+    w.anim = anim;
+    w.started = seconds();
+    uint32_t id = 0;
+    if (g_cur_event) read32(g_cur_event + 0x28, &id);
+    w.event = static_cast<int>(id);
+    g_anim_waits[wait] = w;
+    *ptr<uint32_t>(wait) = reinterpret_cast<uint32_t>(&g_follow_vtable[1]);
+    return true;
+}
+
 uint32_t __cdecl hk_anim_wait(int entity, int anim) {
     const uint32_t wait = reinterpret_cast<uint32_t(__cdecl*)(int, int)>(g_anim_wait)(entity, anim);
-    if (g_world_events && seamless_rules() && moved_elsewhere(chr_by_entity(entity))) {
-        const bool done = make_wait_done(wait);
-        static std::set<int64_t> logged;
-        const int64_t key = static_cast<int64_t>(entity) << 32 | static_cast<uint32_t>(anim);
-        if (logged.size() < 40 && logged.insert(key).second) {
-            uint32_t id = 0;
-            if (g_cur_event) read32(g_cur_event + 0x28, &id);
-            LOG_INFO("[coop] Event %d: %s for animation %d on %d (another game moves it; ours follows)",
-                     static_cast<int>(id), done ? "no wait" : "the wait was not as expected; it waits", anim, entity);
-        }
+    const uint32_t chr = seamless_rules() ? chr_by_entity(entity) : 0;
+    if (chr && chr != game::player() && !follow_wait(wait, entity, anim)) {
+        static int lines = 0;
+        if (++lines <= 10) LOG_INFO("[coop] The wait for animation %d on %d was not as expected; left as it is", anim, entity);
     }
     return wait;
 }
@@ -4292,6 +4380,15 @@ int install() {
 }
 
 void set_guest_world_events(bool on) { g_world_events = on; }
+
+void set_anim_done_listener(void (*fn)(int entity, int anim)) { g_anim_done_fn = fn; }
+
+void remote_anim_done(int entity, int anim) {
+    auto& times = g_anim_done_heard[{entity, anim}];
+    const double t = seconds();
+    times.erase(std::remove_if(times.begin(), times.end(), [&](double at) { return t - at > 15.0; }), times.end());
+    if (times.size() < 8) times.push_back(t);
+}
 
 void track_safe_position() {
     const double t = seconds();

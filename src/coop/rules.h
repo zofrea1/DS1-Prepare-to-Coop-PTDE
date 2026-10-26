@@ -84,6 +84,8 @@ bool gauge_boss_dead(uint32_t handle);
 void gauge_boss_chrs(std::vector<uint32_t>* out);
 // The character of a handle (0x10000000 | block << 14 | index), 0 if it is not in this world.
 uint32_t chr_of_handle(uint32_t handle);
+// A guest: the host's last report of this character's HP (the game's HP sync, 0xE40FE0), -1 none.
+int host_hp_report(uint32_t chr);
 
 // Bonfire travel (WarpNextStage_Bonfire; `bonfire` is the warp's point, the bonfire object - 980): the host's own
 // warp goes ahead and `fn(bonfire)` tells the guests, who follow; a guest's own warp does not go ahead, `fn(bonfire)`

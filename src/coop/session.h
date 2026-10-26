@@ -16,6 +16,7 @@ struct Config {
     bool allow_invaders = true;
     bool invasion_rewards = true;  // Humanity for the side that wins an invasion
     int invasion_cooldown_s = 180; // InvasionCooldown: after an invasion of our world, no other invader for this long
+    bool seal_boss_fogs = false;   // SealBossFogsDuringInvasions: the boss fogs stay shut while an invader is here
     bool death_debuffs = false;  // each death in a session adds a Crimson Blossom (up to five)
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
     int overhead_display = 4;
@@ -95,6 +96,9 @@ bool invader();      // we invade
 // invader, as the host's state says, once in the host's world; a host of 1.2.0 or older says nothing, which leaves the
 // game's own rate).
 int net_rate();
+// The boss fogs stay shut for the host and the guests while an invader is in the world: the host's
+// SealBossFogsDuringInvasions (a guest takes it from the host's state; a host of 1.2.0 or older says nothing: open).
+bool seal_boss_fogs();
 
 // Kept for the session text. The on-screen box that used to draw these lines is not shown; soul level and
 // ping are appended to the name on each companion's floating health bar instead.

@@ -1377,10 +1377,37 @@ bool world_resetting() {
     return g_world_reset_at && GetTickCount64() - g_world_reset_at < 3000;
 }
 
+}  // namespace
+bool gauge_boss(int entity);
+namespace {
+
+// A boss with a health bar whose fight has not begun in this game (g_awake_bosses: its gauge here or a teammate's,
+// an event animation on it, its AI switched on) is whole as far as the world's events are concerned: an "HP at most
+// X" test with X above 0 does not pass on it yet. Such a test belongs to the fight (in vanilla: the Bell Gargoyles'
+// 60 % that brings in the second one, 11015396, the Moonlight Butterfly's 10 %, Pinwheel's 30 %). Between games the
+// health goes as a number, and a reload makes a boss anew at its unscaled health while the other games' copies are
+// scaled: on 2026-10-25 the host's death reload sent the first gargoyle's 999 to the guest, whose copy read 999/2147,
+// below 60 %. The second gargoyle came in, and its health bar showed, in both games, while both players fought the
+// Hellkite on the Burg bridge 200 m away. Death tests (at most 0) are left alone.
+bool hold_unbegun_boss_test(int entity, uint8_t cmp, float ratio) {
+    if (ratio <= 0.0f || (cmp != 3 && cmp != 5) || !gauge_boss(entity) || g_awake_bosses.count(entity)) return false;
+    static std::set<int> told;
+    if (told.size() < 20 && told.insert(entity).second) {
+        LOG_INFO("[coop] HP test on boss %d held back: its fight has not begun in this game (at most %.0f %%)", entity,
+                 ratio * 100.0f);
+    }
+    return true;
+}
+
 void __fastcall hk_hp_rate_test(uint8_t* cond, void*, int a, int b) {
     reinterpret_cast<CondTest>(g_hp_rate_orig)(cond, a, b);
-    if (!(cond[8] & 1) || !g_state.active || !g_state.guest || g_state.invader) return;
+    if (!(cond[8] & 1) || !g_state.active || g_state.invader) return;
     const int entity = *reinterpret_cast<int*>(cond + 0x18);
+    if (hold_unbegun_boss_test(entity, cond[0x1C], *reinterpret_cast<float*>(cond + 0x20))) {
+        cond[8] &= 0xFE;
+        return;
+    }
+    if (!g_state.guest) return;
     const uint32_t chr = chr_by_entity(entity);
     uint32_t hp = 0, max_hp = 0, team = 0;
     const bool missing = !chr || !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0;
@@ -3693,10 +3720,13 @@ void track_boss_control() {
         } else {
             sprintf_s(name, "%08X", b.gauge);
         }
+        // The speed above which its copy jumps to an update instead of moving there (netrate.cpp; diagnostic).
+        float jump = 0.0f;
+        if (net_ai) read32(net_ai + 0x80, reinterpret_cast<uint32_t*>(&jump));
         LOG_INFO("[coop] Boss %s: moved by %s, its AI %s in this game (engagement %u, authority %u), at (%.1f, %.1f, "
-                 "%.1f), %.0f m from us",
+                 "%.1f), %.0f m from us; its copy jumps above %.1f m/s",
                  name, control == 1 ? "this game (own AI)" : control == 2 ? "another game (network)" : "neither (?)",
-                 (ai & 1) ? "on" : "off", engage, authority, at.x, at.y, at.z, dist3(me, at));
+                 (ai & 1) ? "on" : "off", engage, authority, at.x, at.y, at.z, dist3(me, at), jump);
     }
 }
 
@@ -3842,6 +3872,8 @@ void note_teammate_boss(int entity) {
     const uint32_t chr = gauge_boss(entity) ? chr_by_entity(entity) : 0;
     if (chr && !chr_dead(chr)) mark_awake(entity, "a teammate's boss gauge");
 }
+
+int host_hp_report(uint32_t chr) { return chr ? host_reported_hp(chr) : -1; }
 
 void gauge_boss_chrs(std::vector<uint32_t>* out) {
     for (int e : kGaugeBosses) {

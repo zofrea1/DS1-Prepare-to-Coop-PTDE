@@ -156,6 +156,12 @@ struct StateMore {
     StateMsg state;
     uint8_t net_rate;  // the host's NetworkTickRate: the updates a second every game of the session sends
 };
+// Behind StateMore the same way: a guest of an earlier 1.3.0 reads StateMore, and such a host's StateMore leaves the
+// fogs open.
+struct StateMore2 {
+    StateMore more;
+    uint8_t seal_fogs;  // the host's SealBossFogsDuringInvasions: 1 the boss fogs stay shut while an invader is here
+};
 struct Info {
     Header h;
     int32_t soul_level;
@@ -469,6 +475,7 @@ double g_follow_at = 0;
 // Guest: the host's Homeward Bone came while we were loading (no character to take ours from): taken once we stand.
 bool g_bone_owed = false;
 int g_host_net_rate = 0;  // guest: the host's NetworkTickRate (StateMore), 0 not heard
+bool g_host_seal_fogs = false;  // guest: the host's SealBossFogsDuringInvasions (StateMore)
 // A cutscene is taking us into another map (rules, Play Cutscene and Warp Player): announced once we are there.
 int g_cut_map = -1;
 int g_cut_point = -1;
@@ -1260,6 +1267,7 @@ void finish(const std::wstring& why) {
     g_follow_bonfire = -1;
     g_bone_owed = false;
     g_host_net_rate = 0;
+    g_host_seal_fogs = false;
     g_follow_travel = -1;
     g_travel_bonfire = -1;
     g_travel_asked = 0;
@@ -2037,7 +2045,8 @@ void host_tick() {
     if (now() - g_last_state > 1.0) {
         g_last_state = now();
         const auto& st = rules::state();
-        StateMore more{};
+        StateMore2 more2{};
+        StateMore& more = more2.more;
         StateMsg& s = more.state;
         fill_header(&s, kState);
         s.map = game::map_id();
@@ -2054,9 +2063,10 @@ void host_tick() {
         s.infection = st.infection ? 1 : 0;
         s.taunt = st.taunt ? 1 : 0;
         more.net_rate = static_cast<uint8_t>(g_cfg.net_rate);
+        more2.seal_fogs = g_cfg.seal_boss_fogs ? 1 : 0;
         rules::state().invader_present = invader;
         g_host_coop_players = coop;
-        broadcast(more);
+        broadcast(more2);
     }
 }
 
@@ -3199,6 +3209,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (as(&more) && more.net_rate != g_host_net_rate) {
                 g_host_net_rate = more.net_rate;
                 LOG_INFO("[coop] The host's network rate: %d updates a second", g_host_net_rate);
+            }
+            StateMore2 more2{};
+            const bool seal = as(&more2) && more2.seal_fogs != 0;
+            if (seal != g_host_seal_fogs) {
+                g_host_seal_fogs = seal;
+                LOG_INFO("[coop] The host's boss fogs %s while an invader is in the world (SealBossFogsDuringInvasions)",
+                         g_host_seal_fogs ? "stay shut" : "stay open");
             }
             break;
         }
@@ -4644,6 +4661,11 @@ int net_rate() {
     if (g_role == Role::Host) return g_cfg.net_rate;
     if (g_role == Role::Guest && g_step == Step::InWorld && g_host_net_rate > 0) return g_host_net_rate;
     return netrate::kVanilla;
+}
+
+bool seal_boss_fogs() {
+    if (g_role == Role::Host) return g_cfg.seal_boss_fogs;
+    return g_role == Role::Guest && g_host_seal_fogs;
 }
 
 bool guest() { return g_role == Role::Guest; }

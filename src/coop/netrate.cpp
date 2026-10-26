@@ -74,8 +74,25 @@ constexpr uint32_t kTurnLoadW = 0x00E1F8CB;    // movss xmm4, dword ptr [0116076
 const uint8_t kTurnLoadXyzCode[8] = {0xF3, 0x0F, 0x10, 0x2D, 0x64, 0x07, 0x16, 0x01};
 const uint8_t kTurnLoadWCode[8] = {0xF3, 0x0F, 0x10, 0x25, 0x64, 0x07, 0x16, 0x01};
 
+// Both decodes jump the character to the update, instead of moving it there, when the distance over the gap since the
+// update before is above a speed (or the gap is not between 0 and 2 s): 20 m/s for players (the double at 0x11E7E50),
+// the enemy's own for enemies (NetAIManipulator +0x80). At the game's own rates the gap is a sixth of a second for
+// players and about a quarter for enemies, so only a copy metres away jumps. At thirty a second one metre over a
+// thirtieth reads as 30 m/s: a copy a frame or two behind (the smoothing keeps it NetworkSmoothing behind on purpose)
+// jumped from update to update, and a fast one (the Asylum Demon's leap off its perch, the Taurus Demon's onto the
+// bridge) at every update, in steps 30 times a second on a picture drawn 144 times, standing still between them, with
+// its run left at a walk (2026-10-25: better at thirty than sixty, which halves the gap again; a good connection does
+// not help, the ping is not in it). With smoothing on, the time in the test is at least the game's own gap, so a copy
+// jumps only as far off as it would at the game's own rate. xmm1 = the distance and xmm0 = the gap (floats) there.
+constexpr uint32_t kPlayerSnap = 0x00E1F370;  // cvtps2pd xmm1,xmm1 ; cvtps2pd xmm2,xmm0 ; divsd xmm1,xmm2
+constexpr uint32_t kEnemySnap = 0x00E2162B;   // cvtps2pd xmm2,xmm0 ; cvtps2pd xmm1,xmm1 ; divsd xmm1,xmm2
+const uint8_t kPlayerSnapCode[10] = {0x0F, 0x5A, 0xC9, 0x0F, 0x5A, 0xD0, 0xF2, 0x0F, 0x5E, 0xCA};
+const uint8_t kEnemySnapCode[10] = {0x0F, 0x5A, 0xD0, 0x0F, 0x5A, 0xC9, 0xF2, 0x0F, 0x5E, 0xCA};
+constexpr double kEnemyGap = 0.25;  // the enemies' round at the game's own rate (kVanillaRoundGap)
+
 // Read by the stubs; all of it is the game's own behaviour at the game's own rate (g_frame 0 leaves the fifth,
-// g_smooth 0 the gap x 1.2 / 1.1, g_drain 0 one update per pop). The game thread alone runs this code.
+// g_smooth 0 the gap x 1.2 / 1.1, g_drain 0 one update per pop, the snap floors 0 the gap itself). The game thread
+// alone runs this code.
 float g_frame = 0.0f;
 float g_min_gap = 1.0f / 30.0f;
 float g_game_turn = 0.2f;
@@ -89,6 +106,8 @@ float g_gap = 0.0f;   // scratch
 double g_gap_d = 0.0;  // scratch
 double g_slack_d = 0.0;  // scratch
 int32_t g_send_floor = INT32_MIN;  // minus the send reload, once written (INT32_MIN: no floor)
+double g_player_snap_floor = 0.0;
+double g_enemy_snap_floor = 0.0;
 
 // The send test: the counter is held at g_send_floor or above, then compared with 0 for the game's `jg`.
 __declspec(naked) void send_test() {
@@ -156,6 +175,30 @@ __declspec(naked) void cover_enemy() {
     }
 }
 
+// The jump tests: xmm1 = distance / max(gap, floor) as doubles; xmm2 is left the gap, as the game's code leaves it.
+// A gap of 0 or below still jumps (distance / 0, or the game's own test after).
+__declspec(naked) void snap_player() {
+    __asm {
+        cvtps2pd xmm1, xmm1
+        cvtps2pd xmm2, xmm0
+        maxsd xmm2, qword ptr [g_player_snap_floor]
+        divsd xmm1, xmm2
+        cvtps2pd xmm2, xmm0
+        ret
+    }
+}
+
+__declspec(naked) void snap_enemy() {
+    __asm {
+        cvtps2pd xmm1, xmm1
+        cvtps2pd xmm2, xmm0
+        maxsd xmm2, qword ptr [g_enemy_snap_floor]
+        divsd xmm1, xmm2
+        cvtps2pd xmm2, xmm0
+        ret
+    }
+}
+
 // esi = the sample; al = an update was taken. With g_drain, every waiting update is taken and the last one stays.
 __declspec(naked) void pop_newest() {
     __asm {
@@ -176,7 +219,7 @@ __declspec(naked) void pop_newest() {
 }
 
 bool patch_call(uint32_t at, const uint8_t* expect, size_t n, void* fn) {
-    uint8_t code[8];
+    uint8_t code[16];
     std::memset(code, 0x90, sizeof(code));
     code[0] = 0xE8;
     const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(fn) - (at + 5));
@@ -187,6 +230,7 @@ bool patch_call(uint32_t at, const uint8_t* expect, size_t n, void* fn) {
 bool g_turn = false;
 bool g_newest = false;
 bool g_cover = false;
+bool g_snap = false;
 bool g_floor = false;
 int g_smooth_ms = 32;
 int g_applied = 0;  // the rate the send reload holds (0: not yet written)
@@ -233,6 +277,8 @@ void set_receiving(bool on) {
     g_drain = on && g_newest ? 1 : 0;
     g_smooth = on && g_cover ? g_smooth_ms / 1000.0 : 0.0;
     g_smooth_f = on && g_turn ? g_smooth_ms / 1000.0f : 0.0f;
+    g_player_snap_floor = on && g_snap ? 1.0 / kVanilla : 0.0;
+    g_enemy_snap_floor = on && g_snap ? kEnemyGap : 0.0;
 }
 
 }  // namespace
@@ -247,6 +293,9 @@ bool install() {
               patch_call(kPlayerCover, kPlayerCoverCode, sizeof(kPlayerCoverCode), reinterpret_cast<void*>(&cover_player)) &&
               patch_call(kEnemyCover, kEnemyCoverCode, sizeof(kEnemyCoverCode), reinterpret_cast<void*>(&cover_enemy));
     g_floor = patch_call(kSendTest, kSendTestCode, sizeof(kSendTestCode), reinterpret_cast<void*>(&send_test));
+    g_snap = bytes_match(kEnemySnap, kEnemySnapCode, sizeof(kEnemySnapCode)) &&
+             patch_call(kPlayerSnap, kPlayerSnapCode, sizeof(kPlayerSnapCode), reinterpret_cast<void*>(&snap_player)) &&
+             patch_call(kEnemySnap, kEnemySnapCode, sizeof(kEnemySnapCode), reinterpret_cast<void*>(&snap_enemy));
     uint8_t op = 0;
     const bool send = read8(kSendReload, &op) && (op == kReloadMov || op == kReloadAdd) &&
                       bytes_match(kSendReload + 1, kReloadOperand, sizeof(kReloadOperand));
@@ -255,7 +304,8 @@ bool install() {
     if (!g_cover) LOG_ERROR("[coop] Network rate: the movement toward updates did not match this build (no smoothing)");
     if (!send) LOG_ERROR("[coop] Network rate: the player update's reload did not match this build");
     if (!g_floor) LOG_ERROR("[coop] Network rate: the player update's send test did not match this build");
-    return g_turn && g_newest && g_cover && send && g_floor;
+    if (!g_snap) LOG_ERROR("[coop] Network rate: the jump test toward updates did not match this build");
+    return g_turn && g_newest && g_cover && send && g_floor && g_snap;
 }
 
 void set_smoothing(int ms) {

@@ -87,7 +87,12 @@ bool g_rest_heard = false;
 double g_limbo_since = 0;
 bool g_trip_release = false;  // the host's trip home came while we were down (trip_release): no limbo until we live
 std::map<uint32_t, int> g_scaled;  // EnemyIns -> applied effect id
-std::set<uint32_t> g_fill_hp;      // enemies to top up after their max HP grew
+// An enemy whose scaling changed, until the game has worked out its new max HP (scale_tick, keep_share).
+struct Fill {
+    int hp = 0, max = 0;  // its health and max HP before the change
+    double at = 0;
+};
+std::map<uint32_t, Fill> g_fill_hp;
 std::map<uint32_t, int> g_base_max;     // EnemyIns -> its max HP before our scaling (when first applied)
 std::map<uint32_t, double> g_scaled_at; // EnemyIns -> when our scaling was first applied
 std::map<uint32_t, int> g_forced_max;   // EnemyIns -> the max HP we wrote while the game did not update it
@@ -473,7 +478,8 @@ void wither_blossoms(const char* why, bool tell) {
 // starts the world over in every game, and so does a rest (deadlist::note_rest). Decided now, when the warp goes,
 // after any wait: the teammates whose respawn went before ours say how theirs went, and ours follows them
 // (session::wipe_reload). True when the reload keeps the world (the others are told with our "went"). When it
-// does not, the Crimson Blossoms wither, as at a rest.
+// does not, the Crimson Blossoms wither, as at a rest, and the other games' enemy positions from before are dropped.
+void arm_pos_drain();
 bool keep_dead_on_reload() {
     if (!g_active || g_invader || !local_dead()) return false;
     bool keep = false;
@@ -486,6 +492,7 @@ bool keep_dead_on_reload() {
         keep = deadlist::arm(game::own_world());
         if (!keep) wither_blossoms("our reload starts the world over", false);
     }
+    if (!keep) arm_pos_drain();
     return keep;
 }
 
@@ -566,15 +573,16 @@ char __cdecl hk_warp_kick() {
 // party: invade types 7 and 10). Any other invader leaves it open, the invader cannot follow (the fog takes
 // living players and white phantoms), and the host's entry sends the invader home (the boss room notification,
 // 2009[06]: Lua 4068 ReportBossArea -> Failed_BossAreaMission, and 0xEA2C80 drops black phantoms from the party).
-// In a session the fog stays shut for the host and the guests while an invader is in the world, so a fight with
-// an invader cannot be ended by walking into a boss: our answer joins the game's at 0xBBD86C.
+// With SealBossFogsDuringInvasions (the host's; off by default) the fog stays shut for the host and the guests while
+// an invader is in the world, so a fight with an invader cannot be ended by walking into a boss: our answer joins the
+// game's at 0xBBD86C. Off, the fogs work as in vanilla.
 constexpr uint32_t kBossFogTest = 0x00BBD86C;   // mov ecx,[0137D644h] ; xor eax,eax (the boss-room checks begin)
 constexpr uint32_t kBossFogShut = 0x00BBD8AB;   // mov byte [esp+10h],0: the button greyed out
 uint32_t g_fog_shut_at = kBossFogShut;
 bool g_fog_told = false;
 
 bool __cdecl boss_fog_sealed() {
-    const bool sealed = g_active && !g_invader && g_invader_present;
+    const bool sealed = g_active && !g_invader && g_invader_present && session::seal_boss_fogs();
     if (sealed) {
         static double told = -100;
         if (now() - told > 60.0) {
@@ -608,6 +616,84 @@ bool install_boss_fog() {
     const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_boss_fog) - (kBossFogTest + 5));
     std::memcpy(code + 1, &rel, 4);
     return patch(kBossFogTest, k, code, sizeof(code));
+}
+
+// ---------------------------------------------------------------- enemy positions from before a reload
+// The other games' enemy positions (packet type 3) wait in the session's queue while our map loads; on the first frame
+// after it the net update (0xE57D01: `do {} while (0xE556F0(table))`, bool stdcall(table), one packet a member a call)
+// takes them all into the table (WorldChrMan+0x2B4: pages [table+8+block*4], a flags byte each at [page+0x1C]; bit 0 a
+// new position, taken once by the character, 0xE55360). Net handles are the same in every load of a map, so after a
+// team wipe a position from another game's last moments of the old world went to our new copy of that enemy. The
+// Taurus Demon stood where it had stood when the team fell, its AI off by its event (11015382) and moved by no game,
+// and its entrance leap from there took it off the bridge to its death (2026-10-25, the host's game, which loaded 0.3 s
+// before the guest's: the guest's game had moved the demon at the end). After a reload that starts the world over in
+// every game (a team wipe, a lost boss fight), the new positions that come in our first 1.5 s are dropped: the
+// enemies stay where the map makes them until the games send positions from the new world.
+constexpr uint32_t kPosReceiveCall = 0x00E57D01;
+constexpr uint32_t kPosReceive = 0x00E556F0;
+constexpr double kPosDrainTime = 1.5;
+bool g_pos_drain_armed = false;    // the next load starts the world over in every game
+bool g_pos_drain_loading = false;  // ... and it has begun
+double g_pos_drain_armed_at = 0;
+double g_pos_drain_until = 0;      // dropping until then (0: not)
+int g_pos_dropped = 0;
+
+int clear_new_positions(uint32_t table) {
+    uint32_t n1 = 0;
+    if (!table || !read32(table + 4, &n1) || n1 > 0x20) return 0;
+    int cleared = 0;
+    for (uint32_t i = 0; i < n1; ++i) {
+        uint32_t page = 0, n2 = 0, flags = 0;
+        if (!read32(table + 8 + i * 4, &page) || !page || !read32(page + 8, &n2) || n2 > 0x800 ||
+            !read32(page + 0x1C, &flags) || !flags) {
+            continue;
+        }
+        for (uint32_t k = 0; k < n2; ++k) {
+            uint8_t* f = ptr<uint8_t>(flags + k);
+            if (*f & 1) {
+                *f &= 0xFE;
+                ++cleared;
+            }
+        }
+    }
+    return cleared;
+}
+
+// From the load's start (seen by pos_drain_tick) until kPosDrainTime after its end: the net update may run before our
+// tick in the first frame after the load.
+bool __stdcall hk_pos_receive(uint32_t table) {
+    const bool got = reinterpret_cast<bool(__stdcall*)(uint32_t)>(kPosReceive)(table);
+    if (got && ((g_pos_drain_armed && g_pos_drain_loading) || (g_pos_drain_until != 0 && now() < g_pos_drain_until))) {
+        __try {
+            g_pos_dropped += clear_new_positions(table);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return got;
+}
+
+void arm_pos_drain() {
+    g_pos_drain_armed = true;
+    g_pos_drain_loading = false;
+    g_pos_drain_armed_at = now();
+}
+
+void pos_drain_tick() {
+    if (g_pos_drain_until != 0 && now() >= g_pos_drain_until) {
+        LOG_INFO("[coop] The world started over: %d enemy position(s) from before our reload dropped", g_pos_dropped);
+        g_pos_drain_until = 0;
+    }
+    if (!g_pos_drain_armed) return;
+    if (game::loading()) {
+        if (!g_pos_drain_loading) g_pos_dropped = 0;
+        g_pos_drain_loading = true;
+    } else if (g_pos_drain_loading && game::player()) {
+        g_pos_drain_armed = false;
+        g_pos_drain_loading = false;
+        g_pos_drain_until = now() + kPosDrainTime;
+    } else if (now() - g_pos_drain_armed_at > 30.0) {
+        g_pos_drain_armed = false;  // no load came
+    }
 }
 
 // The respawn warp that waited (limbo, a team wipe) goes ahead.
@@ -762,6 +848,34 @@ void settle_max(uint32_t chr, int want) {
     }
 }
 
+// An enemy whose scaling changed keeps its share of health. The game works its max HP out again when it next updates
+// it (0xE6C850): the growth is added to its health, a smaller max cuts the health down to it, and the effects that
+// change health (0xE72E20) come after, against the new max. So the health it had lost before stayed lost in points:
+// a boss at half health when a player joined came back to three quarters, and one that a leaving player took back
+// to its own max was whole again. The second Bell Gargoyle comes in at 48 %: its own SpEffect 5490 (NpcParam 535001)
+// takes 52 % of its max when it is made. Applied after our row it took 52 % of the scaled max, and our top-up of an
+// enemy that had been whole (at the next scaling tick, half a second later) filled it again: it came in whole
+// (2026-10-25). Applied before our row, the growth made it 76 %. Once the game has the new max, the health is set to
+// the old share of it, less whatever the enemy lost since the change (a hit, such an effect). True when done; an
+// enemy the game does not update keeps its max, and settle_max scales that one. A guest leaves the health of an enemy
+// the host's game reports to the host: the host's own result comes through the game's HP sync (each change of it),
+// and worked out here as well, on top of the host's number, the loss would count twice.
+bool keep_share(uint32_t chr, const Fill& f) {
+    const int h = hp(chr), m = max_hp(chr);
+    if (h <= 0 || m <= 0 || f.max <= 0) return true;
+    if (session::guest() && rules::host_hp_report(chr) >= 0) return true;
+    if (m == f.max) return now() - f.at > 1.0;
+    int lost = 0;
+    if (h != f.hp) {
+        const int game = m > f.max ? f.hp + (m - f.max) : std::min(f.hp, m);  // the game's own result, nothing lost
+        lost = std::max(0, game - h);
+    }
+    const double share = std::min(1.0, static_cast<double>(f.hp) / f.max);
+    const int want = std::max(1, std::min(m, static_cast<int>(share * m + 0.5) - lost));
+    if (want != h) *ptr<int>(chr + 0x2D4) = want;
+    return true;
+}
+
 void scale_tick() {
     enemy_hp_tick();
     if (now() - g_last_scale < 0.5) return;
@@ -785,26 +899,24 @@ void scale_tick() {
         const int want = level ? (boss ? kScaleBoss : kScaleEnemy) + level - 1 : 0;
         auto it = g_scaled.find(chr);
         const int have = it == g_scaled.end() ? 0 : it->second;
-        if (g_fill_hp.count(chr)) {
-            g_fill_hp.erase(chr);
-            const int m = max_hp(chr);
-            if (hp(chr) > 0 && m > 0) *ptr<int>(chr + 0x2D4) = m;
-        }
+        const auto fill = g_fill_hp.find(chr);
+        if (fill != g_fill_hp.end() && keep_share(chr, fill->second)) g_fill_hp.erase(fill);
         if (hp(chr) <= 0) return;
         // Applied once is not enough: an effect the game has since taken off the enemy is applied again.
         if (!(want == have && (!want || find_effect(chr, want, nullptr)))) {
             const int before = max_hp(chr);
+            const Fill was{hp(chr), before, now()};
             if (have) remove(chr, have);
-            const bool full = hp(chr) >= max_hp(chr) && hp(chr) > 0;
             if (want && apply(chr, want)) {
                 if (!have && !g_base_max.count(chr)) {
                     g_base_max[chr] = before;
                     g_scaled_at[chr] = now();
                 }
                 g_scaled[chr] = want;
-                if (full) g_fill_hp.insert(chr);
+                if (!g_fill_hp.count(chr)) g_fill_hp[chr] = was;
             } else {
                 g_scaled.erase(chr);
+                if (have && !g_fill_hp.count(chr)) g_fill_hp[chr] = was;
                 uint32_t handle = 0;
                 read32(chr + 0x78, &handle);
                 static int refused = 0;
@@ -818,6 +930,9 @@ void scale_tick() {
     });
     for (auto it = g_scaled.begin(); it != g_scaled.end();) {
         it = seen.count(it->first) ? std::next(it) : g_scaled.erase(it);
+    }
+    for (auto it = g_fill_hp.begin(); it != g_fill_hp.end();) {
+        it = seen.count(it->first) ? std::next(it) : g_fill_hp.erase(it);
     }
     for (auto it = g_base_max.begin(); it != g_base_max.end();) {
         it = seen.count(it->first) ? std::next(it) : g_base_max.erase(it);
@@ -1274,6 +1389,7 @@ static void reset_tick() {
     text::show(L"The boss fight was lost: the world starts over");
     *ptr<int>(game::game_man() + game::kGmLastBonfire) = bonfire;
     rules::arm_reset_reload();
+    arm_pos_drain();
     warp_now(map, -1);
 }
 
@@ -1318,6 +1434,9 @@ bool install() {
     if (!install_boss_fog()) {
         LOG_ERROR("[coop] Boss fogs: the boss-room button test did not match this build (not sealed for invasions)");
     }
+    if (!redirect_call(kPosReceiveCall, kPosReceive, reinterpret_cast<void*>(&hk_pos_receive))) {
+        LOG_ERROR("[coop] Enemy positions: the net update's receive call did not match this build (kept after reloads)");
+    }
     if (!redirect_call(kLightCall, kChrLight, reinterpret_cast<void*>(&hk_chr_light))) {
         LOG_ERROR("[coop] Shared light: the character update's light call did not match this build (not shared)");
     }
@@ -1337,6 +1456,7 @@ void configure(const Config& cfg) {
 
 void tick() {
     bonfire_tick();
+    pos_drain_tick();
     const uint32_t me = game::player();
     const bool alive = me && hp(me) > 0;
     if (me && g_was_alive && !alive) {
@@ -1395,8 +1515,8 @@ void tick() {
 }
 
 void set_session(bool active, bool invader, bool invader_present) {
-    // An invader arrives: the boss fogs shut for the co-op players until it is gone.
-    if (active && !invader && invader_present && !g_fog_told) {
+    // An invader arrives: the boss fogs shut for the co-op players until it is gone (SealBossFogsDuringInvasions).
+    if (active && !invader && invader_present && !g_fog_told && session::seal_boss_fogs()) {
         g_fog_told = true;
         text::show(L"The boss fogs are sealed while an invader is in this world");
     }

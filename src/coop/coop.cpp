@@ -387,6 +387,7 @@ void coop_install(const CoopConfig& config) {
     cfg.allow_invaders = g_cfg.allow_invaders;
     cfg.invasion_rewards = g_cfg.invasion_rewards;
     cfg.invasion_cooldown_s = g_cfg.invasion_cooldown_s;
+    cfg.seal_boss_fogs = g_cfg.seal_boss_fogs;
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
@@ -404,6 +405,8 @@ void coop_install(const CoopConfig& config) {
     } else {
         LOG_INFO("[coop] Invasion cooldown: off (InvasionCooldown)");
     }
+    LOG_INFO("[coop] Boss fogs while an invader is in this world: %s (SealBossFogsDuringInvasions)",
+             g_cfg.seal_boss_fogs ? "shut for the host and the guests" : "open, as in vanilla");
     LOG_INFO("[coop] Network updates when hosting: %d a second (NetworkTickRate; guests use their host's); smoothing "
              "%d ms above 6 a second (NetworkSmoothing)",
              std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)),

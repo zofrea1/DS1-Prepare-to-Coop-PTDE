@@ -19,6 +19,9 @@ struct CoopConfig {
     // Host: after an invasion of the world ends, no other invader comes in for this long (InvasionCooldown, in minutes
     // in the INI: 0 to 10).
     int invasion_cooldown_s = 180;
+    // Host: while an invader is in the world, the boss fogs stay shut for the host and the guests (off by default:
+    // vanilla shuts them only for covenant invaders, see world.cpp).
+    bool seal_boss_fogs = false;
     // Each death in a session adds a Crimson Blossom (up to five), lowering maximum HP until anyone in the session
     // rests or the whole team falls (on by default since 1.1.0).
     bool death_debuffs = true;

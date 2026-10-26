@@ -3950,12 +3950,21 @@ void boss_handover_tick() {
 // flag set, a character taken away) happens about when it does in the game that plays the animation. Ending such a
 // wait at once was not enough (no object at all crashed at 0x528B6F: Sen's Fortress 11505051, animation 9001 on
 // 1500101; ended at once, the rest of the event ran ahead of the animation, 2026-10-25).
+// The game's own check can also say "over" before the animation has begun in the game that moves the character:
+// 0xE6CEC0 counts the request at [chr+0x10]+4 only while the enemy is engaged (chr+0xF4) or its state ([chr+0xC]+8)
+// is not 2, and the slots (+0xFC/+0x104) come with the character's next update. The Asylum Demon's drop (11810310,
+// animation 9060 off its perch) ended at once in the host's game, which moved the demon, and on its word in the guest's
+// (2026-10-26, both "after 0.0 s"; the Taurus Demon's 9061 and the second gargoyle's 7001 did the same on 10-25). The
+// event then took off SpEffect 4160 at the start of the 28 m drop instead of at its end: state 47, which makes fall
+// damage nothing (0xE7FFDC, x 0.0), and the guest's copy landed 5 % down. So in the game that moves the character the
+// wait is over only once the request is no longer that animation (it goes back to -1 at the end), up to kAnimHoldCap.
 constexpr uint32_t kAnimWait = 0x00BB9A20;
 constexpr uint32_t kAnimWaitSites[] = {0x00BC1CAD, 0x00BC2D2B};
 constexpr uint32_t kAnimWaitVtable = 0x011DD04C;  // 4 methods: destructor, update, 2 more
 constexpr uint32_t kAnimWaitUpdate = 0x00BB9900;  // the class's update (vtable +4)
 constexpr double kAnimWaitCap = 10.0;   // no word from the game that moves the character: the wait ends anyway
 constexpr double kAnimDoneEarly = 3.0;  // that game's word may come this long before our wait began (its run went first)
+constexpr double kAnimHoldCap = 30.0;   // the longest our check holds a wait the game's own check called over
 uint32_t g_anim_wait = kAnimWait;
 uint32_t g_follow_vtable[5] = {};  // [0] the class's object locator (vtable - 4), then its 4 methods
 void (*g_anim_done_fn)(int entity, int anim) = nullptr;
@@ -3965,6 +3974,7 @@ struct AnimWait {
     double started = 0;
     bool reported = false;  // we moved the character and told the others it was over
     bool done = false;      // over here on the other game's word or the time limit
+    bool held = false;      // the game's check called it over while the animation was still requested
 };
 std::map<uint32_t, AnimWait> g_anim_waits;  // the wait objects with our update
 std::map<std::pair<int, int>, std::vector<double>> g_anim_done_heard;  // (entity, animation) -> when its end was told
@@ -3974,6 +3984,13 @@ bool moved_elsewhere(uint32_t chr) {
     if (is_remote_player(chr)) return true;
     uint32_t current = 0, net_ai = 0;
     return read32(chr + 0x2C, &current) && read32(chr + 0x414, &net_ai) && current && current == net_ai;
+}
+
+// The character's event animation request ([chr+0x10]+4) is this animation.
+bool requesting_anim(uint32_t chr, int anim) {
+    uint32_t request = 0, id = 0;
+    return chr && read32(chr + 0x10, &request) && request >= 0x10000 && read32(request + 4, &id) &&
+           static_cast<int>(id) == anim;
 }
 
 // Another game said this animation ended there, lately enough for a wait that began at `since`: the word is used up.
@@ -4012,6 +4029,16 @@ void __fastcall follow_wait_update(uint32_t wait, uint32_t, float dt, uint32_t e
     const bool elsewhere = moved_elsewhere(chr);
     static int lines = 0;
     if (bits & 1) {
+        // Called over while the animation is still requested in the game that moves the character: not yet.
+        if (!w.reported && chr && !elsewhere && seconds() - w.started < kAnimHoldCap && requesting_anim(chr, w.anim)) {
+            *ptr<uint8_t>(wait + 8) &= 0xFE;
+            if (!w.held && ++lines <= 60) {
+                LOG_INFO("[coop] Event %d: animation %d on %d called over by the game before it began here; held until "
+                         "it ends", w.event, w.anim, w.entity);
+            }
+            w.held = true;
+            return;
+        }
         // Over by the game's own check, in the game that moves the character: the others hear it.
         if (!w.reported && chr && !elsewhere && g_anim_done_fn) {
             w.reported = true;

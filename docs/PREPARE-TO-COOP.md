@@ -613,13 +613,14 @@ at thirty a second, against the game's 200 ms). At six a second everything is th
 older keeps sending six a second.
 
 The jump test divides the distance to the update by the gap since the one before. At the game's own rates that gap is
-a sixth of a second (players) or about a quarter (enemies), so only a copy metres away jumps; at thirty a second a
+a sixth of a second (players) or about 0.3 s (enemies, whose limit is their `networkWarpDist`, 16 m/s for nearly
+all), so only a copy metres away jumps; at thirty a second a
 metre over a thirtieth reads as 30 m/s. A copy a frame or two behind (the smoothing keeps it behind on purpose) jumped
 from update to update, and a fast one (the Asylum Demon's leap off its perch, the Taurus Demon's onto the bridge) at
 every update: steps thirty times a second on a picture drawn far more often, standing still between them, with a run
 left at a walk (2026-10-25 test: worse at sixty than at thirty, on a fast, low-latency connection). Above the game's
 own rate the time in the test is at least the game's own gap (stubs at `0xE1F370` and `0xE2162B`), so a copy jumps
-only when it is as far off as it would have to be at the game's own rate (players: 3.3 m).
+only when it is as far off as it would have to be at the game's own rate (players 3.3 m, most enemies 4.8 m).
 
 ### Update check
 
@@ -700,7 +701,12 @@ first, and when the animation ends in the game that moves the character, that ga
 player) the wait ends on that word, or after 10 s without one (a player of 1.2.0 or older, or a game that does not run
 the event), so what the event does next happens about when it does in the game that plays the animation. Ending the
 wait at once let the rest of such an event run ahead of the animation (a flag shared early, an AI switched on early),
-and returning no object crashed at `0x528B6F` (Sen's Fortress 11505051, 2026-10-25). A gauge whose boss is dead is no fight (`world::boss_fight`, `rules::own_gauge_tick`), and one whose
+and returning no object crashed at `0x528B6F` (Sen's Fortress 11505051, 2026-10-25). The game's own check
+(`0xE6CEC0`) can call the wait over before the animation has begun: it counts the request (`[chr+0x10]+4`) only for an
+enemy that is engaged (`chr+0xF4`), and the animation's slots come with the character's next update. The Asylum
+Demon's drop ended at once in the game that moved it, so its event took off SpEffect 4160 (state 47: no fall damage,
+`0xE7FFDC`) at the start of the 28 m drop, and the guest's copy landed 5 % down (2026-10-26). In the game that moves
+the character the wait now ends only once the request is no longer that animation (up to 30 s). A gauge whose boss is dead is no fight (`world::boss_fight`, `rules::own_gauge_tick`), and one whose
 bosses have all been dead for 10 s is taken down.
 
 When a boss passes to this game (another game moved it: its player fell, or ours came nearer), its AI here had been

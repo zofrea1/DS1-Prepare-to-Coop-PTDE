@@ -76,8 +76,9 @@ const uint8_t kTurnLoadWCode[8] = {0xF3, 0x0F, 0x10, 0x25, 0x64, 0x07, 0x16, 0x0
 
 // Both decodes jump the character to the update, instead of moving it there, when the distance over the gap since the
 // update before is above a speed (or the gap is not between 0 and 2 s): 20 m/s for players (the double at 0x11E7E50),
-// the enemy's own for enemies (NetAIManipulator +0x80). At the game's own rates the gap is a sixth of a second for
-// players and about a quarter for enemies, so only a copy metres away jumps. At thirty a second one metre over a
+// the enemy's own for enemies (NetAIManipulator +0x80: NpcParam networkWarpDist, 16 for nearly all of them; logged
+// 16.0 for the Asylum Demon, 2026-10-26). At the game's own rates the gap is a sixth of a second for players and
+// about 0.3 s for enemies (a round every 9 frames at 30 FPS), so only a copy metres away jumps. At thirty a second one metre over a
 // thirtieth reads as 30 m/s: a copy a frame or two behind (the smoothing keeps it NetworkSmoothing behind on purpose)
 // jumped from update to update, and a fast one (the Asylum Demon's leap off its perch, the Taurus Demon's onto the
 // bridge) at every update, in steps 30 times a second on a picture drawn 144 times, standing still between them, with
@@ -88,7 +89,7 @@ constexpr uint32_t kPlayerSnap = 0x00E1F370;  // cvtps2pd xmm1,xmm1 ; cvtps2pd x
 constexpr uint32_t kEnemySnap = 0x00E2162B;   // cvtps2pd xmm2,xmm0 ; cvtps2pd xmm1,xmm1 ; divsd xmm1,xmm2
 const uint8_t kPlayerSnapCode[10] = {0x0F, 0x5A, 0xC9, 0x0F, 0x5A, 0xD0, 0xF2, 0x0F, 0x5E, 0xCA};
 const uint8_t kEnemySnapCode[10] = {0x0F, 0x5A, 0xD0, 0x0F, 0x5A, 0xC9, 0xF2, 0x0F, 0x5E, 0xCA};
-constexpr double kEnemyGap = 0.25;  // the enemies' round at the game's own rate (kVanillaRoundGap)
+constexpr double kEnemyGap = 0.3;  // an enemy's gap at the game's own rate: a 0.25 s round taken every 9th frame at 30
 
 // Read by the stubs; all of it is the game's own behaviour at the game's own rate (g_frame 0 leaves the fifth,
 // g_smooth 0 the gap x 1.2 / 1.1, g_drain 0 one update per pop, the snap floors 0 the gap itself). The game thread

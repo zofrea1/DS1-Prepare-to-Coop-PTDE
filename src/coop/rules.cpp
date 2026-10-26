@@ -3901,16 +3901,40 @@ void boss_handover_tick() {
 }
 
 // An event waiting for an animation to end (Force Animation Playback with ShouldWaitForCompletion, 2003[18], and the
-// wait at 0xBC2D2B: 0xBB9A20, cdecl(entity, animation) -> the wait, which the callers do not keep). The end never comes
-// on a copy another game moves: the Bell Gargoyles' 11015396 brings the second gargoyle in with its animation 7001 and
+// wait at 0xBC2D2B): 0xBB9A20, cdecl(entity, animation), makes the wait, a condition object (0x24 bytes, vtable
+// 0x11DD04C: +0x1C entity, +0x20 animation), and the caller hands it to the event (0x528B60, eax), which adds it to
+// the event's condition group (+0x30) and updates it every frame (vtable +4, thiscall(dt, event)); the group's test
+// (0xBBDA00) reads bit 0 of +8, which the update sets once 0xD71970 says the animation is over. The end never comes on
+// a copy another game moves: the Bell Gargoyles' 11015396 brings the second gargoyle in with its animation 7001 and
 // only then takes its invincibility off and shows its gauge. In the game of a player far from the fight it waited
 // there the whole fight, so the gargoyle could not die in that game and its reward (11010750, lot 53500100) never came;
 // when the player walked up after the fight it went on and showed the dead gargoyle's gauge (2026-10-25). The Taurus
 // Demon's leap waited 81 s the same way (2026-10-18). Such a run goes on at once: the game that moves the character
-// plays the animation, and this game's copy follows the network.
+// plays the animation, and this game's copy follows the network. The event still needs its wait object (a null one
+// crashed at 0x528B6F: Sen's Fortress 11505051, animation 9001 on 1500101, 2026-10-25), so it gets the game's own with
+// a copy of its vtable whose update always says the animation is over.
 constexpr uint32_t kAnimWait = 0x00BB9A20;
 constexpr uint32_t kAnimWaitSites[] = {0x00BC1CAD, 0x00BC2D2B};
+constexpr uint32_t kAnimWaitVtable = 0x011DD04C;  // 4 methods: destructor, update, 2 more
 uint32_t g_anim_wait = kAnimWait;
+uint32_t g_done_wait_vtable[5] = {};  // [0] the class's object locator (vtable - 4), then its 4 methods
+
+void __fastcall done_wait_update(uint32_t wait, uint32_t, float, uint32_t) { *ptr<uint8_t>(wait + 8) |= 1; }
+
+// Makes the game's wait object one that is over at once; false if it is not the object expected.
+bool make_wait_done(uint32_t wait) {
+    uint32_t vt = 0;
+    if (!wait || !read32(wait, &vt) || vt != kAnimWaitVtable) return false;
+    if (!g_done_wait_vtable[2]) {
+        for (int i = 0; i < 5; ++i) {
+            if (!read32(kAnimWaitVtable - 4 + i * 4, &g_done_wait_vtable[i])) return false;
+        }
+        g_done_wait_vtable[2] = reinterpret_cast<uint32_t>(&done_wait_update);
+    }
+    *ptr<uint32_t>(wait) = reinterpret_cast<uint32_t>(&g_done_wait_vtable[1]);
+    *ptr<uint8_t>(wait + 8) |= 1;
+    return true;
+}
 
 bool moved_elsewhere(uint32_t chr) {
     if (!chr || chr == game::player()) return false;
@@ -3920,18 +3944,19 @@ bool moved_elsewhere(uint32_t chr) {
 }
 
 uint32_t __cdecl hk_anim_wait(int entity, int anim) {
+    const uint32_t wait = reinterpret_cast<uint32_t(__cdecl*)(int, int)>(g_anim_wait)(entity, anim);
     if (g_world_events && seamless_rules() && moved_elsewhere(chr_by_entity(entity))) {
+        const bool done = make_wait_done(wait);
         static std::set<int64_t> logged;
         const int64_t key = static_cast<int64_t>(entity) << 32 | static_cast<uint32_t>(anim);
         if (logged.size() < 40 && logged.insert(key).second) {
             uint32_t id = 0;
             if (g_cur_event) read32(g_cur_event + 0x28, &id);
-            LOG_INFO("[coop] Event %d: no wait for animation %d on %d (another game moves it; ours follows)",
-                     static_cast<int>(id), anim, entity);
+            LOG_INFO("[coop] Event %d: %s for animation %d on %d (another game moves it; ours follows)",
+                     static_cast<int>(id), done ? "no wait" : "the wait was not as expected; it waits", anim, entity);
         }
-        return 0;
     }
-    return reinterpret_cast<uint32_t(__cdecl*)(int, int)>(g_anim_wait)(entity, anim);
+    return wait;
 }
 
 void __stdcall note_ai_state(int entity, int state) {

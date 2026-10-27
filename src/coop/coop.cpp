@@ -159,15 +159,16 @@ int can_use(int32_t id) {
         // for the invasion (session.cpp, kInvaderEstus). Not in ds1sc.
         case 201: case 203: case 205: case 207: case 209: case 211: case 213: case 215:
             return invader && !coop::game::own_world() ? 1 : -1;
-        case 330:  // Homeward Bone: only the host, and it takes everyone; not while an invader is here, a teammate
-                   // is down or a reload is pending, but in a boss fight it is the way out, as in single player.
-                   // Every co-op player needs a bone (session::host_homeward says who has none).
+        case 330:  // Homeward Bone: the host or a co-op guest, and it takes everyone to the host's last bonfire; not
+                   // while an invader is here, a teammate is down or a reload is pending, but in a boss fight it is
+                   // the way out, as in single player. Every co-op player needs a bone (session::homeward says who
+                   // has none; the host checks a guest's again).
             if (!in_session) return -1;
-            return host && session::bone_hold() == session::kHoldNone ? 1 : 0;
+            return session::homeward_open() && session::bone_hold() == session::kHoldNone ? 1 : 0;
         case 117:  // Darksign: the Homeward Bone's trip at the cost of every soul and all humanity (SpEffect 3226),
                    // for everyone; the way out of a boss fight or an invasion too (invaders are sent home)
             if (!in_session) return -1;
-            return host && !session::darksign_held() ? 1 : 0;
+            return session::homeward_open() && !session::darksign_held() ? 1 : 0;
         case 115:  // Black Eye Orb
         case 116:
             if (!in_session) return -1;
@@ -189,16 +190,16 @@ bool use_item(int32_t id) {
         case items::kInfection: session::curse_world(); return true;
         case items::kParchment: parchment(); return true;
         case 330:
-            // In a session the host's bone takes everyone to the host's last bonfire (session tick).
+            // In a session the bone takes everyone to the host's last bonfire (session tick), whoever used it.
             if (!session::in_session()) return false;
-            session::host_homeward(session::kHomeBone);
+            session::homeward(session::kHomeBone);
             return true;
         case 117:
             // The Darksign's effect (SpEffect 3226) is the Homeward Bone's (3220, stateInfo 16) plus clearSoul and
             // heroPointDamage 99: the same trip for everyone, and the user loses every soul and all humanity, with
             // no bloodstain, as in the game (taken when the trip goes).
             if (!session::in_session()) return false;
-            session::host_homeward(session::kHomeDarksign);
+            session::homeward(session::kHomeDarksign);
             return true;
         default:
             return false;
@@ -217,25 +218,27 @@ bool give_blossom() {
 // ---------------------------------------------------------------- the Homeward miracle
 // Homeward (Magic 5210) puts on effect 580, which turns into 581 after 0.6 s: stateInfo 16, the return to the last
 // bonfire, as the Homeward Bone's 3220. The game marks it unusable in multiplayer (enable_multi off). In a session the
-// host may cast it whenever the Homeward Bone could be used (session::bone_hold, and no trip of the party's started
-// a moment ago), and it takes everyone home as the bone does, with no bone from anyone; nobody else casts it there.
-// The cast spends a use, so it is closed beforehand rather than refused afterwards.
+// host or a co-op guest may cast it whenever the Homeward Bone could be used (session::bone_hold, and no trip of the
+// party's started a moment ago), and it takes everyone to the host's last bonfire as the bone does, with no bone from
+// anyone. The cast spends a use, so it is closed beforehand rather than refused afterwards (a guest's can still be
+// refused by the host's game, which knows more).
 constexpr int32_t kHomewardMiracle = 5210;
 bool g_miracle = false;  // the return-to-bonfire call is hooked (world::set_homeward_state_handler)
 
 void homeward_miracle_tick() {
     using namespace coop;
-    const bool allow = g_miracle && session::hosting() && session::bone_hold() == session::kHoldNone &&
+    const bool allow = g_miracle && session::homeward_open() && session::bone_hold() == session::kHoldNone &&
                        !session::trip_slot_busy();
     static int shown = -1;
     if (static_cast<int>(allow) != shown && items::set_magic_multi(kHomewardMiracle, allow)) shown = allow ? 1 : 0;
 }
 
 // The return-to-bonfire state on our character. In a session only the Homeward miracle gets here: the bone's and the
-// Darksign's effects are never put on there (use_item). The host's takes everyone to the host's bonfire; anyone
-// else's is dropped (the session stays). The state is on for a few frames: the first frame of each effect asks for
-// the trip, the frames after it in the same effect do not (a second ask would be refused, the trip being queued). A
-// gap of half a second ends an effect: two casts are seconds apart, and a frame hitch inside one is shorter.
+// Darksign's effects are never put on there (use_item). The host's or a co-op guest's takes everyone to the host's
+// bonfire; anyone else's (an invader's) is dropped (the session stays). The state is on for a few frames: the first
+// frame of each effect asks for the trip, the frames after it in the same effect do not (a second ask would be
+// refused, the trip being queued). A gap of half a second ends an effect: two casts are seconds apart, and a frame
+// hitch inside one is shorter.
 bool homeward_state() {
     using namespace coop;
     if (!session::in_session()) return false;
@@ -244,11 +247,11 @@ bool homeward_state() {
     const bool fresh = t - last > 500;
     last = t;
     if (fresh) {
-        if (session::hosting()) {
+        if (session::homeward_open()) {
             LOG_INFO("[coop] The Homeward miracle: the party's trip home");
-            session::host_homeward(session::kHomeMiracle);
+            session::homeward(session::kHomeMiracle);
         } else {
-            LOG_INFO("[coop] A return to the bonfire in a session that is not the host's: dropped");
+            LOG_INFO("[coop] A return to the bonfire in a session that cannot take the party's trip: dropped");
         }
     }
     return true;

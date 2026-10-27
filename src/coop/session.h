@@ -78,14 +78,17 @@ void close_world();  // the host's Black Separation Crystal: every other player 
 void cycle_rules();  // Ominous Tome: none -> allies hostile -> teams -> none
 void taunt();        // Dried Fingers
 void curse_world();  // Cursed Pendant: curses our own world (offline or hosting), or lifts the curse
-// The host used a Homeward Bone in a session (one bone from every player), the Darksign (every soul and all humanity
-// from every player, taken when the trip goes) or the Homeward miracle (no cost but the cast): the host and every
-// guest go to the host's last bonfire. The trip takes the travel slot at once and goes on the next tick; false (and
-// the host told why) when no trip can go now.
+// A Homeward Bone used in a session (one bone from every player), the Darksign (every soul and all humanity from every
+// player, taken when the trip goes) or the Homeward miracle (no cost but the cast): the host and every guest go to the
+// host's last bonfire, whoever used it. The host's own takes the travel slot at once and goes on the next tick; false
+// (and the host told why) when no trip can go now. A co-op guest's asks the host's game (kHomewardAsk), which checks
+// and goes the same way (after its own menu closes) or tells the guest why not; true once asked.
 enum HomewardKind { kHomeBone, kHomeDarksign, kHomeMiracle };
-bool host_homeward(HomewardKind kind);
-// Host: a trip of the party's started less than 5 s ago (its load begins frames later) or the host's Homeward trip
-// waits to go on the next tick: no other trip can start (host_homeward and a guest's travel are refused).
+bool homeward(HomewardKind kind);
+// We may start that trip: we host, or we are a co-op guest in the world of a host that takes guests' (1.3.0).
+bool homeward_open();
+// Host: a trip of the party's started less than 5 s ago (its load begins frames later) or a Homeward trip waits to go:
+// no other trip can start (homeward and a guest's travel are refused).
 bool trip_slot_busy();
 
 // Item rules (Remastered Seamless Co-op's): a session is established (we host one or we are in one).

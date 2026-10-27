@@ -1494,7 +1494,83 @@ bool reset_window(ULONGLONG ms) {
     return g_world_reset_at && GetTickCount64() - g_world_reset_at < ms;
 }
 
+// The host's own scripted NPC deaths (2004[04] Force Character Death: 0xD799E0 sets the souls bit at chr+0x200 and
+// calls SetHP(chr, 0)) wait while another player stands at the NPC. Oscar dies once he has been talked to and the
+// player is in the hall or the corridor (11810530: talk flag 11810590-592 and 10000 in 1812121 / 1812990): the player
+// who talked, in vanilla, after the talk. In a session the guest's talk flag reached the host's game in the middle of
+// the talk, after the Estus and before the key, while the host lay dead in the Asylum Demon's hall (1812990): the
+// host's game killed him at once and his death event dropped the key on the floor (2026-10-26). A host standing in
+// the hall would have done the same. The death goes ahead once no other player stands within kTalkReach of the NPC
+// (the talker has walked away, as the event means), or after kNpcDeathWait.
+constexpr uint32_t kRetForceDeath = 0x00D79A0C;
+constexpr float kTalkReach = 5.0f;
+constexpr double kNpcDeathWait = 120.0;
+std::map<uint32_t, double> g_npc_deaths;  // the host's NPC -> since when its scripted death waits (cleared on loads)
+
+bool player_at(uint32_t chr, float reach) {
+    game::Vec3 at{};
+    if (!chr || !game::chr_position(chr, &at)) return false;
+    for (uint32_t p : game::remote_player_chrs()) {
+        game::Vec3 pos{};
+        uint32_t php = 0;
+        if (!p || !read32(p + 0x2D4, &php) || static_cast<int>(php) <= 0 || !game::chr_position(p, &pos)) continue;
+        const float dx = pos.x - at.x, dy = pos.y - at.y, dz = pos.z - at.z;
+        if (dx * dx + dy * dy + dz * dz <= reach * reach) return true;
+    }
+    return false;
+}
+
+int npc_entity(uint32_t chr) {
+    uint32_t e = 0;
+    return read32(chr + 0x208, &e) ? static_cast<int>(e) : 0;
+}
+
+bool hold_npc_death(uint32_t chr, int cur, uint32_t team) {
+    if (!g_state.active || !g_state.host || cur <= 0 || (team != 8 && team != 9)) return false;
+    if (!player_at(chr, kTalkReach)) return false;
+    if (g_npc_deaths.emplace(chr, seconds()).second) {
+        LOG_INFO("[coop] The scripted death of our NPC %d waits: another player stands at it (talking?)",
+                 npc_entity(chr));
+    }
+    return true;
+}
+
+void npc_death_tick() {
+    if (g_npc_deaths.empty()) return;
+    if (game::loading() || !g_state.active) {
+        g_npc_deaths.clear();
+        return;
+    }
+    for (auto it = g_npc_deaths.begin(); it != g_npc_deaths.end();) {
+        const uint32_t chr = it->first;
+        uint32_t cur = 0;
+        if (!read32(chr + 0x2D4, &cur) || static_cast<int>(cur) <= 0) {
+            it = g_npc_deaths.erase(it);
+            continue;
+        }
+        const bool waited = seconds() - it->second > kNpcDeathWait;
+        if (!waited && player_at(chr, kTalkReach + 1.0f)) {
+            ++it;
+            continue;
+        }
+        LOG_INFO("[coop] Our NPC %d's scripted death goes ahead (%s)", npc_entity(chr),
+                 waited ? "time limit" : "no other player stands at it now");
+        it = g_npc_deaths.erase(it);
+        __try {
+            reinterpret_cast<void(__stdcall*)(uint32_t, int)>(kSetHp)(chr, 0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+}
+
 int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
+    if (hp <= 0 && chr && ret == kRetForceDeath && g_state.host && !g_state.invader) {
+        uint32_t cur = 0, team = 0;
+        if (read32(chr + 0x2D4, &cur) && read32(chr + 0x74, &team) &&
+            hold_npc_death(chr, static_cast<int>(cur), team)) {
+            return static_cast<int>(cur);
+        }
+    }
     if (hp > 0 || !chr || !g_state.active || !g_state.guest || g_state.invader) return hp;
     uint32_t cur = 0, team = 0, max_hp = 0;
     if (!read32(chr + 0x2D4, &cur) || static_cast<int>(cur) <= 0 || !read32(chr + 0x74, &team) ||
@@ -4630,6 +4706,7 @@ void tick() {
     g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;
     world_resetting();
     cut_wait_tick();
+    npc_death_tick();
     if (game::loading() && !g_host_killed.empty()) g_host_killed.clear();
     if (game::loading() && !g_mirroring_events.empty()) g_mirroring_events.clear();
     if (!g_state.active && !g_flag_churn.empty()) {

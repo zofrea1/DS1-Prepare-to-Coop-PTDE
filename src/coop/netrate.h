@@ -20,7 +20,7 @@
 namespace coop::netrate {
 
 constexpr int kVanilla = 6;         // the game's own rate: every 5 frames at 30 FPS
-constexpr int kMax = 30;            // once per 30 FPS frame
+constexpr int kMax = 60;            // twice per 30 FPS frame (the FPS Unlock's reload counts parts of a frame)
 constexpr int kMaxSmoothing = 200;  // ms
 
 // The receiving side's patches (newest update, movement and turn in the update's time). False when this build of the

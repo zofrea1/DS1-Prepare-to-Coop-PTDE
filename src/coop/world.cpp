@@ -77,6 +77,8 @@ CharFn g_warp_orig = nullptr;
 bool g_bypass = false;
 bool g_limbo = false;
 bool g_team_hold = false;   // a team wipe or a lost fight's reload: our respawn waits for the others' (session)
+bool g_reward_hold = false; // our respawn waits for a boss's rewards to come in this game (reward_pending)
+const char* reward_pending();
 bool g_team_asked = false;  // asked once per death: a second warp of the same death does not wait again
 double g_death_at = 0;          // our death, or the end of its wait (spectating, limbo, the team); 0 while we live
 double g_fell_at = 0;           // when we fell, for the death we are in
@@ -99,6 +101,8 @@ std::map<uint32_t, int> g_forced_max;   // EnemyIns -> the max HP we wrote while
 double g_last_scale = 0;
 int g_debuff_applied = 0;          // debuff effect id on the local player (0 none)
 void (*g_wither_fn)() = nullptr;   // the Crimson Blossoms leave the inventory (coop.cpp)
+bool (*g_blossom_give_fn)() = nullptr;  // one more Crimson Blossom (coop.cpp)
+double g_no_session_since = 0;     // in the world without a session since then (the blossoms go)
 const char* g_wither_pending = nullptr;  // they are to wither once we have a character again (why)
 bool g_wither_tell = false;
 // The health the death debuff took, given back once our max HP is whole again (wither_blossoms).
@@ -480,6 +484,7 @@ void wither_blossoms(const char* why, bool tell) {
 // (session::wipe_reload). True when the reload keeps the world (the others are told with our "went"). When it
 // does not, the Crimson Blossoms wither, as at a rest, and the other games' enemy positions from before are dropped.
 void arm_pos_drain();
+void give_death_blossom();
 bool keep_dead_on_reload() {
     if (!g_active || g_invader || !local_dead()) return false;
     bool keep = false;
@@ -493,6 +498,7 @@ bool keep_dead_on_reload() {
         if (!keep) wither_blossoms("our reload starts the world over", false);
     }
     if (!keep) arm_pos_drain();
+    if (keep) give_death_blossom();
     return keep;
 }
 
@@ -552,6 +558,15 @@ char __cdecl hk_warp_kick() {
         g_team_asked = true;
         if (session::team_respawn_wait()) {
             g_team_hold = true;
+            return 1;
+        }
+    }
+    // A boss's rewards still to come in this game (reward_pending): released in tick.
+    if (!g_bypass && g_reward_hold) return 1;
+    if (!g_bypass && g_active && !g_invader && local_dead()) {
+        if (const char* why = reward_pending()) {
+            g_reward_hold = true;
+            LOG_INFO("[coop] Our respawn waits for %s", why);
             return 1;
         }
     }
@@ -694,6 +709,85 @@ void pos_drain_tick() {
     } else if (now() - g_pos_drain_armed_at > 30.0) {
         g_pos_drain_armed = false;  // no load came
     }
+}
+
+// ---------------------------------------------------------------- a boss's rewards for a fallen player
+// Every boss's rewards come from common event 970(defeat flag, lot 1, lot 2, lot 3): when the flag turns on it awards
+// lot 1 to every player (2003[36]), then 5 s later lots 2 and 3; its first line ends it if the flag is already on
+// when it starts, so a load in between loses the rest for good. On 2026-10-26 the host, spectating the guest's Asylum
+// Demon fight, respawned 4 s after flag 16 came: it got the Big Pilgrim's Key (lot 2660) but not the Humanity (lot
+// 9000). A fallen player's respawn waits for a boss's rewards: until 6.5 s after a defeat flag turned on in this game,
+// and, after a boss fight we fell in was won (our gauge up, its boss dead) with no flag yet (a long death animation),
+// up to 12 s. The flags are every 970's first parameter in the common events.
+constexpr int kBossDefeatFlags[] = {2,        3,        4,        5,        6,        7,        9,        10,
+                                    11,       13,       14,       15,       16,       17,       11010901, 11010902,
+                                    11200900, 11210000, 11210001, 11210004, 11410410, 11410900, 11410901, 11510900,
+                                    11510902, 11510903, 11810900};
+constexpr double kRewardAfterFlag = 6.5;
+constexpr double kRewardWait = 12.0;
+uint32_t g_defeat_on = 0;        // bit i: kBossDefeatFlags[i] read on lately
+bool g_defeat_known = false;     // g_defeat_on holds this load's values
+double g_defeat_at = 0;          // when a defeat flag last turned on in this game (0 never)
+double g_fight_over_at = 0;      // a boss fight ended while we were down (0 none)
+bool g_was_fight = false;
+
+uint32_t boss_handle(int slot);
+
+void defeat_tick() {
+    const uint32_t me = game::player();
+    if (game::loading() || !me) {
+        g_defeat_known = false;
+        return;
+    }
+    uint32_t on = 0;
+    for (size_t i = 0; i < sizeof(kBossDefeatFlags) / sizeof(kBossDefeatFlags[0]); ++i) {
+        if (game::flag(kBossDefeatFlags[i])) on |= 1u << i;
+    }
+    if (g_defeat_known && (on & ~g_defeat_on)) {
+        g_defeat_at = now();
+        for (size_t i = 0; i < sizeof(kBossDefeatFlags) / sizeof(kBossDefeatFlags[0]); ++i) {
+            if ((on & ~g_defeat_on) & (1u << i)) {
+                LOG_INFO("[coop] Boss defeat flag %d is on: its rewards come over the next 5 s", kBossDefeatFlags[i]);
+            }
+        }
+    }
+    g_defeat_on = on;
+    g_defeat_known = true;
+    const bool fight = boss_fight() || rules::state().teammate_boss_fight;
+    if (!local_dead()) {
+        g_fight_over_at = 0;
+    } else if (g_was_fight && !fight) {
+        // Won: our gauge is still up with its boss dead (it comes down 10 s later). A lost fight or a rest is not
+        // waited for here.
+        for (int slot = 0; slot < 2; ++slot) {
+            const uint32_t h = boss_handle(slot);
+            if (h != 0xFFFFFFFF && rules::gauge_boss_dead(h)) g_fight_over_at = now();
+        }
+    }
+    g_was_fight = fight;
+}
+
+const char* reward_pending() {
+    const double t = now();
+    if (g_defeat_at > 0 && t - g_defeat_at < kRewardAfterFlag) return "a boss's later rewards";
+    if (g_fight_over_at > 0 && t - g_fight_over_at < kRewardWait && g_defeat_at < g_fight_over_at - 2.0) {
+        return "a boss's defeat (its rewards)";
+    }
+    return nullptr;
+}
+
+// Our death keeps the world: it costs a Crimson Blossom, unless the team defeated a boss while we were down (the
+// fight we fell in was won). Shown on screen, as the game's own item boxes are not (items.cpp).
+void give_death_blossom() {
+    if (!g_cfg.death_debuffs || g_invader || !g_blossom_give_fn) return;
+    if (g_fell_at > 0 && g_defeat_at >= g_fell_at) {
+        LOG_INFO("[coop] No Crimson Blossom for this death: the team defeated a boss while we were down");
+        return;
+    }
+    if (!g_blossom_give_fn()) return;
+    const int n = g_blossom_count_fn ? g_blossom_count_fn() : 1;
+    LOG_INFO("[coop] A Crimson Blossom for this death (%d held)", n);
+    text::show(L"Crimson Blossom received: maximum HP lowered until anyone rests");
 }
 
 // The respawn warp that waited (limbo, a team wipe) goes ahead.
@@ -1293,7 +1387,8 @@ static void death_watch_tick() {
         g_return_cleared = false;
         return;
     }
-    if (g_death_at == 0 || spectate::holding() || g_limbo || g_team_hold || game::loading() || menu_open()) {
+    if (g_death_at == 0 || spectate::holding() || g_limbo || g_team_hold || g_reward_hold || game::loading() ||
+        menu_open()) {
         g_death_at = now();
         return;
     }
@@ -1532,6 +1627,27 @@ void tick() {
             respawn_now();
         }
     }
+    defeat_tick();
+    if (g_reward_hold) {
+        if (!local_dead()) {
+            g_reward_hold = false;
+        } else if (!reward_pending()) {
+            g_reward_hold = false;
+            LOG_INFO("[coop] Our respawn goes: the boss's rewards are in");
+            respawn_now();
+        }
+    }
+    // The Crimson Blossoms belong to a session: in the world with none for 3 s (home again, the session closed, a
+    // character loaded with some from an earlier session), they wither. At home they lie in the own world's key
+    // array, which a visit to another world does not show, so one from a death at home came back after a visit.
+    if (me && !g_active && !game::loading()) {
+        if (g_no_session_since == 0) g_no_session_since = now();
+        if (now() - g_no_session_since > 3.0 && g_blossom_count_fn && g_blossom_count_fn() > 0) {
+            wither_blossoms("no session (they last a session)", false);
+        }
+    } else {
+        g_no_session_since = 0;
+    }
     if (!game::loading()) {
         scale_tick();
     } else {
@@ -1571,6 +1687,7 @@ void set_before_rest_handler(void (*fn)()) { g_before_rest_fn = fn; }
 void set_death_handler(void (*fn)()) { g_death_fn = fn; }
 void set_blossom_counter(int (*fn)()) { g_blossom_count_fn = fn; }
 void set_blossom_wither(void (*fn)()) { g_wither_fn = fn; }
+void set_blossom_give(bool (*fn)()) { g_blossom_give_fn = fn; }
 
 void clear_death_debuff() {
     const uint32_t me = game::player();
@@ -1656,6 +1773,7 @@ void warp_now(int map, int point) {
     // This warp replaces a respawn that waits for the team (the trip home): it must not go as well.
     if (g_team_hold) LOG_INFO("[coop] Team wipe: our respawn no longer waits (another warp goes instead)");
     g_team_hold = false;
+    g_reward_hold = false;
     g_team_asked = true;
     g_limbo = false;
     g_bypass = true;

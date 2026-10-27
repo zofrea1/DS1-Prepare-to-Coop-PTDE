@@ -40,6 +40,9 @@ void set_blossom_counter(int (*fn)());
 // Takes every Crimson Blossom out of the inventory: besides our own rest, another player's rest and a death whose
 // reload starts the world over (a team wipe) wither them, and the health the debuff took comes back.
 void set_blossom_wither(void (*fn)());
+// Adds one Crimson Blossom (up to five; coop.cpp): true when one was added. A death that keeps the world costs one,
+// when its respawn warp goes (keep_dead_on_reload).
+void set_blossom_give(bool (*fn)());
 // A bonfire rest: take off every death-debuff effect immediately. The inventory clear is separate.
 void clear_death_debuff();
 // Another player rested: reset this world (enemies respawn), wither the Crimson Blossoms, end limbo.

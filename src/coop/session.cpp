@@ -3716,8 +3716,8 @@ void send_death() {
         g_team_fell = true;
         LOG_INFO("[coop] We fell while invading; another invader stands: the invasion is not decided yet");
     }
-    // The death debuff (Remastered Seamless Co-op): a Crimson Blossom per death in a session, up to five.
-    if (g_cfg.death_debuffs && !g_invade && items::count(items::kBlossom) < 5) items::give(items::kBlossom, 1);
+    // The death debuff (Remastered Seamless Co-op): a Crimson Blossom per death in a session, up to five. It is given
+    // when the respawn warp goes and the reload keeps the world (world::keep_dead_on_reload).
     PlayerEvent e = player_event(kDead, steam::self(), g_invade, utf8(own_name()));
     e.lost = lost_invasion ? 1 : 0;
     if (g_role == Role::Host) {

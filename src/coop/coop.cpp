@@ -391,6 +391,9 @@ void coop_install(const CoopConfig& config) {
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
+    const int scaling[6] = {g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture,
+                            g_cfg.boss_health,  g_cfg.boss_damage,  g_cfg.boss_posture};
+    std::copy(std::begin(scaling), std::end(scaling), cfg.scaling);
     cfg.test_protocol = g_cfg.test_protocol;
     cfg.test_version = g_cfg.test_version;
     coop::session::configure(cfg);

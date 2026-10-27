@@ -21,6 +21,9 @@ struct Config {
 
 bool install();
 void configure(const Config& cfg);
+// A guest in a host's world scales the enemies with the host's settings (null: our own INI's again). The six are
+// enemy health, damage, posture, then boss health, damage, posture, in percent per extra player.
+void set_host_scaling(const int* scaling);
 void tick();
 
 // Session state the rules depend on.

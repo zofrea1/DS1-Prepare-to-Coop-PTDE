@@ -162,6 +162,12 @@ struct StateMore2 {
     StateMore more;
     uint8_t seal_fogs;  // the host's SealBossFogsDuringInvasions: 1 the boss fogs stay shut while an invader is here
 };
+// And behind StateMore2: the host's enemy and boss scaling (EnemyHealthScaling ... BossPostureScaling), which its
+// guests use in its world. A host without it leaves each guest its own.
+struct StateMore3 {
+    StateMore2 more2;
+    int16_t scaling[6];
+};
 struct Info {
     Header h;
     int32_t soul_level;
@@ -476,6 +482,7 @@ double g_follow_at = 0;
 bool g_bone_owed = false;
 int g_host_net_rate = 0;  // guest: the host's NetworkTickRate (StateMore), 0 not heard
 bool g_host_seal_fogs = false;  // guest: the host's SealBossFogsDuringInvasions (StateMore)
+bool g_host_scaling = false;    // guest: the host's scaling is in use (world::set_host_scaling)
 // A cutscene is taking us into another map (rules, Play Cutscene and Warp Player): announced once we are there.
 int g_cut_map = -1;
 int g_cut_point = -1;
@@ -1268,6 +1275,8 @@ void finish(const std::wstring& why) {
     g_bone_owed = false;
     g_host_net_rate = 0;
     g_host_seal_fogs = false;
+    if (g_host_scaling) world::set_host_scaling(nullptr);
+    g_host_scaling = false;
     g_follow_travel = -1;
     g_travel_bonfire = -1;
     g_travel_asked = 0;
@@ -2045,7 +2054,8 @@ void host_tick() {
     if (now() - g_last_state > 1.0) {
         g_last_state = now();
         const auto& st = rules::state();
-        StateMore2 more2{};
+        StateMore3 more3{};
+        StateMore2& more2 = more3.more2;
         StateMore& more = more2.more;
         StateMsg& s = more.state;
         fill_header(&s, kState);
@@ -2064,9 +2074,12 @@ void host_tick() {
         s.taunt = st.taunt ? 1 : 0;
         more.net_rate = static_cast<uint8_t>(g_cfg.net_rate);
         more2.seal_fogs = g_cfg.seal_boss_fogs ? 1 : 0;
+        for (int i = 0; i < 6; ++i) {
+            more3.scaling[i] = static_cast<int16_t>(std::max(-1000, std::min(1000, g_cfg.scaling[i])));
+        }
         rules::state().invader_present = invader;
         g_host_coop_players = coop;
-        broadcast(more2);
+        broadcast(more3);
     }
 }
 
@@ -3216,6 +3229,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 g_host_seal_fogs = seal;
                 LOG_INFO("[coop] The host's boss fogs %s while an invader is in the world (SealBossFogsDuringInvasions)",
                          g_host_seal_fogs ? "stay shut" : "stay open");
+            }
+            StateMore3 more3{};
+            if (as(&more3)) {
+                const int scaling[6] = {more3.scaling[0], more3.scaling[1], more3.scaling[2],
+                                        more3.scaling[3], more3.scaling[4], more3.scaling[5]};
+                world::set_host_scaling(scaling);
+                g_host_scaling = true;
             }
             break;
         }

@@ -1449,9 +1449,39 @@ bool install() {
     return failed == 0;
 }
 
+Config g_own_cfg;  // the INI's
+
 void configure(const Config& cfg) {
     g_cfg = cfg;
+    g_own_cfg = cfg;
     g_rows_ready = false;
+}
+
+// Each game scales the enemies itself, but the host's game decides their health for every game, as a number (the
+// HP sync, 0xE40FE0). With the host at BossHealthScaling 105 and the guest at 115 (2026-10-26) the Asylum Demon's
+// whole health filled 95 % of the guest's bar (x2.05 of x2.15), all fight long. So a guest takes the host's six.
+void set_host_scaling(const int* s) {
+    Config want = g_cfg;
+    if (s) {
+        want.enemy_health = s[0], want.enemy_damage = s[1], want.enemy_posture = s[2];
+        want.boss_health = s[3], want.boss_damage = s[4], want.boss_posture = s[5];
+    } else {
+        want.enemy_health = g_own_cfg.enemy_health, want.enemy_damage = g_own_cfg.enemy_damage;
+        want.enemy_posture = g_own_cfg.enemy_posture, want.boss_health = g_own_cfg.boss_health;
+        want.boss_damage = g_own_cfg.boss_damage, want.boss_posture = g_own_cfg.boss_posture;
+    }
+    if (want.enemy_health == g_cfg.enemy_health && want.enemy_damage == g_cfg.enemy_damage &&
+        want.enemy_posture == g_cfg.enemy_posture && want.boss_health == g_cfg.boss_health &&
+        want.boss_damage == g_cfg.boss_damage && want.boss_posture == g_cfg.boss_posture) {
+        return;
+    }
+    g_cfg = want;
+    build_rows();         // in place: the effects already on enemies point at these rows and take the new values
+    g_logged_level = -1;   // the level line again, with the new rates
+    LOG_INFO("[coop] Enemy scaling: %s (health %d/%d %%, damage %d/%d %%, posture %d/%d %% per extra player, "
+             "enemies/bosses)",
+             s ? "the host's settings" : "our own settings again", g_cfg.enemy_health, g_cfg.boss_health,
+             g_cfg.enemy_damage, g_cfg.boss_damage, g_cfg.enemy_posture, g_cfg.boss_posture);
 }
 
 void tick() {

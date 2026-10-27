@@ -1322,6 +1322,41 @@ bool __cdecl hk_kill_souls_client() {
     return reinterpret_cast<bool(__cdecl*)()>(kIsClient)();
 }
 
+// ---------------------------------------------------------------- an invader takes no boss rewards
+// A boss's death (2003[12] Handle Boss Defeat: Lua event 4050 through 0xD66240) runs BlockClear2 in every game in the
+// world: the clear bonus (SetClearBonus, the area's GameAreaParam bonusSoul, into PlayerGameData+0xF0) paid by
+// GetClearBonus (0xD5DEB0, stdcall with one argument: the bonus to the player's souls, PGD+0xF0 zeroed), and a black phantom sent home.
+// Its rewards come from common event 970: Award Items (Including Clients) (2003[36], 0xD66590 stdcall(lot) from
+// 0xBC23C0). In vanilla an invader is never there (the host's entry into the boss room sends it home first). An
+// invader that arrived in a 1.2.0 host's world while a guest fought the Moonlight Butterfly was there when it died 8 s
+// later: sent home with 6500 of its souls (2026-10-26). In a session an invader takes neither: the souls of the
+// clear bonus go nowhere and the world's "every player" item awards pass it by. Being sent home stays.
+constexpr uint32_t kGetClearBonus = 0x00D5DEB0;
+constexpr uint32_t kAwardAllSite = 0x00BC23C0;
+constexpr uint32_t kAwardAll = 0x00D66590;
+void* g_clear_bonus_orig = nullptr;
+
+bool invader_here() { return g_state.active && g_state.invader; }
+
+void __stdcall hk_clear_bonus(int arg) {
+    if (invader_here()) {
+        const uint32_t pgd = game::player_game_data();
+        float bonus = 0;
+        if (pgd && read32(pgd + 0xF0, reinterpret_cast<uint32_t*>(&bonus))) *ptr<float>(pgd + 0xF0) = 0.0f;
+        LOG_INFO("[coop] A boss died in the world we invade: its %.0f souls are not ours", bonus);
+        return;
+    }
+    reinterpret_cast<void(__stdcall*)(int)>(g_clear_bonus_orig)(arg);
+}
+
+char __stdcall hk_award_all(int lot) {
+    if (invader_here()) {
+        LOG_INFO("[coop] The world we invade awards item lot %d to every player: not to us", lot);
+        return 1;
+    }
+    return reinterpret_cast<char(__stdcall*)(int)>(kAwardAll)(lot);
+}
+
 // ---------------------------------------------------------------- a guest's events do not see a missing character as dead
 // EcTestChrHpRate (IF HP Ratio, 4[02]; vtable 0x11DD450 slot 1 = 0xBB8380, thiscall(cond, 2 args)): entity at
 // +0x18, comparison +0x1C, ratio +0x20, result in bit 0 of +8. The character comes from 0xD6C360 (eax = entity);
@@ -4377,6 +4412,13 @@ int install() {
         g_lua_call_start = reinterpret_cast<LuaCallStartFn>(
             detour(kLuaCallStart, k, sizeof(k), reinterpret_cast<void*>(&hk_lua_call_start)));
         failed += install_one("LuaCallStart filter", g_lua_call_start != nullptr);
+    }
+    {
+        static const uint8_t k[5] = {0xA1, 0x00, 0x87, 0x37, 0x01};  // mov eax,[01378700h]
+        g_clear_bonus_orig = detour(kGetClearBonus, k, sizeof(k), reinterpret_cast<void*>(&hk_clear_bonus));
+        failed += install_one("boss clear bonus (invaders)", g_clear_bonus_orig != nullptr);
+        failed += install_one("event item awards (invaders)",
+                              redirect_call(kAwardAllSite, kAwardAll, reinterpret_cast<void*>(&hk_award_all)));
     }
     {
         static const uint8_t k[7] = {0x57, 0x8B, 0x3D, 0x2C, 0xD8, 0x37, 0x01};  // push edi ; mov edi,[SessMan]

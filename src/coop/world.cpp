@@ -729,6 +729,7 @@ constexpr double kRewardAfterFlag = 9.0;
 constexpr double kRewardWait = 12.0;
 uint32_t g_defeat_on = 0;        // bit i: kBossDefeatFlags[i] read on lately
 bool g_defeat_known = false;     // g_defeat_on holds this load's values
+uint32_t g_defeat_store = 0;     // the flag store they were read from (EventFlagMan+0x10C)
 double g_defeat_at = 0;          // when a defeat flag last turned on in this game (0 never)
 double g_fight_over_at = 0;      // a boss fight ended while we were down (0 none)
 bool g_was_fight = false;
@@ -740,6 +741,14 @@ void defeat_tick() {
     if (game::loading() || !me) {
         g_defeat_known = false;
         return;
+    }
+    // A session's end switches the flags read from the visited world's store to our own before the load home: a boss
+    // we had beaten at home looked defeated just then (the Moonlight Butterfly's 11200900 when an invasion ended,
+    // 2026-10-26). A switch of store starts the comparison over.
+    uint32_t efm = 0, store = 0;
+    if (read32(0x0137D7D4, &efm) && efm && read32(efm + 0x10C, &store) && store != g_defeat_store) {
+        g_defeat_store = store;
+        g_defeat_known = false;
     }
     uint32_t on = 0;
     for (size_t i = 0; i < sizeof(kBossDefeatFlags) / sizeof(kBossDefeatFlags[0]); ++i) {

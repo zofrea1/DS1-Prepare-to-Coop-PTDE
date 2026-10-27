@@ -742,9 +742,10 @@ void defeat_tick() {
         g_defeat_known = false;
         return;
     }
-    // A session's end switches the flags read from the visited world's store to our own before the load home: a boss
-    // we had beaten at home looked defeated just then (the Moonlight Butterfly's 11200900 when an invasion ended,
-    // 2026-10-26). A switch of store starts the comparison over.
+    // A session's end switches the flags read from the visited world's store to our own before the load home, where
+    // a boss beaten in one world and not the other would look defeated. A switch of store starts the comparison over.
+    // (The Moonlight Butterfly's 11200900 at the end of an invasion, 2026-10-26, was no such switch: it really died in
+    // the invaded world, which is what sent the invader home.)
     uint32_t efm = 0, store = 0;
     if (read32(0x0137D7D4, &efm) && efm && read32(efm + 0x10C, &store) && store != g_defeat_store) {
         g_defeat_store = store;

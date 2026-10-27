@@ -716,14 +716,16 @@ void pos_drain_tick() {
 // lot 1 to every player (2003[36]), then 5 s later lots 2 and 3; its first line ends it if the flag is already on
 // when it starts, so a load in between loses the rest for good. On 2026-10-26 the host, spectating the guest's Asylum
 // Demon fight, respawned 4 s after flag 16 came: it got the Big Pilgrim's Key (lot 2660) but not the Humanity (lot
-// 9000). A fallen player's respawn waits for a boss's rewards: until 6.5 s after a defeat flag turned on in this game,
-// and, after a boss fight we fell in was won (our gauge up, its boss dead) with no flag yet (a long death animation),
-// up to 12 s. The flags are every 970's first parameter in the common events.
+// 9000). A fallen player's respawn waits for a boss's rewards: until 9 s after a defeat flag turned on in this game
+// (the last reward comes 5 s after the flag, then its box stays on screen a while: at 6.5 s the Humanity's box was up
+// for 1.5 s before the fade, 2026-10-26), and, after a boss fight we fell in was won (our gauge up, its boss dead)
+// with no flag yet (a long death animation), up to 12 s. The flags are every 970's first parameter in the common
+// events.
 constexpr int kBossDefeatFlags[] = {2,        3,        4,        5,        6,        7,        9,        10,
                                     11,       13,       14,       15,       16,       17,       11010901, 11010902,
                                     11200900, 11210000, 11210001, 11210004, 11410410, 11410900, 11410901, 11510900,
                                     11510902, 11510903, 11810900};
-constexpr double kRewardAfterFlag = 6.5;
+constexpr double kRewardAfterFlag = 9.0;
 constexpr double kRewardWait = 12.0;
 uint32_t g_defeat_on = 0;        // bit i: kBossDefeatFlags[i] read on lately
 bool g_defeat_known = false;     // g_defeat_on holds this load's values

@@ -561,7 +561,8 @@ char __cdecl hk_warp_kick() {
             return 1;
         }
     }
-    // A boss's rewards still to come in this game (reward_pending): released in tick.
+    // A boss's rewards still to come in this game (reward_pending): released in tick, which asks for the team's
+    // barrier again (a teammate may fall meanwhile).
     if (!g_bypass && g_reward_hold) return 1;
     if (!g_bypass && g_active && !g_invader && local_dead()) {
         if (const char* why = reward_pending()) {
@@ -1645,8 +1646,16 @@ void tick() {
             g_reward_hold = false;
         } else if (!reward_pending()) {
             g_reward_hold = false;
-            LOG_INFO("[coop] Our respawn goes: the boss's rewards are in");
-            respawn_now();
+            // A teammate who fell during the wait made this a team wipe: our respawn waits for theirs at the barrier,
+            // as at our first warp (their game's barrier waits 15 s or more for ours, longer than this hold). The wait
+            // itself is not cut short: our game's own event 970 gives our later rewards, and only our reload ends it.
+            if (session::team_respawn_wait()) {
+                LOG_INFO("[coop] The boss's rewards are in; our respawn now waits for the team");
+                g_team_hold = true;
+            } else {
+                LOG_INFO("[coop] Our respawn goes: the boss's rewards are in");
+                respawn_now();
+            }
         }
     }
     // The Crimson Blossoms belong to a session: in the world with none for 3 s (home again, the session closed, a

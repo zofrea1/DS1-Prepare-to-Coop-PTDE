@@ -94,6 +94,8 @@ bool trip_slot_busy();
 
 // Item rules (Remastered Seamless Co-op's): a session is established (we host one or we are in one).
 bool in_session();
+// Whose world we are in: our own Steam id at home, the host's in theirs (0 when not known).
+uint64_t world_owner();
 bool hosting();
 bool guest();
 bool active();       // any role, including searching and joining

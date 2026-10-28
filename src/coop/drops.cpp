@@ -33,10 +33,11 @@ namespace {
 // script: the Black Knights, crystal lizards, drakes, Titanite Demons, mimics, Pinwheel's masks, the Stray Demon's
 // slab, the Taurus and Capra Demons' weapons, Havel, Ricard's Rapier, the Oolacile Humanity sprites.
 struct Row {
-    int32_t flag;     // on once it is gone for good: its script's own done flag, or the boss flag
-    int32_t entity;   // the enemy (0: common event 970's boss rewards)
-    int32_t floor;    // its own drop, on the floor where it dies (0 none)
-    int32_t lots[3];  // what its scripts award, into the inventory (0 none)
+    int32_t flag;       // on once it is gone for good: its script's own done flag, or the boss flag
+    int32_t entity;     // the enemy (0: common event 970's boss rewards)
+    int32_t floor;      // its own drop, on the floor where it dies (0 none)
+    int32_t lots[3];    // what its scripts award, into the inventory (0 none)
+    int32_t boss_slot;  // event 970's slot that awards a boss's rewards (-1: an enemy's row)
 };
 const Row kRows[] = {
 #include "drops_table.inc"
@@ -53,7 +54,6 @@ constexpr double kWait = 12.0;
 // session while its flag is on.
 constexpr double kAliveWait = 90.0;
 constexpr double kForget = 120.0;    // a record without a drop of ours outlives its last change by this much
-constexpr double kBossAward = 30.0;  // common event 970 awards within 5 s of its flag: a later flag is another boss's
 constexpr double kRetry = 5.0;       // an item that did not fit in the inventory is tried again this often
 
 struct Item {
@@ -68,7 +68,8 @@ struct Owed {
 };
 
 struct State {
-    double armed_at = 0;  // its flag turned on in our game during a session (0: not yet, or the session ended)
+    uint64_t world = 0;   // whose world it was recorded in (session::world_owner)
+    double armed_at = 0;  // its flag turned on in our game during a session (0: not yet)
     double touched = 0;   // last change
     int loads = 0;        // g_loads when it was armed
     uint8_t got = 0;      // what our game has: its own roll, or ours
@@ -289,15 +290,29 @@ void roll_lot(int lot, State* s) {
 void deliver(State* s, std::vector<std::wstring>* names, std::vector<std::wstring>* full) {
     for (auto e = s->owed.begin(); e != s->owed.end();) {
         for (auto it = e->items.begin(); it != e->items.end();) {
-            const std::wstring name = item_name(*it);
-            if (add_to_inventory(*it)) {
-                LOG_INFO("[coop] One-time drop: item %08X %d x%d is in the inventory", it->category, it->id, it->count);
+            // The add takes a whole stack or nothing (0xC0B700 returns -1); as many as fit go in, the game's award
+            // asking 0xDC55C0 how many that is.
+            int put = 0;
+            for (int k = it->count; k >= 1 && !put; --k) {
+                Item part = *it;
+                part.count = k;
+                if (add_to_inventory(part)) put = k;
+            }
+            if (put) {
+                Item part = *it;
+                part.count = put;
+                LOG_INFO("[coop] One-time drop: item %08X %d x%d is in the inventory", it->category, it->id, put);
                 ++s->landed;
-                if (!items::show_obtained(it->category, it->id, it->count) && !name.empty()) names->push_back(name);
+                const std::wstring name = item_name(part);
+                if (!items::show_obtained(it->category, it->id, put) && !name.empty()) names->push_back(name);
+                it->count -= put;
+            }
+            if (it->count <= 0) {
                 it = e->items.erase(it);
             } else {
                 LOG_INFO("[coop] One-time drop: item %08X %d x%d did not fit in the inventory; it stays owed",
                          it->category, it->id, it->count);
+                const std::wstring name = item_name(*it);
                 if (!name.empty()) full->push_back(name);
                 ++it;
             }
@@ -331,6 +346,21 @@ void forget(State* s) {
     s->ours = 0;
 }
 
+// A record belongs to one world: the same enemy elsewhere (a guest's own world after the trip home, another host's)
+// is another enemy, and the flag that says it is gone is that world's. A record from another world is forgotten
+// before it is used; what is owed stays.
+State& in_this_world(State& s) {
+    const uint64_t w = session::world_owner();
+    if (s.world != w) {
+        if (s.got || s.ours || s.armed_at > 0) {
+            LOG_INFO("[coop] One-time drop: a record from another world (%016llX) does not count here", s.world);
+        }
+        forget(&s);
+        s.world = w;
+    }
+    return s;
+}
+
 // Drops our game did not roll: ours to roll.
 void claim(State* s, const Row& r, uint8_t missing, double t, const char* when) {
     s->got |= missing;
@@ -342,18 +372,28 @@ void claim(State* s, const Row& r, uint8_t missing, double t, const char* when) 
              r.flag, r.entity);
 }
 
-// The hooks stop seeing our game's own rolls (the session ended, or the character is gone), so every missed roll
-// is decided now. A drop whose enemy is not loaded here (or whose boss rewards a load cut short) is ours; an enemy
-// still loaded here pays as the game does if it dies. `all_gone`: no enemy is left (back at the title).
-void settle(double t, bool all_gone, bool loading) {
+// The session is over: the hooks no longer tell a drop of ours from the game's, only record what the game pays (got)
+// while a row is armed. A drop is ours now if its enemy can no longer drop here: not loaded, or dead (a corpse whose
+// floor drop came while we were down never drops again: 0xE80670 returns without its "dropped" bit then), or, for a
+// boss's rewards, a load cut event 970 short. A living enemy stays armed: its death here pays as the game does.
+void settle_session_end(double t, bool loading) {
     for (auto& [i, s] : g_rows) {
         const Row& r = kRows[i];
-        if (s.armed_at <= 0) continue;
         const uint8_t missing = needs(r) & ~s.got;
-        const bool gone =
-            all_gone || (r.entity ? chr_by_entity(r.entity) == 0 : (g_loads != s.loads || loading));
-        if (missing && gone) claim(&s, r, missing, t, "the session ended; ");
-        s.armed_at = 0;
+        if (s.armed_at <= 0 || !missing) continue;
+        const bool gone = r.entity ? enemy_gone(r.entity) : (g_loads != s.loads || loading);
+        if (gone) claim(&s, r, missing, t, "the session ended; ");
+    }
+}
+
+// A load after the session (a trip home, a rest, a death, the title): it removes every one-time enemy whose flag is
+// on without a drop (Force Character Death without souls, 0xD66600) and cuts event 970 short, so whatever is still
+// armed and missing is ours.
+void settle_load(double t) {
+    for (auto& [i, s] : g_rows) {
+        const Row& r = kRows[i];
+        const uint8_t missing = needs(r) & ~s.got;
+        if (s.armed_at > 0 && missing) claim(&s, r, missing, t, "a load after the session; ");
     }
 }
 
@@ -375,22 +415,28 @@ constexpr uint32_t kFloorDrop = 0x00DC9410;
 
 int __stdcall floor_drop_here(uint32_t chr) {
     if (!active()) {
-        // After the session: only a drop the mod rolls is held back (while its flag is on).
+        // After the session: a drop the mod rolls is held back (while its flag is on); one the game pays is noted.
         for (auto it = g_rows.begin(); it != g_rows.end(); ++it) {
             const Row& r = kRows[it->first];
-            if (!(it->second.ours & kFloorBit) || !r.entity || chr_by_entity(r.entity) != chr) continue;
+            if (!r.entity || r.floor <= 0 || chr_by_entity(r.entity) != chr) continue;
+            State& s = in_this_world(it->second);
             if (!game::flag(r.flag)) {
-                forget(&it->second);  // a new playthrough's enemy
+                forget(&s);  // a new playthrough's enemy
                 return 1;
             }
-            LOG_INFO("[coop] One-time drop: enemy %d died here after its drop was given; no second drop", r.entity);
-            return 0;
+            if (s.ours & kFloorBit) {
+                LOG_INFO("[coop] One-time drop: enemy %d died here after its drop was given; no second drop",
+                         r.entity);
+                return 0;
+            }
+            if (s.armed_at > 0) s.got |= kFloorBit;
+            return 1;
         }
         return 1;
     }
     const int row = row_of_entity(chr);
     if (row < 0) return 1;
-    State& s = g_rows[row];
+    State& s = in_this_world(g_rows[row]);
     if ((s.got & kFloorBit) && !game::flag(kRows[row].flag)) forget(&s);  // a new playthrough's enemy
     s.touched = now();
     if (s.got & kFloorBit) {
@@ -455,7 +501,7 @@ void flag_changed(int flag, bool on) {
     const double t = now();
     for (int i = 0; i < kRowCount; ++i) {
         if (kRows[i].flag != flag) continue;
-        State& s = g_rows[i];
+        State& s = in_this_world(g_rows[i]);
         if (s.armed_at > 0) continue;
         s.armed_at = t;
         s.touched = t;
@@ -469,19 +515,14 @@ bool allow_award(int lot, int event, int slot) {
     if (!g_installed || lot <= 0) return true;
     int row = -1, bit = -1;
     if (event == 970) {
-        // A boss's rewards: the row of a boss flag that turned on lately, one still waiting for this lot first.
-        double best = -1;
-        const double t = now();
-        for (const auto& [i, s] : g_rows) {
-            const Row& r = kRows[i];
-            if (r.entity || s.armed_at <= 0 || t - s.armed_at > kBossAward) continue;
+        // A boss's rewards: the row of this slot of the event (each boss has its own; the Humanity lots are shared).
+        for (int i = 0; i < kRowCount && row < 0; ++i) {
+            if (kRows[i].boss_slot != slot) continue;
             for (int k = 0; k < 3; ++k) {
-                if (r.lots[k] != lot) continue;
-                const double score = s.armed_at + ((s.got >> k) & 1 ? 0 : 1e6);
-                if (score > best) {
-                    best = score;
+                if (kRows[i].lots[k] == lot) {
                     row = i;
                     bit = k;
+                    break;
                 }
             }
         }
@@ -501,17 +542,22 @@ bool allow_award(int lot, int event, int slot) {
     if (row < 0) return true;
     const uint8_t b = static_cast<uint8_t>(1u << bit);
     if (!active()) {
-        // After the session: only a drop the mod rolls is held back (while its flag is on).
+        // After the session: a drop the mod rolls is held back (while its flag is on); one the game pays is noted.
         const auto it = g_rows.find(row);
-        if (it == g_rows.end() || !(it->second.ours & b)) return true;
+        if (it == g_rows.end()) return true;
+        State& s = in_this_world(it->second);
         if (!game::flag(kRows[row].flag)) {
-            forget(&it->second);  // a new playthrough's enemy
+            forget(&s);  // a new playthrough's enemy
             return true;
         }
-        LOG_INFO("[coop] One-time drop: our scripts award lot %d after it was given; skipped", lot);
-        return false;
+        if (s.ours & b) {
+            LOG_INFO("[coop] One-time drop: our scripts award lot %d after it was given; skipped", lot);
+            return false;
+        }
+        if (s.armed_at > 0) s.got |= b;
+        return true;
     }
-    State& s = g_rows[row];
+    State& s = in_this_world(g_rows[row]);
     if ((s.got & b) && !game::flag(kRows[row].flag)) forget(&s);  // a new playthrough's enemy
     s.touched = now();
     if ((s.got & b) && (s.ours & b)) {
@@ -525,8 +571,8 @@ bool allow_award(int lot, int event, int slot) {
 void tick() {
     if (!g_installed) return;
     if (!game::player_game_data()) {
-        // Back at the title. What was taken off the floor or chosen for us is still owed: kept for this character.
-        if (g_was_active) settle(now(), true, true);
+        // No character. What was taken off the floor or chosen for us is still owed: kept for this character.
+        settle_load(now());
         size_t dropped = 0;
         for (auto it = g_rows.begin(); it != g_rows.end();) {
             if (it->second.give || !it->second.owed.empty()) {
@@ -550,11 +596,13 @@ void tick() {
         g_owner = me;
     }
     const bool loading = game::loading();
-    if (loading && !g_was_loading) ++g_loads;
+    const bool load_started = loading && !g_was_loading;
+    if (load_started) ++g_loads;
     g_was_loading = loading;
     const bool act = active();
     const double t = now();
-    if (g_was_active && !act) settle(t, false, loading);
+    if (g_was_active && !act) settle_session_end(t, loading);
+    if (!act && load_started) settle_load(t);  // also the warp the session's end asked for a frame earlier
     g_was_active = act;
     if (g_rows.empty()) return;
     const bool take = can_take();
@@ -587,7 +635,7 @@ void tick() {
             }
             s.touched = t;
         }
-        const bool waiting = s.give || !s.owed.empty() || (act && s.armed_at > 0 && (needs(r) & ~s.got));
+        const bool waiting = s.give || !s.owed.empty() || (s.armed_at > 0 && (needs(r) & ~s.got));
         if (!s.ours && !waiting && t - s.touched > kForget) {
             it = g_rows.erase(it);
         } else {

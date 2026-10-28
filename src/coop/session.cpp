@@ -4868,6 +4868,8 @@ bool homeward(HomewardKind kind) {
     return true;
 }
 
+uint64_t world_owner() { return game::own_world() ? steam::self() : g_host; }
+
 bool in_session() {
     if (g_role == Role::Host) return g_step == Step::Hosting || g_step == Step::Closing;
     if (g_role == Role::Guest) {

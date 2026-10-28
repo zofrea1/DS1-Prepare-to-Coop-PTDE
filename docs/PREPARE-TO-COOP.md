@@ -780,13 +780,13 @@ drop also went with the next load, and a session forces loads (a teammate's Home
 
 `drops.cpp` keeps a table of these drops (`drops_table.inc`, generated from every map's script, MSB and the params:
 141 rows of {the flag that is on once it is gone, the enemy's entity, its floor lot, the lots its script awards},
-common event 970's rows without an enemy). The flags are shared in a session (a guest's go through the host), so
+common event 970's rows without an enemy and with the event's slot for that boss). The flags are shared in a session (a guest's go through the host), so
 every game sees each such flag turn on, whoever killed the enemy and wherever. When one does (the setter hook,
 `rules::after_set_flag`, our own scripts' or another player's applied), the row waits: 12 s for our game's own roll
 (the death animation, our copy's death, event 970's second and third lots 5 s after the first), and then for the
 enemy to be gone in our game (not loaded, dead, a load since, or 90 s). Our own rolls are seen at the award (the
-event running it, `0xBC3AB0`'s instance: id at +0x28, slot at +0x2C, names the row; event 970's awards go to the
-boss row armed last) and at the floor drop (`0xE806BD`, the character matched by entity). Whatever our game did not
+event running it, `0xBC3AB0`'s instance: id at +0x28, slot at +0x2C, names the row; for event 970 the slot names
+the boss, whose Humanity lot other bosses share) and at the floor drop (`0xE806BD`, the character matched by entity). Whatever our game did not
 roll, the mod rolls with the game's own roll (`0x47F640`: the lot and the lots after it, the player's item discovery
 from `0xDC9FC0`, entries already taken skipped by their one-time flag; 0x50-byte entries, decoded as `0x4810E0`
 does) and puts in the inventory (`0xC0B700`, as the co-op items) with the game's item-get window (see Items),
@@ -794,11 +794,17 @@ setting the entries' flags as the award (`0xDC9170`) does, once the player stand
 adds "From a kill you missed". In a session a one-time enemy's floor drop goes into the inventory at once, so no
 load can take it off the floor before it is picked up. A drop the mod gave is never given twice: our game's late
 award or floor drop of it is skipped while its flag is on (a flag found off means a new playthrough), also after the
-session. A missed roll is only decided during the session, when the hooks see our game's own rolls: when it ends
-(or the player quits to the title), a drop still waiting is ours if its enemy is not loaded in our game (or a load
-cut a boss's event 970 short); an enemy still loaded pays as the game does if it dies later. A drawn item that does
-not fit in the inventory stays owed (not rolled again) and is tried every 5 s ("No room in your inventory for ...");
-an entry's one-time flag is set only once all its items are in. What is owed is kept through a return to the title
+session. The rules above hold while the session runs, when the hooks tell our game's own rolls from the mod's. When
+it ends, a drop still waiting is ours if its enemy is not loaded or dead in our game (a corpse whose floor drop came
+while we were down never drops: `0xE80670` returns without its "dropped" bit) or if a load cut a boss's event 970
+short. An enemy still standing stays waiting: if it dies here, the game pays and the hooks note it; the next load
+(the trip home the session's end asks for a frame earlier, a rest, a death, a quit to the title) removes it without
+a drop (`0xD66600`), so whatever is still waiting then is ours. A drawn item that does not fit in the inventory
+stays owed (not rolled again) and is tried every 5 s ("No room in your inventory for ..."); the add takes a whole
+stack or nothing, so as many as fit go in first. An entry's one-time flag is set only once all its items are in. A
+record belongs to the world it was made in (`session::world_owner`: our own Steam id at home, the host's in theirs):
+the same enemy in a guest's own world, or in another host's, is another enemy, and a record from elsewhere is
+forgotten before it is used (what is owed stays). What is owed is kept through a return to the title
 and given when the same character is back in the world. An invader's game keeps the vanilla drops. Tail cuts (the Drake Sword, the Gargoyle Tail Axe, the Moonlight Greatsword) are not
 in the table: they are paid on the cut, not the death.
 

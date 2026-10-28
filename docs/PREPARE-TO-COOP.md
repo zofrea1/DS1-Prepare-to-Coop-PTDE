@@ -783,8 +783,13 @@ does) and puts in the inventory (`0xC0B700`, as the co-op items), setting the en
 (`0xDC9170`) does, once the player stands in the world alive; the action box says "From a kill you missed: ...".
 In a session a one-time enemy's floor drop goes into the inventory at once ("Added to your inventory: ..."), so no
 load can take it off the floor before it is picked up. A drop the mod gave is never given twice: our game's late
-award or floor drop of it is skipped while its flag is on (a flag found off means a new playthrough). An invader's
-game keeps the vanilla drops. Tail cuts (the Drake Sword, the Gargoyle Tail Axe, the Moonlight Greatsword) are not
+award or floor drop of it is skipped while its flag is on (a flag found off means a new playthrough), also after the
+session. A missed roll is only decided during the session, when the hooks see our game's own rolls: when it ends
+(or the player quits to the title), a drop still waiting is ours if its enemy is not loaded in our game (or a load
+cut a boss's event 970 short); an enemy still loaded pays as the game does if it dies later. A drawn item that does
+not fit in the inventory stays owed (not rolled again) and is tried every 5 s ("No room in your inventory for ...");
+an entry's one-time flag is set only once all its items are in. What is owed is kept through a return to the title
+and given when the same character is back in the world. An invader's game keeps the vanilla drops. Tail cuts (the Drake Sword, the Gargoyle Tail Axe, the Moonlight Greatsword) are not
 in the table: they are paid on the cut, not the death.
 
 ### World rules

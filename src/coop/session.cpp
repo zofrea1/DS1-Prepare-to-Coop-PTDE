@@ -4834,8 +4834,9 @@ bool start_homeward(HomewardKind kind, uint64_t by) {
     return true;
 }
 
-// Guest: our Homeward ask is open. The host's game answers it at once, or its trip goes within 2 s (kTravelWait is the
-// limit for an ask that got lost); a trip that waits for the host's menu does so for up to kTravelMenu.
+// Guest: our Homeward ask is open. The host's game answers it at once, or starts the trip within 2 s (and gives up
+// then if its own game is not ready); an ask nobody answers stays open for kTravelWait (5 s), one the host said waits
+// for its menu for kTravelMenu + kTravelWait.
 bool homeward_asked() {
     if (g_homeward_asked <= 0) return false;
     return now() - g_homeward_asked < (g_homeward_waits ? kTravelMenu + kTravelWait : kTravelWait);

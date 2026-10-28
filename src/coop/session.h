@@ -88,7 +88,8 @@ bool homeward(HomewardKind kind);
 // We may start that trip: we host, or we are a co-op guest in the world of a host that takes guests' (1.3.0).
 bool homeward_open();
 // Host: a trip of the party's started less than 5 s ago (its load begins frames later) or a Homeward trip waits to go:
-// no other trip can start (homeward and a guest's travel are refused).
+// no other trip can start (homeward and a guest's travel are refused). Guest: our Homeward ask is still open (the
+// host's game has not answered it, or its trip waits for the host's menu). Either way the Homeward miracle is closed.
 bool trip_slot_busy();
 
 // Item rules (Remastered Seamless Co-op's): a session is established (we host one or we are in one).

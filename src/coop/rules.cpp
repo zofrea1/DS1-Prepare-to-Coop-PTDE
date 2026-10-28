@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "rules.h"
 
+#include "drops.h"
 #include "game.h"
 #include "hook.h"
 #include "log.h"
@@ -987,9 +988,15 @@ bool local_working_flag(int id) {
     return true;
 }
 
+// A one-time drop's flag (drops.cpp) as it was before the set in progress (-1: not one of them). Its changes reach
+// drops.cpp whoever made them: our own scripts or another player's, applied here.
+int g_drop_old = -1;
+
 void __stdcall before_set_flag(int id) {
     g_old_value = -1;
+    g_drop_old = -1;
     if (g_flag_quiet) return;
+    if (GetCurrentThreadId() == g_main_thread && drops::watched(id)) g_drop_old = game::flag(id) ? 1 : 0;
     if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return;
     if (!seamless_rules() || !shared_flag(id) || local_working_flag(id)) return;
     g_old_value = game::flag(id) ? 1 : 0;
@@ -997,6 +1004,12 @@ void __stdcall before_set_flag(int id) {
 
 void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     if (g_flag_quiet) return;
+    if (g_drop_old >= 0) {
+        const bool on = (value & 0xFF) != 0;
+        const bool was = g_drop_old == 1;
+        g_drop_old = -1;
+        if (on != was) drops::flag_changed(id, on);
+    }
     if (!seamless_rules() || !efm) return;
     const bool on = (value & 0xFF) != 0;
     if (g_old_value >= 0 && g_old_value != (on ? 1 : 0) && GetCurrentThreadId() == g_main_thread) {
@@ -1349,12 +1362,32 @@ void __stdcall hk_clear_bonus(int arg) {
     reinterpret_cast<void(__stdcall*)(int)>(g_clear_bonus_orig)(arg);
 }
 
+// A map script's award in our game, for the one-time drops (drops.cpp): the event running it (0xBC3AB0's eax:
+// id at +0x28, slot in the low half of +0x2C) names the enemy whose death it pays for.
+bool drop_award_allowed(int lot) {
+    uint32_t id = 0, slot_word = 0;
+    if (!g_cur_event || !read32(g_cur_event + 0x28, &id) || !read32(g_cur_event + 0x2C, &slot_word)) {
+        return drops::allow_award(lot, 0, 0);
+    }
+    return drops::allow_award(lot, static_cast<int>(id), static_cast<int16_t>(slot_word & 0xFFFF));
+}
+
 char __stdcall hk_award_all(int lot) {
     if (invader_here()) {
         LOG_INFO("[coop] The world we invade awards item lot %d to every player: not to us", lot);
         return 1;
     }
+    if (!drop_award_allowed(lot)) return 1;
     return reinterpret_cast<char(__stdcall*)(int)>(kAwardAll)(lot);
+}
+
+// Award Item Lot (2003[04], 0xD665B0 stdcall(lot) from 0xBC1D46): one drake's Dragon Scale comes this way.
+constexpr uint32_t kAwardLotSite = 0x00BC1D46;
+constexpr uint32_t kAwardLot = 0x00D665B0;
+
+char __stdcall hk_award_lot(int lot) {
+    if (!drop_award_allowed(lot)) return 1;
+    return reinterpret_cast<char(__stdcall*)(int)>(kAwardLot)(lot);
 }
 
 // ---------------------------------------------------------------- a guest's events do not see a missing character as dead
@@ -4419,6 +4452,8 @@ int install() {
         failed += install_one("boss clear bonus (invaders)", g_clear_bonus_orig != nullptr);
         failed += install_one("event item awards (invaders)",
                               redirect_call(kAwardAllSite, kAwardAll, reinterpret_cast<void*>(&hk_award_all)));
+        failed += install_one("event item lot awards",
+                              redirect_call(kAwardLotSite, kAwardLot, reinterpret_cast<void*>(&hk_award_lot)));
     }
     {
         static const uint8_t k[7] = {0x57, 0x8B, 0x3D, 0x2C, 0xD8, 0x37, 0x01};  // push edi ; mov edi,[SessMan]

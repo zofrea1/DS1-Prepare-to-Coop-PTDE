@@ -75,7 +75,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 
 | Rule | Prepare to Co-op (as in ds1sc) |
 | --- | --- |
-| Guests | Keep their own body (human or hollow), level, items and progress. They pick up items, get their own enemy drops and boss rewards, rest at bonfires, level up and talk to NPCs. The host's game decides its NPCs' deaths, and a scripted death waits while another player stands at the NPC (Oscar dies once the guest who talked to him walks away, not in the middle of the talk because the host stands in the hall). |
+| Guests | Keep their own body (human or hollow), level, items and progress. They pick up items, get their own enemy drops and boss rewards, rest at bonfires, level up and talk to NPCs. A drop the world gives once (an enemy that never comes back, a boss's rewards) reaches every player of the session: a player whose game did not roll it (loading, in a map their game had not loaded, or down when it died) gets their own roll into the inventory a few seconds later, and in a session such an enemy's floor drop goes into the inventory too (see One-time drops). The host's game decides its NPCs' deaths, and a scripted death waits while another player stands at the NPC (Oscar dies once the guest who talked to him walks away, not in the middle of the talk because the host stands in the hall). |
 | Joining | A guest arrives at the host's last bonfire (where the host last rested). |
 | Deaths | You respawn at your last bonfire in the host's world (the host's, until you rest at one yourself). The session goes on, the host's death included. A death keeps the world as it is: the enemies killed since the last rest stay dead in your reload, as they are for everyone else, host or guest. They come back at a rest, or for everyone after a team wipe. The enemies the others had hurt keep their wounds in your reload too. Every death is announced. After any load (a death, bonfire travel) each player's game builds the other players' characters again, and a player who died is rebuilt for the others as soon as they are back on their feet. |
 | Messages | Joins, departures, deaths and the like appear in the box at the bottom of the screen that the game uses for "Phantom X summoned", and fade by themselves. The game's own summon texts and its "phantom returned home" / "sent home" boxes, which wait for a button, are not shown during a session. |
@@ -749,9 +749,43 @@ to `items::travel_key` (an Ember, Lord Soul or the Lordvessel handed over there 
 | What | Where |
 | --- | --- |
 | Enemy and object drops, scripted reward items | inlined guest checks in `0xDC80A0`, `0xDC8370`, `0xDC9170` |
+| One-time drops missed in a session | flag setter hook (`rules::after_set_flag`), awards at `0xBC23C0` and `0xBC1D46`, floor drop at `0xE806BD`, roll `0x47F640` (`drops.cpp`) |
 | Bonfires and NPC talk | `HasPartyMembers` (`0xD2A4B0`) at the bonfire object (`0xD58AE4`) and talk script function 0x34 (`0xD4ABFB`) |
 | Multiplayer walls | Lua `GetMultiWallNum` (`0xD5DC40`) answers 0 in every co-op role: `OnEvent_4034` (`OnSessionJustIn`) raises the walls on the host's side (`IsClient()` false), which every player then meets |
 | Progress | the event-flag setter (`0xD38CB0`): changes are shared, and a guest's are also written to their own world's store, except the maps' disaster flags |
+
+### One-time drops
+
+Some enemies never come back: their map script removes them on every load once their flag is on (Force Character
+Death without souls, `0xD66600`, or disabled), and it pays for the death once, with an award into the inventory
+(Award Items (Including Clients) 2003[36], Award Item Lot 2003[04]: the Black Knights, crystal lizards, drakes,
+the Anor Londo gargoyles) or the enemy's own NpcParam lot (`itemLotId_1`) on the floor where it dies (Titanite
+Demons, mimics, Havel, Ricard, Pinwheel's masks, the Stray Demon's slab, the Taurus and Capra Demons' weapons). The
+bosses' rewards come from common event 970 when their flag turns on. Each game of a session rolls its own drops from
+its own copy of the enemy: the award runs in every game whose copy dies, and the floor drop (`0xE80670`, from the
+death animation) only while that game's own player is alive. A player whose game was loading, whose game had not
+loaded that map (DS1 streams map blocks: the Burg and Firelink run together, Lost Izalith does not run in a game at
+the Burg), or who was down (spectating) got nothing, and the enemy is gone for good in the host's world. A floor
+drop also went with the next load, and a session forces loads (a teammate's Homeward Bone, a team wipe).
+
+`drops.cpp` keeps a table of these drops (`drops_table.inc`, generated from every map's script, MSB and the params:
+141 rows of {the flag that is on once it is gone, the enemy's entity, its floor lot, the lots its script awards},
+common event 970's rows without an enemy). The flags are shared in a session (a guest's go through the host), so
+every game sees each such flag turn on, whoever killed the enemy and wherever. When one does (the setter hook,
+`rules::after_set_flag`, our own scripts' or another player's applied), the row waits: 12 s for our game's own roll
+(the death animation, our copy's death, event 970's second and third lots 5 s after the first), and then for the
+enemy to be gone in our game (not loaded, dead, a load since, or 90 s). Our own rolls are seen at the award (the
+event running it, `0xBC3AB0`'s instance: id at +0x28, slot at +0x2C, names the row; event 970's awards go to the
+boss row armed last) and at the floor drop (`0xE806BD`, the character matched by entity). Whatever our game did not
+roll, the mod rolls with the game's own roll (`0x47F640`: the lot and the lots after it, the player's item discovery
+from `0xDC9FC0`, entries already taken skipped by their one-time flag; 0x50-byte entries, decoded as `0x4810E0`
+does) and puts in the inventory (`0xC0B700`, as the co-op items), setting the entries' flags as the award
+(`0xDC9170`) does, once the player stands in the world alive; the action box says "From a kill you missed: ...".
+In a session a one-time enemy's floor drop goes into the inventory at once ("Added to your inventory: ..."), so no
+load can take it off the floor before it is picked up. A drop the mod gave is never given twice: our game's late
+award or floor drop of it is skipped while its flag is on (a flag found off means a new playthrough). An invader's
+game keeps the vanilla drops. Tail cuts (the Drake Sword, the Gargoyle Tail Axe, the Moonlight Greatsword) are not
+in the table: they are paid on the cut, not the death.
 
 ### World rules
 

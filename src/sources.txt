@@ -18,6 +18,7 @@ src\coop\overlay.cpp
 src\coop\party.cpp
 src\coop\motion.cpp
 src\coop\deadlist.cpp
+src\coop\drops.cpp
 src\coop\deathtext.cpp
 src\coop\summons.cpp
 src\coop\netrate.cpp

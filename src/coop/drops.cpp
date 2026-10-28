@@ -1,0 +1,471 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
+#include "drops.h"
+
+#include "game.h"
+#include "hook.h"
+#include "log.h"
+#include "session.h"
+#include "text.h"
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+#include <algorithm>
+#include <cstring>
+#include <iterator>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace coop::drops {
+
+namespace {
+
+// ---------------------------------------------------------------- the drops a world gives once
+// One row per enemy that a map script removes on every load once its flag is on (Force Character Death or
+// disabled), with what the script awards when it dies (Award Items (Including Clients) 2003[36], Award Item Lot
+// 2003[04]) and its own NpcParam lot (itemLotId_1, dropped at its death by 0xE80670), unless that script drops its
+// treasure again on every load (the NPCs, whose lots carry their own one-time flags). The bosses' rewards from
+// common event 970 (a boss flag, then up to three lots) are rows without an enemy. 141 rows, from every map's
+// script: the Black Knights, crystal lizards, drakes, Titanite Demons, mimics, Pinwheel's masks, the Stray Demon's
+// slab, the Taurus and Capra Demons' weapons, Havel, Ricard's Rapier, the Oolacile Humanity sprites.
+struct Row {
+    int32_t flag;     // on once it is gone for good: its script's own done flag, or the boss flag
+    int32_t entity;   // the enemy (0: common event 970's boss rewards)
+    int32_t floor;    // its own drop, on the floor where it dies (0 none)
+    int32_t lots[3];  // what its scripts award, into the inventory (0 none)
+};
+const Row kRows[] = {
+#include "drops_table.inc"
+};
+constexpr int kRowCount = static_cast<int>(sizeof(kRows) / sizeof(kRows[0]));
+constexpr uint8_t kFloorBit = 1u << 3;  // bits 0-2: lots[0..2]
+
+// Our game's own roll can come a little after the flag: the floor drop waits for the death animation, an award for
+// our copy of the enemy to die, and common event 970's second and third lots for 5 s after the first.
+constexpr double kWait = 12.0;
+// An enemy still standing in our game may yet die here and drop for us: its drop waits for that, for a load (the
+// enemy's script then removes it: killed, or disabled with its health as it was, like the crystal lizards) or for
+// this long. A drop the mod gave is never given again by the game (allow_award, floor_drop_here).
+constexpr double kAliveWait = 90.0;
+constexpr double kForget = 120.0;  // a record without a drop of ours outlives its last change by this much
+
+struct State {
+    double armed_at = 0;  // its flag turned on in our game during a session (0: not yet)
+    double touched = 0;   // last change
+    int loads = 0;        // g_loads when it was armed
+    uint8_t got = 0;      // what our game has: its own roll, or ours
+    uint8_t ours = 0;     // ... of which the mod gave (the game's own late roll of these is skipped)
+    uint8_t give = 0;     // still to give, once the player can take it
+    bool missed = false;  // the mod rolls a drop our game missed (the line says so)
+};
+std::map<int, State> g_rows;  // row index -> state; one with a drop of ours is kept while the character is loaded
+std::vector<int> g_flags;     // every row's flag, sorted
+bool g_installed = false;
+int g_loads = 0;              // map loads seen
+bool g_was_loading = false;
+
+double now() { return GetTickCount64() / 1000.0; }
+
+// Our part of a session: the host or a co-op guest. An invader's game keeps the vanilla drops.
+bool active() { return g_installed && session::in_session() && !session::invader(); }
+
+uint8_t needs(const Row& r) {
+    uint8_t n = r.floor > 0 ? kFloorBit : 0;
+    for (int i = 0; i < 3; ++i) {
+        if (r.lots[i] > 0) n |= static_cast<uint8_t>(1u << i);
+    }
+    return n;
+}
+
+int lot_of(const Row& r, int bit) { return bit == 3 ? r.floor : r.lots[bit]; }
+
+// ---------------------------------------------------------------- the game's characters
+constexpr uint32_t kChrByEntity = 0x00D6C360;  // eax = entity id -> character, or 0
+
+uint32_t chr_by_entity(int entity) {
+    uint32_t chr = 0;
+    __try {
+        __asm {
+            mov eax, entity
+            mov edx, kChrByEntity
+            call edx
+            mov chr, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        chr = 0;
+    }
+    return chr;
+}
+
+int chr_hp(uint32_t chr) {
+    uint32_t hp = 0;
+    return chr && read32(chr + 0x2D4, &hp) ? static_cast<int>(hp) : 0;
+}
+
+// The enemy cannot drop anything in our game any more: not loaded here, or dead.
+bool enemy_gone(int entity) { return entity == 0 || chr_hp(chr_by_entity(entity)) <= 0; }
+
+// ---------------------------------------------------------------- the game's lot roll
+// 0x47F640 (stdcall(roll, 0), as the enemy drop 0xDC80A0 and the award 0xDC9170 call it) draws a lot and the lots
+// after it (lot + 1, ... while rows exist), skipping an entry whose one-time flag (getItemFlagId) is on, with the
+// player's item discovery from 0xDC9FC0 (xmm0). Each drawn entry is 0x50 bytes: +0 the flag to set once it is
+// given (-1 none), +5 the number of items, then from +8 per item 0xC bytes: +0 the id (low 28 bits), +4 the
+// category in the high nibble (0xF: nothing), +8 the count (byte), as 0x4810E0 decodes them. 0x562B30 frees the
+// entries (cdecl). 0xDC9170 then hands each item to the inventory and sets the flag through the block lookup.
+struct Roll {
+    int32_t lot;
+    float luck;
+    uint8_t apply;  // 1 in the drop and the award
+    uint8_t pad[3];
+    int32_t count;
+    uint32_t entries;
+};
+static_assert(sizeof(Roll) == 0x14, "the game's lot roll");
+constexpr uint32_t kRollLot = 0x0047F640;
+constexpr uint32_t kLuck = 0x00DC9FC0;
+constexpr uint32_t kFree = 0x00562B30;
+constexpr uint32_t kEntrySize = 0x50;
+// The inventory's own add (items.cpp): stdcall(PlayerGameData+0x1B8, category, id, count, 1, 0) -> slot, -1 full.
+constexpr uint32_t kInventoryAdd = 0x00C0B700;
+
+struct Item {
+    uint32_t category;  // 0 weapon, 0x10000000 armor, 0x20000000 ring, 0x40000000 goods
+    int32_t id;
+    int count;
+};
+
+bool roll(int lot, std::vector<Item>* items, std::vector<int>* flags) {
+    Roll r{};
+    r.lot = lot;
+    r.apply = 1;
+    Roll* rp = &r;
+    __try {
+        float luck = 1.0f;
+        __asm {
+            mov eax, kLuck
+            call eax
+            movss luck, xmm0
+        }
+        r.luck = luck;
+        __asm {
+            push 0
+            push rp
+            mov eax, kRollLot
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("[coop] Rolling item lot %d failed", lot);
+        return false;
+    }
+    for (int e = 0; e < r.count && e < 16 && r.entries; ++e) {
+        const uint32_t base = r.entries + e * kEntrySize;
+        uint32_t flag = 0;
+        uint8_t n = 0;
+        if (!read32(base, &flag) || !read8(base + 5, &n)) break;
+        if (static_cast<int32_t>(flag) >= 0) flags->push_back(static_cast<int32_t>(flag));
+        for (int k = 0; k < n && k < 6; ++k) {
+            uint32_t id = 0, cat = 0;
+            uint8_t count = 0;
+            if (!read32(base + 8 + k * 12, &id) || !read32(base + 12 + k * 12, &cat) ||
+                !read8(base + 16 + k * 12, &count)) {
+                break;
+            }
+            const uint32_t c = (cat >> 28) & 0xF;
+            if ((c != 0 && c != 1 && c != 2 && c != 4) || count == 0) continue;  // the lot's "nothing"
+            items->push_back(Item{c << 28, static_cast<int32_t>(id & 0x0FFFFFFF), count});
+        }
+    }
+    if (r.entries) {
+        const uint32_t entries = r.entries;
+        __try {
+            __asm {
+                push entries
+                mov eax, kFree
+                call eax
+                add esp, 4
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return true;
+}
+
+bool add_to_inventory(const Item& it) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return false;
+    int slot = -1;
+    __try {
+        using Fn = int(__stdcall*)(uint32_t, uint32_t, int32_t, int32_t, int32_t, int32_t);
+        slot = reinterpret_cast<Fn>(kInventoryAdd)(pgd + 0x1B8, it.category, it.id, it.count, 1, 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        slot = -1;
+    }
+    return slot != -1;
+}
+
+// ---------------------------------------------------------------- item names
+// The name getters (weapon 0xD17D10, armor 0xD17C50, ring 0xD17B90, goods 0xD17DD0) ask the FMG lookup for the
+// 1.0.2 patch FMG first and then the base one (MsgRepository offsets below).
+constexpr uint32_t kFmgLookup = 0x00D175E0;   // edx = id, [esp+4] = FMG; returns wchar_t* or 0 (cdecl)
+constexpr uint32_t kMsgRepoVar = 0x013785DC;
+
+const wchar_t* fmg_text(uint32_t fmg, int32_t id) {
+    const wchar_t* s = nullptr;
+    __try {
+        __asm {
+            push fmg
+            mov edx, id
+            mov eax, kFmgLookup
+            call eax
+            add esp, 4
+            mov s, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        s = nullptr;
+    }
+    return s;
+}
+
+std::wstring item_name(const Item& it) {
+    static const uint32_t kNames[5][2] = {{0x1D0, 0x30}, {0x1D8, 0x34}, {0x1C8, 0x38}, {0, 0}, {0x1C0, 0x2C}};
+    const uint32_t c = it.category >> 28;
+    uint32_t repo = 0;
+    if (c > 4 || !kNames[c][0] || !read32(kMsgRepoVar, &repo) || !repo) return L"";
+    for (uint32_t off : kNames[c]) {
+        uint32_t fmg = 0;
+        if (!read32(repo + off, &fmg) || !fmg) continue;
+        const wchar_t* s = fmg_text(fmg, it.id);
+        if (s && *s) {
+            std::wstring name(s);
+            if (it.count > 1) name += L" x" + std::to_wstring(it.count);
+            return name;
+        }
+    }
+    return L"";
+}
+
+// ---------------------------------------------------------------- giving
+// Rolls one lot for us and puts what it draws in the inventory, its one-time flags set as the game's award does.
+// The names of what came are added to `names`.
+void give_lot(int lot, std::vector<std::wstring>* names) {
+    std::vector<Item> items;
+    std::vector<int> flags;
+    if (!roll(lot, &items, &flags)) return;
+    for (const Item& it : items) {
+        const bool added = add_to_inventory(it);
+        const std::wstring name = item_name(it);
+        LOG_INFO("[coop] One-time drop: lot %d gave item %08X %d x%d%s", lot, it.category, it.id, it.count,
+                 added ? "" : " (it did not fit in the inventory)");
+        if (added && !name.empty()) names->push_back(name);
+    }
+    for (int f : flags) game::set_flag(f, true);
+    if (items.empty()) LOG_INFO("[coop] One-time drop: lot %d gave nothing (its chance did not come up)", lot);
+}
+
+std::wstring join(const std::vector<std::wstring>& names) {
+    std::wstring out;
+    for (size_t i = 0; i < names.size() && i < 4; ++i) out += (i ? L", " : L"") + names[i];
+    if (names.size() > 4) out += L", ...";
+    return out;
+}
+
+// Standing in the world, alive: what is given now is seen.
+bool can_take() {
+    const uint32_t me = game::player();
+    return game::in_game() && !game::loading() && me && chr_hp(me) > 0;
+}
+
+int row_of_entity(uint32_t chr) {
+    if (!chr) return -1;
+    for (int i = 0; i < kRowCount; ++i) {
+        if (kRows[i].entity && kRows[i].floor > 0 && chr_by_entity(kRows[i].entity) == chr) return i;
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------- the floor drop
+// 0xE80670 (esi = the character) drops a dead enemy's NpcParam lot once (chr+0x1FF bit 0x40, set by its caller
+// after this call) when the local player is alive: 0xDC9410 (eax = the NpcParam row, stdcall(ItemMan, handle))
+// -> 0xDC80A0, the items on the floor at the corpse. A one-time enemy's drop goes into the inventory instead
+// while we are in a session, as its scripted award would.
+constexpr uint32_t kFloorDropSite = 0x00E806BD;
+constexpr uint32_t kFloorDrop = 0x00DC9410;
+
+int __stdcall floor_drop_here(uint32_t chr) {
+    if (!active()) return 1;
+    const int row = row_of_entity(chr);
+    if (row < 0) return 1;
+    State& s = g_rows[row];
+    if ((s.got & kFloorBit) && !game::flag(kRows[row].flag)) s = State{};  // a new playthrough's enemy
+    s.touched = now();
+    if (s.got & kFloorBit) {
+        LOG_INFO("[coop] One-time drop: enemy %d died here after its drop was given; no second drop",
+                 kRows[row].entity);
+        return 0;
+    }
+    s.got |= kFloorBit;
+    s.ours |= kFloorBit;
+    s.give |= kFloorBit;
+    LOG_INFO("[coop] One-time drop: enemy %d died here; its lot %d goes into the inventory", kRows[row].entity,
+             kRows[row].floor);
+    return 0;
+}
+
+__declspec(naked) void hk_floor_drop() {
+    __asm {
+        push ecx
+        push edx
+        push eax
+        push esi
+        call floor_drop_here
+        test eax, eax
+        pop eax
+        pop edx
+        pop ecx
+        jz handled
+        push kFloorDrop
+        ret
+    handled:
+        ret 8
+    }
+}
+
+}  // namespace
+
+bool install() {
+    g_flags.clear();
+    for (const Row& r : kRows) g_flags.push_back(r.flag);
+    std::sort(g_flags.begin(), g_flags.end());
+    g_flags.erase(std::unique(g_flags.begin(), g_flags.end()), g_flags.end());
+    if (!redirect_call(kFloorDropSite, kFloorDrop, reinterpret_cast<void*>(&hk_floor_drop))) {
+        LOG_ERROR("[coop] Enemy drop call at %08X does not match this build; missed one-time drops are not given",
+                  kFloorDropSite);
+        return false;
+    }
+    g_installed = true;
+    LOG_INFO("[coop] One-time drops: %d enemies and boss rewards watched", kRowCount);
+    return true;
+}
+
+bool watched(int flag) { return g_installed && std::binary_search(g_flags.begin(), g_flags.end(), flag); }
+
+void flag_changed(int flag, bool on) {
+    if (!on) {
+        for (auto it = g_rows.begin(); it != g_rows.end();) {
+            it = kRows[it->first].flag == flag ? g_rows.erase(it) : std::next(it);
+        }
+        return;
+    }
+    if (!active() || !game::player_game_data()) return;
+    const double t = now();
+    for (int i = 0; i < kRowCount; ++i) {
+        if (kRows[i].flag != flag) continue;
+        State& s = g_rows[i];
+        if (s.armed_at > 0) continue;
+        s.armed_at = t;
+        s.touched = t;
+        s.loads = g_loads;
+        LOG_INFO("[coop] One-time drop: flag %d is on (enemy %d): our game's own roll has %.0f s", flag,
+                 kRows[i].entity, kWait);
+    }
+}
+
+bool allow_award(int lot, int event, int slot) {
+    if (!active() || lot <= 0) return true;
+    int row = -1, bit = -1;
+    if (event == 970) {
+        // A boss's rewards: the row of a boss flag that turned on lately, one still waiting for this lot first.
+        double best = -1;
+        for (const auto& [i, s] : g_rows) {
+            const Row& r = kRows[i];
+            if (r.entity || s.armed_at <= 0) continue;
+            for (int k = 0; k < 3; ++k) {
+                if (r.lots[k] != lot) continue;
+                const double score = s.armed_at + ((s.got >> k) & 1 ? 0 : 1e6);
+                if (score > best) {
+                    best = score;
+                    row = i;
+                    bit = k;
+                }
+            }
+        }
+    } else if (event > 0) {
+        const int flag = event + slot;
+        for (int i = 0; i < kRowCount && row < 0; ++i) {
+            if (kRows[i].flag != flag) continue;
+            for (int k = 0; k < 3; ++k) {
+                if (kRows[i].lots[k] == lot) {
+                    row = i;
+                    bit = k;
+                    break;
+                }
+            }
+        }
+    }
+    if (row < 0) return true;
+    State& s = g_rows[row];
+    const uint8_t b = static_cast<uint8_t>(1u << bit);
+    if ((s.got & b) && !game::flag(kRows[row].flag)) s = State{};  // a new playthrough's enemy
+    s.touched = now();
+    if ((s.got & b) && (s.ours & b)) {
+        LOG_INFO("[coop] One-time drop: our scripts award lot %d after it was given; skipped", lot);
+        return false;
+    }
+    s.got |= b;
+    return true;
+}
+
+void tick() {
+    if (!g_installed) return;
+    if (!game::player_game_data()) {
+        if (!g_rows.empty()) {
+            LOG_INFO("[coop] One-time drops: no character; %zu record(s) dropped", g_rows.size());
+            g_rows.clear();
+        }
+        return;
+    }
+    const bool loading = game::loading();
+    if (loading && !g_was_loading) ++g_loads;
+    g_was_loading = loading;
+    if (g_rows.empty()) return;
+    const double t = now();
+    const bool take = can_take();
+    std::vector<std::wstring> found, missed;
+    for (auto it = g_rows.begin(); it != g_rows.end();) {
+        const Row& r = kRows[it->first];
+        State& s = it->second;
+        if (s.armed_at > 0 && t - s.armed_at >= kWait) {
+            const uint8_t missing = needs(r) & ~s.got;
+            if (missing && (enemy_gone(r.entity) || g_loads != s.loads || t - s.armed_at >= kAliveWait)) {
+                s.got |= missing;
+                s.ours |= missing;
+                s.give |= missing;
+                s.missed = true;
+                s.touched = t;
+                LOG_INFO("[coop] One-time drop: flag %d (enemy %d) is on and our game did not roll its drop; we "
+                         "roll it", r.flag, r.entity);
+            }
+        }
+        if (s.give && take) {
+            std::vector<std::wstring>& names = s.missed ? missed : found;
+            for (int bit = 0; bit < 4; ++bit) {
+                if (s.give & (1u << bit)) give_lot(lot_of(r, bit), &names);
+            }
+            s.give = 0;
+            s.touched = t;
+        }
+        const bool waiting = s.give || (s.armed_at > 0 && (needs(r) & ~s.got));
+        if (!s.ours && !waiting && t - s.touched > kForget) {
+            it = g_rows.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (!found.empty()) text::show(L"Added to your inventory: " + join(found));
+    if (!missed.empty()) text::show(L"From a kill you missed: " + join(missed));
+}
+
+}  // namespace coop::drops

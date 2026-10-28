@@ -30,6 +30,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.seal_boss_fogs = settings_parse_bool(val);
         } else if (key == "deathdebuffs") {
             c.death_debuffs = settings_parse_bool(val);
+        } else if (key == "onetimedropsperworld") {
+            c.drops_per_world = settings_parse_bool(val);
         } else if (key == "guestworldevents") {
             c.guest_world_events = settings_parse_bool(val);
         } else if (key == "bonfireanimations") {

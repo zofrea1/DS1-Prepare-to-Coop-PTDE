@@ -29,5 +29,8 @@ void flag_changed(int flag, bool on);
 bool allow_award(int lot, int event, int slot);
 // Per frame, game thread: the drops our game missed, rolled and given once the player can take them.
 void tick();
+// OneTimeDropsPerWorld: a one-time drop had in a session counts only in the world it came from (see in_this_world).
+// Off: the same enemy in another world does not drop it for us again.
+void set_per_world(bool on);
 
 }  // namespace coop::drops

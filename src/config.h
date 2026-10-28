@@ -25,6 +25,10 @@ struct CoopConfig {
     // Each death in a session adds a Crimson Blossom (up to five), lowering maximum HP until anyone in the session
     // rests or the whole team falls (on by default since 1.1.0).
     bool death_debuffs = true;
+    // A one-time drop you had in a session (drops.cpp) counts only in the world it came from: the same enemy in
+    // another player's world drops for you again. Off by default: the same enemy in another world does not drop it
+    // for you again while the game runs, so a mask or a slab cannot be gathered again by visiting other worlds.
+    bool drops_per_world = false;
     // Guests run the world's events in their own game as the host does (Remastered Seamless Co-op's
     // rule): bosses, lifts, cutscenes, scripted enemies. false = the game's own co-op (host only).
     bool guest_world_events = true;

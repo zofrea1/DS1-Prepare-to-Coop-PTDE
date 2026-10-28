@@ -744,6 +744,16 @@ after such a load. With a 1.2.0 host (message 24: the host's key items, its Lord
 has rested at, sent when they change) a guest also gets the key items of the own array that the host holds, limited
 to `items::travel_key` (an Ember, Lord Soul or the Lordvessel handed over there would stay in the own array at home).
 
+**The item-get window.** Items the mod gives (the co-op items at a rest, a death's Crimson Blossom, an invasion's
+Humanity, a one-time drop) go into the inventory with `0xC0B700` and are then shown in the game's own item-get window
+with its pickup sound: `0xC22830` (eax = the queue `[0x137E174]`, stdcall(category, id, count)), as the game's
+awards (`0xDC8CD0`, after `0xDC5480` adds the item with `0xC0B700`) and pickups do. The HUD draws the queue
+(`0xC23210`, up to ten lines); no dialog slot is taken. The earlier attempt used the Lua `AddInventoryItem`
+(`0xD664C0`), whose information box (`0xD4BFA0`, the generic modal list in the dialog slots at `MenuMan+0x9EC`) has
+no other caller in the game: called by the mod it stayed requested and was never drawn, and the action buttons and
+Quit Game waited behind it (2026-10-12/13). The rest's gifts and the Blossom wait until the player stands in the
+world with no menu or dialog open; a one-time drop shows when it is put in.
+
 ### Rules for guests
 
 | What | Where |
@@ -779,9 +789,9 @@ event running it, `0xBC3AB0`'s instance: id at +0x28, slot at +0x2C, names the r
 boss row armed last) and at the floor drop (`0xE806BD`, the character matched by entity). Whatever our game did not
 roll, the mod rolls with the game's own roll (`0x47F640`: the lot and the lots after it, the player's item discovery
 from `0xDC9FC0`, entries already taken skipped by their one-time flag; 0x50-byte entries, decoded as `0x4810E0`
-does) and puts in the inventory (`0xC0B700`, as the co-op items), setting the entries' flags as the award
-(`0xDC9170`) does, once the player stands in the world alive; the action box says "From a kill you missed: ...".
-In a session a one-time enemy's floor drop goes into the inventory at once ("Added to your inventory: ..."), so no
+does) and puts in the inventory (`0xC0B700`, as the co-op items) with the game's item-get window (see Items),
+setting the entries' flags as the award (`0xDC9170`) does, once the player stands in the world alive; the action box
+adds "From a kill you missed". In a session a one-time enemy's floor drop goes into the inventory at once, so no
 load can take it off the floor before it is picked up. A drop the mod gave is never given twice: our game's late
 award or floor drop of it is skipped while its flag is on (a flag found off means a new playthrough), also after the
 session. A missed roll is only decided during the session, when the hooks see our game's own rolls: when it ends

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace coop::items {
 
@@ -30,14 +31,22 @@ constexpr uint32_t kUseGoodsOrig = 0x00E50C70;
 // the rest (2026-10-12/13 tests) as well as standing in the world with no menu open (2026-10-13 11:12: slot 0
 // requested for good); the action buttons (bonfires, doors, ladders) and every later dialog (Quit Game) waited
 // behind it until the game was closed. A new character's first rest hands out every co-op item, so only new
-// characters met it. The co-op items go straight into the inventory, and a line in the action box says so.
+// characters met it. The co-op items go straight into the inventory, and the game's own "item obtained" window
+// below says so.
 constexpr uint32_t kInventoryAdd = 0x00C0B700;
+// That box is the Lua script's only (0xD4BFA0's one caller is AddInventoryItem). The game's own awards (0xDC8CD0: the
+// Black Knights', a boss's, Oscar's) and its pickups put each item in with 0xC0B700 too, through 0xDC5480, and then
+// queue it for the item-get window: 0xC22830 (eax = the queue [0x137E174], stdcall(category, id, count), ret 0xC)
+// takes a node from the queue's free list (+8, else the oldest shown one; it writes through a null node when both
+// are empty), fills {next, category, id, count}, links it at +4 and plays the pickup sound (0xC267E0: sound 300,
+// type 2). The HUD draws up to ten of them (0xC23210). No dialog slot is involved, so nothing waits behind it.
+constexpr uint32_t kItemGetVar = 0x0137E174;
+constexpr uint32_t kItemGetPush = 0x00C22830;
 constexpr uint32_t kMenuManVar = 0x013786D0;
 constexpr uint32_t kNoEventAnim[2] = {0x012E0C64, 0x012E0C68};  // the "none" handle pair (PlayerIns+0xFC/+0x100)
 constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, count). count <= 0 removes one stack.
 constexpr uint32_t kMagicGetter = 0x00D1D800;   // as the goods getter: edi = magic id, push out {id, row}; ret 4
 constexpr uint32_t kMagicFlags = 0x2B;          // MagicParam: bit 0 enable_multi, bit 1 enable_multi_only
-constexpr uint32_t kGoodsCategory = 0x40000000;
 // An inventory slot's item replaced (the bonfire's refill turns an empty Estus Flask into the full one with it,
 // 0xC0CC31): eax = count, edi = slot, esi = the equipment data (PlayerGameData+0x1B8), stdcall(&{id, row} from the
 // goods getter, keep count). It also renames the slot in the equipped quick-item records (+0x1C slots, +0x94 ids),
@@ -484,7 +493,12 @@ bool give(int32_t goods_id, int n) {
 
 namespace {
 
-bool g_told = false;  // the "items added" line waits for the player to be back in control
+struct Shown {
+    uint32_t category;
+    int32_t id;
+    int count;
+};
+std::vector<Shown> g_announce;  // shown in the item-get window once the player is back in control
 ULONGLONG g_free_since = 0;
 
 // Standing in the world: alive, no event animation (a bonfire's sit, rest and stand-up hold one), no menu, no
@@ -514,10 +528,37 @@ bool in_control() {
 
 }  // namespace
 
+bool show_obtained(uint32_t category, int32_t id, int n) {
+    uint32_t queue = 0, shown = 0, spare = 0;
+    if (!read32(kItemGetVar, &queue) || queue < 0x10000 || !read32(queue + 4, &shown) || !read32(queue + 8, &spare) ||
+        (!shown && !spare) || n <= 0) {
+        return false;
+    }
+    __try {
+        __asm {
+            push n
+            push id
+            push category
+            mov eax, queue
+            mov edx, kItemGetPush
+            call edx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+void announce(uint32_t category, int32_t id, int n) {
+    if (n <= 0) return;
+    if (g_announce.size() < 32) g_announce.push_back(Shown{category, id, n});
+    g_free_since = 0;
+}
+
 void tick() {
-    if (!g_told) return;
+    if (g_announce.empty()) return;
     if (!game::player_game_data()) {
-        g_told = false;
+        g_announce.clear();
         return;
     }
     if (!in_control()) {
@@ -527,8 +568,10 @@ void tick() {
     const ULONGLONG t = GetTickCount64();
     if (!g_free_since) g_free_since = t;
     if (t - g_free_since < 1000) return;
-    g_told = false;
-    text::show(L"Prepare to Co-op items added to your inventory");
+    bool all = true;
+    for (const Shown& s : g_announce) all &= show_obtained(s.category, s.id, s.count);
+    g_announce.clear();
+    if (!all) text::show(L"Prepare to Co-op items added to your inventory");
 }
 
 // A key item (goodsType 1, the Crimson Blossom) sits in the key range. The slot byte at +0x10 is "in use":
@@ -676,11 +719,7 @@ void grant_missing() {
         give(id, 1);
         if (count(id) <= 0) continue;
         LOG_INFO("[coop] Gave co-op item %d", id);
-        ++given;
-    }
-    if (given) {
-        g_told = true;
-        g_free_since = 0;
+        announce(kGoodsCategory, id, 1);
     }
 }
 

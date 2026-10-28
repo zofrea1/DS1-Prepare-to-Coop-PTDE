@@ -51,6 +51,14 @@ bool keep_key_for_home(int32_t goods_id);
 // Straight into the inventory, without the "items obtained" box (see kInventoryAdd). False when nothing was added
 // (no character, or the inventory refused the stack).
 bool give(int32_t goods_id, int n);
+// The game's own item-get window (the one its awards and pickups use: category 0 weapon, 0x10000000 armor,
+// 0x20000000 ring, 0x40000000 goods), with the pickup sound. Only shows the item; give it first. False when the
+// window's queue is not there (no character loaded).
+bool show_obtained(uint32_t category, int32_t id, int n);
+// The same, once the player stands in the world with no menu or dialog open (a rest's gifts, a death's Crimson
+// Blossom, an invasion's reward). Game thread.
+void announce(uint32_t category, int32_t id, int n);
+constexpr uint32_t kGoodsCategory = 0x40000000;
 // The Estus Flask's charges: the full flask's count, 0 for the empty flask, -1 without one.
 int estus_charges();
 // Gives the flask exactly this many charges (1 up to its maximum), the empty flask turned into the full one as the
@@ -66,7 +74,7 @@ bool set_magic_multi(int32_t magic_id, bool on);
 // A bonfire rest: every co-op item except the Crimson Blossom that is not in the inventory (one each). Checked
 // at every rest, so a character brought over from an earlier save gets them too.
 void grant_missing();
-// Per frame, game thread: once the player stands in the world again, says in the action box that items came.
+// Per frame, game thread: once the player stands in the world again, shows what announce() was given.
 void tick();
 
 // Decides use for the local player: -1 the game's own rules, 0 refused, 1 allowed, 2 allowed if the game's

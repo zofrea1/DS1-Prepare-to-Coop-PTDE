@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "hook.h"
+#include "items.h"
 #include "log.h"
 #include "party.h"
 #include "session.h"
@@ -77,6 +78,7 @@ struct State {
     std::vector<Owed> owed;  // rolled for us, not in the inventory yet (it did not fit)
     double retry_at = 0;
     bool told_full = false;
+    int landed = 0;          // items put in the inventory at the last delivery
 };
 std::map<int, State> g_rows;  // row index -> state; one with a drop of ours is kept while the character is loaded
 std::vector<int> g_flags;     // every row's flag, sorted
@@ -281,16 +283,17 @@ void roll_lot(int lot, State* s) {
     for (Owed& e : drawn) s->owed.push_back(std::move(e));
 }
 
-// Puts what is owed in the inventory. An entry's one-time flag is set once all its items are in, as the game's award
-// (0xDC9170) sets it after giving them; what did not fit stays owed. The names of what came go to `names`, of what
-// did not fit to `full`.
+// Puts what is owed in the inventory and shows it in the game's item-get window, as the game's award (0xDC8CD0) does.
+// An entry's one-time flag is set once all its items are in, as the award (0xDC9170) sets it after giving them; what
+// did not fit stays owed. The names of what came without the window go to `names`, of what did not fit to `full`.
 void deliver(State* s, std::vector<std::wstring>* names, std::vector<std::wstring>* full) {
     for (auto e = s->owed.begin(); e != s->owed.end();) {
         for (auto it = e->items.begin(); it != e->items.end();) {
             const std::wstring name = item_name(*it);
             if (add_to_inventory(*it)) {
                 LOG_INFO("[coop] One-time drop: item %08X %d x%d is in the inventory", it->category, it->id, it->count);
-                if (!name.empty()) names->push_back(name);
+                ++s->landed;
+                if (!items::show_obtained(it->category, it->id, it->count) && !name.empty()) names->push_back(name);
                 it = e->items.erase(it);
             } else {
                 LOG_INFO("[coop] One-time drop: item %08X %d x%d did not fit in the inventory; it stays owed",
@@ -556,6 +559,7 @@ void tick() {
     if (g_rows.empty()) return;
     const bool take = can_take();
     std::vector<std::wstring> found, missed, full;
+    bool any_missed = false;
     for (auto it = g_rows.begin(); it != g_rows.end();) {
         const Row& r = kRows[it->first];
         State& s = it->second;
@@ -571,7 +575,9 @@ void tick() {
             }
             s.give = 0;
             std::vector<std::wstring> no_room;
+            s.landed = 0;
             deliver(&s, s.missed ? &missed : &found, &no_room);
+            if (s.missed && s.landed) any_missed = true;
             if (s.owed.empty()) {
                 s.told_full = false;
             } else {
@@ -588,8 +594,13 @@ void tick() {
             ++it;
         }
     }
+    // The item-get window names what came; without it, the action box does.
     if (!found.empty()) text::show(L"Added to your inventory: " + join(found));
-    if (!missed.empty()) text::show(L"From a kill you missed: " + join(missed));
+    if (!missed.empty()) {
+        text::show(L"From a kill you missed: " + join(missed));
+    } else if (any_missed) {
+        text::show(L"From a kill you missed");
+    }
     if (!full.empty()) text::show(L"No room in your inventory for " + join(full) + L"; it comes once there is room");
 }
 

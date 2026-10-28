@@ -1046,6 +1046,7 @@ void reward_tick() {
         }
     }
     const int given = std::clamp(items::count(kHumanity) - before, 0, g_reward);
+    items::announce(items::kGoodsCategory, kHumanity, given);
     if (given < g_reward) {
         retry_at = now() + 30.0;
         LOG_INFO("[coop] Reward: %d of %d Humanity fit in the inventory; the rest is tried again in 30 s", given,

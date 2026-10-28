@@ -213,7 +213,9 @@ bool give_blossom() {
     const int before = coop::items::count(coop::items::kBlossom);
     if (before >= 5) return false;
     coop::items::give(coop::items::kBlossom, 1);
-    return coop::items::count(coop::items::kBlossom) > before;
+    if (coop::items::count(coop::items::kBlossom) <= before) return false;
+    coop::items::announce(coop::items::kGoodsCategory, coop::items::kBlossom, 1);
+    return true;
 }
 
 // ---------------------------------------------------------------- the Homeward miracle

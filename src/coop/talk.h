@@ -12,9 +12,10 @@ namespace coop::talk {
 
 // The hooks on the game's talk player. False when this build does not match.
 bool install();
-// Where our lines go: `row` is the TalkParam row the NPC says now; `end` a line cut short.
-void set_listener(void (*fn)(int entity, int row, int a2, int a3, bool end));
-// Another player's game: NPC `entity` says `row` (or stops, `end`).
-void remote(int entity, int row, int a2, int a3, bool end);
+// Where our lines go: `talk` is the NPC's talk id (its MSB part's, the same in every game), `row` the TalkParam row
+// it says now; `end` a line cut short.
+void set_listener(void (*fn)(int talk, int row, int a2, int a3, bool end));
+// Another player's game: the NPC with talk id `talk` says `row` (or stops, `end`).
+void remote(int talk, int row, int a2, int a3, bool end);
 
 }  // namespace coop::talk

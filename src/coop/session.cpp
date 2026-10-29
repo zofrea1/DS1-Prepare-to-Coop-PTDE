@@ -311,7 +311,7 @@ struct AnimDoneMsg {
 };
 struct NpcTalkMsg {
     Header h;
-    int32_t entity;  // the NPC's entity id
+    int32_t talk;    // the NPC's talk id (its MSB part's; not its entity id)
     int32_t row;     // the TalkParam row it says now (a line, or a later page of one)
     int32_t a2;      // TalkToPlayer's other two arguments
     int32_t a3;
@@ -3805,7 +3805,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             } else if (from != g_host || g_step != Step::InWorld) {
                 return;
             }
-            talk::remote(m.entity, m.row, m.a2, m.a3, m.end != 0);
+            talk::remote(m.talk, m.row, m.a2, m.a3, m.end != 0);
             break;
         }
         case kCutFollow: {
@@ -4042,11 +4042,11 @@ void send_anim_done(int entity, int anim) {
 }
 
 // An NPC's line in our game, for the players near that NPC in theirs (talk.cpp). Invaders hear them too.
-void send_npc_talk(int entity, int row, int a2, int a3, bool end) {
+void send_npc_talk(int talk, int row, int a2, int a3, bool end) {
     if (g_role == Role::None || !g_lobby) return;
     NpcTalkMsg m{};
     fill_header(&m, kNpcTalk);
-    m.entity = entity;
+    m.talk = talk;
     m.row = row;
     m.a2 = a2;
     m.a3 = a3;

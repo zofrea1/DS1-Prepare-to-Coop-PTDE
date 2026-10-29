@@ -487,16 +487,20 @@ the one who talks to the NPC, or whose script reacts to a blow or a death, hears
 the others did not (a Crestfallen Warrior's death line showed only in the killer's game, 2026-10-12). Each NPC with a
 talk script has a talker (`0xA8` bytes, made per map by `0xD43400`): `[0x137D7C8]` keeps groups (`+0x14` count,
 `+0x18` array of `0x1C`), each group its maps' talk managers (`+8` count, `+0xC` array of `0x3C`), each manager its
-NPCs (`+0x18` count, `+0x14` array of `0x2C`: `+0x10` the NPC's entity id, `+0x14` its talker). The talker's player at
-`+4` holds the entity id (`+0xC`), the TalkParam row of its line (`+0x10`, -1 none), the page on screen (`+0x14`), a
-paused line (`+0x28`/`+0x2C`) and the NPC's handle (`+0x44`, -1: found by its entity id).
+NPCs (`+0x18` count, `+0x14` array of `0x2C`: `+0x10` the NPC's talk id, `+0x14` its talker). The talker's player at
+`+4` holds the talk id (`+0xC`), the TalkParam row of its line (`+0x10`, -1 none), the page on screen (`+0x14`), a
+paused line (`+0x28`/`+0x2C`) and the NPC's handle (`+0x44`, -1: found by its talk id). The talk id is the MSB part's,
+the number of its script (Oscar in the Undead Asylum: talk id 181602, `t181602.esd`, entity 6023), not the entity id.
+The game finds the NPC by it with `0xE3D560` (thiscall(WorldChrMan, talk id) -> handle; each block's table `+0x58`
+count, `+0x5C` pairs {talk id, handle}) and `0xE3E3F0` (esi = WorldChrMan, edx = handle). The first 1.3.0 test build
+took it for an entity id: it found no character by it, so no game ever sent a line (Oscar, 2026-10-29).
 
 TalkToPlayer (talk command 1:1, `0xFCEB24`, through `0xD46BC0`, which follows the TalkParam chain) starts a line with
 `0xD455C0` (eax = row, stdcall(player, a2, a3)); the player's tick (`0xD45430`) turns the page with `0xD453D0` once the
 voice ends or the player presses on; `0xD44410` stops a line that ran out, was paused or was cut short. `talk.cpp`
 hooks the three (the start and the stop by detour, the tick's page call `0xD45521`): a line our game starts on an NPC,
 each page it turns to and a line it cuts short (not one that ran out: the others' copy runs out as well) go to the
-others as message 33 (`kNpcTalk`: entity, row, a2, a3, end; the host passes a guest's on). A game whose player stands
+others as message 33 (`kNpcTalk`: talk id, row, a2, a3, end; the host passes a guest's on). A game whose player stands
 within 30 m of its own copy of that NPC starts the same row on that NPC's talker, with the handle cleared for the call
 so that no character turns towards the local player. A talker already saying a line of its own game's is left alone;
 one saying another game's line takes the new row (or stops). When a game's own script then makes the NPC say the line

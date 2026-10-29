@@ -23,5 +23,7 @@ enum Kind : int {
 void set_listener(void (*fn)(int talk, int line, int row, int a2, int a3, Kind kind));
 // Another player's game: the NPC with talk id `talk` says `row` of `line` (or stops).
 void remote(int talk, int line, int row, int a2, int a3, Kind kind);
+// Every frame: the log's watch on our own lines' pages.
+void tick();
 
 }  // namespace coop::talk

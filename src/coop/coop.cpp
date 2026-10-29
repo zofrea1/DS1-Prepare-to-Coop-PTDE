@@ -331,6 +331,7 @@ void hotkeys() {
 void tick_body() {
     coop::session::tick();
     coop::world::tick();
+    coop::talk::tick();
     coop::drops::tick();
     coop::deathtext::tick();
     coop::spectate::tick();

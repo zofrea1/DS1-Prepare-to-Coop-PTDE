@@ -3695,28 +3695,6 @@ bool ai_off_here(uint32_t chr) {
 // whose copy runs, keeps the enemy.
 constexpr uint32_t kBidFallen = 2;
 
-// When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part
-// way and another begins, in every game, as the new game moves both copies. Players saw the Asylum Demon break off
-// attacks in both 2026-10-29 tests: in the first a second after it landed from its perch, when the guest under it
-// outbid the host whose game had run the leap (the host's game lost it 1.1 s after the leap ended); in the second it
-// changed hands six times in one fight (14:54:15 to 14:55:31). With no engagement steps between the games the bids
-// differ only by nearness, (1 - distance / 64) x 255, so two players trading places around a boss passed it back
-// and forth. The game that moves an enemy bids kBidKeep more, about 10 m of nearness: it keeps the
-// enemy while its player stays in the fight, and gives it up when the player falls (kBidFallen), walks off, or the
-// others' game outbids it by engagement. The bid stays below the game's own cap (0x7FFF; 0xE56270 packs bid << 16).
-constexpr uint32_t kBidKeep = 40;
-constexpr uint32_t kBidCap = 0x7FFF;
-
-bool moved_here(uint32_t chr) {
-    uint32_t current = 0, own_ai = 0;
-    return read32(chr + 0x2C, &current) && read32(chr + 0x410, &own_ai) && current && current == own_ai;
-}
-
-uint32_t keep_bid(uint32_t chr, uint32_t bid) {
-    if (!moved_here(chr)) return bid;
-    return bid + kBidKeep < kBidCap ? bid + kBidKeep : kBidCap;
-}
-
 // The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
 uint32_t g_watch_chr = 0;
 uint32_t g_watch_bid = 0;
@@ -3751,7 +3729,7 @@ uint32_t net_priority(uint32_t chr) {
         }
     }
     const float mine = dist3(me, at);
-    if (mine <= kBidReach) return keep_bid(chr, bid);
+    if (mine <= kBidReach) return bid;
     for (const PeerSpot& p : g_peer_spots) {
         if (p.dead) continue;
         const float theirs = dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at);
@@ -3765,7 +3743,7 @@ uint32_t net_priority(uint32_t chr) {
             return 0;
         }
     }
-    return keep_bid(chr, bid);
+    return bid;
 }
 
 uint32_t __stdcall hk_net_priority(uint32_t chr) {
@@ -4065,25 +4043,123 @@ bool force_change_target(int entity, int target) {
     }
 }
 
-// The animation layer 0 plays, for the log: the index the network carries (game::anim_state) and the first words of
-// its clip entry (ActionCtrl = ChrCtrl+0x2C, layer +0x20: [+0] the clip, whose +0x10 is the entry, 0x24 bytes in
-// [+0x14]+4), where the animation id (3000s: attacks) may be.
-std::string anim_probe(uint32_t chr) {
-    char out[160] = "";
-    const uint32_t packed = game::anim_state(chr, 0);
-    uint32_t ctrl = 0, ac = 0, clip = 0, entry = 0;
-    int n = std::snprintf(out, sizeof(out), "animation %d", packed == 0xFFFFFFFF ? -1 : static_cast<int>(packed & 0xFFFF));
-    if (read32(chr + 0x28, &ctrl) && ctrl && read32(ctrl + 0x2C, &ac) && ac && read32(ac + 0x20, &clip) && clip &&
-        read32(clip + 0x10, &entry) && entry) {
-        n += std::snprintf(out + n, sizeof(out) - n, " (entry");
-        for (uint32_t i = 0; i < 9 && n < static_cast<int>(sizeof(out)) - 12; ++i) {
-            uint32_t w = 0;
-            if (!read32(entry + i * 4, &w)) break;
-            n += std::snprintf(out + n, sizeof(out) - n, " %X", w);
-        }
-        std::snprintf(out + n, sizeof(out) - n, ")");
+// When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part
+// way and another begins, in every game, as the new game moves both copies. Players saw the Asylum Demon break off
+// attacks in both 2026-10-29 tests, mostly early in a move: a second after it landed from its perch, when the guest
+// under it outbid the host whose game had run the leap, and in a fight in which it changed hands six times in 76 s
+// (the bids differ only by nearness when neither game's copy is more engaged). The rule to come: an attack the
+// moving game's AI began plays to its end before the enemy changes hands. That needs the animation's id (attacks
+// are 3000-4999 in every boss's animation list), and the animation the network carries (game::anim_state) is an
+// index into the character's Havok clips (0x73DE60 -> 0x73EB20: the clip entry's place, 0x24 bytes each), not the
+// id. So each boss's animations are logged as they change (anim_timeline_tick): the index, how long the last one
+// played, which game moves it, the clip entry's words, and for the first sighting of each index what the entry's
+// pointer words point at (text, if any, or their first words), to find the id. The perch leap (9060, the event
+// animation lines) is the last of the Asylum Demon's 40 animations: if indexes follow the animation list, it is 39.
+
+// Up to 15 printable characters at `addr` (ASCII, or UTF-16 shown as u'...'), or "".
+std::string text_at(uint32_t addr) {
+    if (addr < 0x10000) return "";
+    uint8_t b[32] = {};
+    for (uint32_t i = 0; i < 8; ++i) {
+        uint32_t w = 0;
+        if (!read32(addr + i * 4, &w)) return "";
+        std::memcpy(b + i * 4, &w, 4);
     }
-    return out;
+    auto printable = [](uint8_t c) { return c >= 0x20 && c < 0x7F; };
+    std::string s;
+    for (int i = 0; i < 15 && printable(b[i]); ++i) s += static_cast<char>(b[i]);
+    if (s.size() >= 3) return "'" + s + "'";
+    s.clear();
+    for (int i = 0; i < 15 && printable(b[i * 2]) && b[i * 2 + 1] == 0; ++i) s += static_cast<char>(b[i * 2]);
+    if (s.size() >= 3) return "u'" + s + "'";
+    return "";
+}
+
+// The clip layer 0 plays: its index (-1 none) and its entry (0 none).
+int clip_of(uint32_t chr, uint32_t* entry) {
+    const uint32_t packed = game::anim_state(chr, 0);
+    uint32_t ctrl = 0, ac = 0, clip = 0;
+    *entry = 0;
+    if (read32(chr + 0x28, &ctrl) && ctrl && read32(ctrl + 0x2C, &ac) && ac && read32(ac + 0x20, &clip) && clip) {
+        read32(clip + 0x10, entry);
+    }
+    return packed == 0xFFFFFFFF ? -1 : static_cast<int>(packed & 0xFFFF);
+}
+
+std::string anim_probe(uint32_t chr, bool deep = false) {
+    uint32_t entry = 0;
+    const int index = clip_of(chr, &entry);
+    std::string out = "animation " + std::to_string(index);
+    if (!entry) return out;
+    out += " (entry";
+    char w8[16];
+    for (uint32_t i = 0; i < 9; ++i) {
+        uint32_t w = 0;
+        if (!read32(entry + i * 4, &w)) break;
+        std::snprintf(w8, sizeof(w8), " %X", w);
+        out += w8;
+        if (!deep || w < 0x10000) continue;
+        const std::string text = text_at(w);
+        if (!text.empty()) {
+            out += "=" + text;
+            continue;
+        }
+        uint32_t inner[4] = {};
+        if (!read32(w, &inner[0]) || !read32(w + 4, &inner[1]) || !read32(w + 8, &inner[2]) ||
+            !read32(w + 12, &inner[3])) {
+            continue;
+        }
+        char deeper[64];
+        std::snprintf(deeper, sizeof(deeper), "=[%X %X %X %X]", inner[0], inner[1], inner[2], inner[3]);
+        out += deeper;
+        for (uint32_t v : inner) {
+            const std::string t = text_at(v);
+            if (!t.empty()) {
+                out += "->" + t;
+                break;
+            }
+        }
+    }
+    return out + ")";
+}
+
+struct BossClip {
+    int index = -2;
+    double since = 0;
+    std::set<int> seen;  // indexes logged in full
+};
+std::map<uint32_t, BossClip> g_boss_clips;
+
+void anim_timeline_tick() {
+    static int lines = 0;
+    if (lines >= 600 || !g_state.active || game::loading()) {
+        if (game::loading()) g_boss_clips.clear();
+        return;
+    }
+    const double t = seconds();
+    for (int e : g_awake_bosses) {
+        const uint32_t chr = chr_by_entity(e);
+        if (!chr) continue;
+        uint32_t entry = 0, current = 0, own_ai = 0, net_ai = 0;
+        const int index = clip_of(chr, &entry);
+        BossClip& b = g_boss_clips[chr];
+        if (index == b.index) continue;
+        read32(chr + 0x2C, &current);
+        read32(chr + 0x410, &own_ai);
+        read32(chr + 0x414, &net_ai);
+        const char* by = current && current == own_ai ? "this game" : current && current == net_ai ? "another game" : "?";
+        const bool deep = b.seen.insert(index).second;
+        char head[96];
+        std::snprintf(head, sizeof(head), "[coop] Boss %d: %d -> ", e, b.index);
+        ++lines;
+        if (b.index == -2) {
+            LOG_INFO("%s%s, moved by %s", head, anim_probe(chr, deep).c_str(), by);
+        } else {
+            LOG_INFO("%s%s after %.2f s, moved by %s", head, anim_probe(chr, deep).c_str(), t - b.since, by);
+        }
+        b.index = index;
+        b.since = t;
+    }
 }
 
 void boss_handover_tick() {
@@ -4860,6 +4936,7 @@ void tick() {
     track_boss_control();
     own_gauge_tick();
     boss_handover_tick();
+    anim_timeline_tick();
     party_team_tick();
     anim_watch_tick();
     invader_walls_tick();

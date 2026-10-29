@@ -709,13 +709,14 @@ copies all sleep is still some game's to move: at first such a game did not bid 
 its perch was nobody's until the session host next handed enemies out.
 
 When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part way
-and another begins, in every game. Players saw the Asylum Demon break off attacks in both 2026-10-29 tests: a second
-after it landed from its perch, when the guest under it outbid the host whose game had run the leap, and in a fight
-in which it changed hands six times in 76 s. With no engagement steps between the games the bids differ only by
-nearness, so two players trading places around a boss passed it back and forth. The game that moves an enemy now bids
-40 more (about 10 m of nearness): it keeps the enemy while its player stays in the fight, and gives it up when the
-player falls, walks off, or another game outbids it by engagement. The log names the animation each boss plays when
-it changes hands (the network's index and its clip entry), for a later rule against handing a boss over mid-attack.
+and another begins, in every game. Players saw the Asylum Demon break off attacks in both 2026-10-29 tests, mostly
+early in a move: a second after it landed from its perch, when the guest under it outbid the host whose game had run
+the leap, and in a fight in which it changed hands six times in 76 s (with neither game's copy more engaged, the bids
+differ only by nearness). The rule to come leaves the bids and the AI's targets as they are: an attack the moving
+game's AI began (an animation in the 3000-4999 range of every boss's list) plays to its end before the enemy changes
+hands. The animation the network carries is an index into the character's Havok clips, not that id, so for now each
+boss's animations are logged as they change (the index, how long the last one played, which game moves it, the clip
+entry), to find the id.
 
 A load at home starts every map's temporary flags (`xxxx5000`-`xxxx5999`: timers, who stands where, which runs of
 the map's events are done) over. A guest's death reload stays in the host's world, whose flags the game then left

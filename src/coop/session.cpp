@@ -536,13 +536,17 @@ int g_cut_follow_point = -1;
 int g_cut_follow_bonfire = -1;
 double g_cut_follow_at = 0;
 // When a cutscene of ours was last loading or playing. Its end moves us into its map in place (0xEE21F0 ->
-// 0xDE36E0), which need not be the same frame: the host skipped the crow's flight and the follow warp went the
-// frame the cutscene ended, taking the host to Firelink's bonfire under the game's own pending move. Afterwards the
-// host's talk with the Crestfallen Warrior turned no page by itself (the voice never reported its end, 0x6D13F0)
-// until the host pressed on, while the guest's game, moved by the cutscene, played the same talk normally
-// (2026-10-29); the cut-short move is the one difference found.
+// 0xDE36E0: the crow lands, the player runs a few steps, no loading screen; then the event's "In Firelink..." tip),
+// which need not be the same frame. The guest set off the crow and skipped first; the host skipped later, and the
+// follow warp went the frame the host's cutscene ended: a loading screen to Firelink's bonfire, no landing, no tip,
+// the rest of the crow's event cut off. Afterwards the host's talk with the Crestfallen Warrior turned no page by
+// itself (the voice never reported its end, 0x6D13F0) until the host pressed on, while the guest's game, moved by
+// the cutscene, played the same talk normally (2026-10-29); the cut-short ending is the one difference found. A
+// cutscene of ours into the map now has kCutMoveGrace after its end to move us; the warp is only for one that never
+// does (the 2026-10-13 crow, whose arrival point was not loaded in the host's game).
 double g_cut_busy_at = 0;
-constexpr double kCutMoveGrace = 4.0;
+bool g_cut_end_told = false;  // the end of our cutscene was logged for this follow
+constexpr double kCutMoveGrace = 20.0;
 // Guest bookkeeping.
 int g_home_bonfire = -1;
 int g_guest_bonfire = -1;  // respawn id while we are a guest (-1 none)
@@ -3846,6 +3850,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             // a second behind the guest): give it a few seconds. The next time it only played the guest's flight
             // and never moved the host (2026-10-13 13:42), so it does not get the last word.
             g_cut_follow_at = now() + (g_cut_map == m.map ? 5.0 : 1.0);
+            g_cut_end_told = false;
             break;
         }
         case kBye: {
@@ -4439,7 +4444,12 @@ void cutscene_tick() {
     }
     const int map = g_cut_follow_map;
     if (in_map(map)) {
-        LOG_INFO("[coop] Already in map %08X: no need to follow", map);
+        if (g_cut_end_told) {
+            LOG_INFO("[coop] Already in map %08X (our cutscene's own move, %.1f s after it ended): no need to follow",
+                     map, now() - g_cut_busy_at);
+        } else {
+            LOG_INFO("[coop] Already in map %08X: no need to follow", map);
+        }
         g_cut_follow_map = -1;
         return;
     }
@@ -4453,11 +4463,17 @@ void cutscene_tick() {
         if (now() - g_cut_follow_at < 120.0) return;
         LOG_INFO("[coop] Our cutscene into map %08X is still not over after 2 minutes: following anyway", map);
     } else if (g_cut_map == map && now() - g_cut_busy_at < kCutMoveGrace) {
-        return;  // our own cutscene into it has just ended: the game's own move comes first
+        if (!g_cut_end_told) {
+            g_cut_end_told = true;
+            LOG_INFO("[coop] Our cutscene into map %08X is over: its own move has %.0f s before we follow", map,
+                     kCutMoveGrace);
+        }
+        return;
     }
     g_cut_follow_map = -1;
     if (g_cut_map == map) {
-        LOG_INFO("[coop] Our own cutscene into map %08X did not bring us there: following instead", map);
+        LOG_INFO("[coop] Our own cutscene into map %08X did not bring us there (%.1f s after it ended): following "
+                 "instead", map, now() - g_cut_busy_at);
         g_cut_map = -1;
     }
     const int bonfire = game::bonfire_map(g_cut_follow_bonfire) == map ? g_cut_follow_bonfire : cutscene_bonfire(map);

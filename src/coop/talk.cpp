@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <iterator>
 #include <map>
 
 namespace coop::talk {
@@ -304,6 +306,63 @@ bool install() {
 }
 
 void set_listener(void (*fn)(int, int, int, int, int, Kind)) { g_listener = fn; }
+
+// A page of our own line that has not turned for kStuckPage is logged once, with what the tick (0xD45430) tests: the
+// voice done (0x6D13F0 on +0x48: its handle +0x4C is the empty one [0x12C56FC], or the sound engine says so) and +8
+// clear, or the timed advance (+0x58 a time, not -1, against +0x5C), or the button ([0x137D7C8]+0x784) when +0x41 is
+// set or +0x58 is -1. The host's own Firelink talk turned only on the button (2026-10-29). Its turn is logged too.
+constexpr double kStuckPage = 15.0;
+struct Watch {
+    int row = -1;
+    double since = 0;
+    bool told = false;
+};
+std::map<uint32_t, Watch> g_watch;
+
+void tick() {
+    if (g_sent.empty()) {
+        g_watch.clear();
+        return;
+    }
+    static int lines = 0;
+    const double t = now();
+    for (auto it = g_watch.begin(); it != g_watch.end();) {
+        it = g_sent.count(it->first) ? std::next(it) : g_watch.erase(it);
+    }
+    for (const auto& [tp, sent] : g_sent) {
+        Watch& w = g_watch[tp];
+        const int row = row_of(tp);
+        if (row != w.row) {
+            if (w.told && lines < 40) {
+                ++lines;
+                LOG_INFO("[coop] NPC (talk %d): our page %d turned after %.1f s", sent.talk, w.row, t - w.since);
+            }
+            w = Watch{row, t, false};
+            continue;
+        }
+        if (w.told || t - w.since < kStuckPage || lines >= 40) continue;
+        w.told = true;
+        ++lines;
+        uint32_t handle = 0, empty = 0, man = 0, wait = 0, elapsed = 0;
+        uint8_t playing = 0, b3a = 0, b41 = 0, b8 = 0, nosound = 0, button = 0;
+        read32(tp + 0x4C, &handle);
+        read32(0x012C56FC, &empty);
+        read32(tp + 0x58, &wait);
+        read32(tp + 0x5C, &elapsed);
+        read8(tp + 0x39, &playing);
+        read8(tp + 0x3A, &b3a);
+        read8(tp + 0x41, &b41);
+        read8(tp + 8, &b8);
+        read8(0x01378533, &nosound);
+        if (read32(kTalkMan, &man) && man) read8(man + 0x784, &button);
+        float wait_f = 0, elapsed_f = 0;
+        std::memcpy(&wait_f, &wait, 4);
+        std::memcpy(&elapsed_f, &elapsed, 4);
+        LOG_INFO("[coop] NPC (talk %d): our page %d has not turned for %.0f s: voice %08X%s, +8 %u, +39 %u, +3A %u, "
+                 "+41 %u, timed %.2f/%.2f, no sound %u, button %u", sent.talk, row, t - w.since, handle,
+                 handle == empty ? " (none)" : "", b8, playing, b3a, b41, wait_f, elapsed_f, nosound, button);
+    }
+}
 
 void remote(int talk, int line, int row, int a2, int a3, Kind kind) {
     if (game::loading() || !game::player()) return;

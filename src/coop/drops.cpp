@@ -87,7 +87,7 @@ bool g_installed = false;
 int g_loads = 0;              // map loads seen
 bool g_was_loading = false;
 bool g_was_active = false;    // we were in a session at the last tick
-bool g_per_world = false;     // OneTimeDropsPerWorld
+bool g_per_world = true;      // OneTimeDropsPerWorld
 std::wstring g_owner;         // the character the records are for
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -349,10 +349,10 @@ void forget(State* s) {
 
 // A record is made in one world (session::world_owner). With OneTimeDropsPerWorld it belongs to that world: the same
 // enemy elsewhere (another host's world) is another enemy, so a record from another world is forgotten before it is
-// used (what is owed stays). Off (the default), the record is the character's: a drop it has (rolled by the game or
-// by the mod) is not dropped again by the same enemy in another world (`elsewhere`), so a mask or a slab is not
-// gathered again by visiting other worlds. Only in the world it was made in does a flag found off mean a new
-// playthrough.
+// used (what is owed stays); this is the default, and the game's own one-time item flags (in the player's save)
+// still keep boss souls and keys to one per character. Off, the record is the character's while the game runs: a
+// drop it has (rolled by the game or by the mod) is not dropped again by the same enemy in another world
+// (`elsewhere`). Only in the world it was made in does a flag found off mean a new playthrough.
 State& in_this_world(State& s, bool* elsewhere) {
     const uint64_t w = session::world_owner();
     *elsewhere = false;

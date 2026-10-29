@@ -803,11 +803,13 @@ a drop (`0xD66600`), so whatever is still waiting then is ours. A drawn item tha
 stays owed (not rolled again) and is tried every 5 s ("No room in your inventory for ..."); the add takes a whole
 stack or nothing, so as many as fit go in first. An entry's one-time flag is set only once all its items are in. A
 record is made in one world (`session::world_owner`: our own Steam id at home, the host's in theirs). By default
-(`OneTimeDropsPerWorld = false`) it is the character's for as long as the game runs: a drop it has, rolled by the
-game or by the mod, is not dropped for us again by the same enemy in another world, so it cannot be gathered again
-by visiting other worlds; only in the world it was made in does a flag found off mean a new playthrough. With
-`OneTimeDropsPerWorld = true` a record from another world is forgotten before it is used (what is owed stays), and
-each world's enemies drop for us separately. What is owed is kept through a return to the title
+(`OneTimeDropsPerWorld = true`) a record from another world is forgotten before it is used (what is owed stays), and
+each world's enemies drop for us separately; the items the game gives once per character (boss souls, keys, the Rite
+of Kindling, Havel's Ring: their lot entries have a getItemFlagId, kept in the player's own save, a guest's in their
+own world's flags) still come once, the mod's roll skipping them as the game's does. With
+`OneTimeDropsPerWorld = false` a record is the character's for as long as the game runs: a drop it has, rolled by
+the game or by the mod, is not dropped for us again by the same enemy in another world; only in the world it was
+made in does a flag found off mean a new playthrough. What is owed is kept through a return to the title
 and given when the same character is back in the world. An invader's game keeps the vanilla drops. Tail cuts (the Drake Sword, the Gargoyle Tail Axe, the Moonlight Greatsword) are not
 in the table: they are paid on the cut, not the death.
 

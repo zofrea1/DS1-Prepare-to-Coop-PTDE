@@ -9,8 +9,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include <set>
-
 namespace coop::party {
 
 namespace {
@@ -179,7 +177,14 @@ int g_deferred[3] = {};  // a missing character waits: 1 for its player to be in
 bool g_was_loading = true;
 double g_loaded_at = 0;
 double g_last_check = 0;
-std::set<uint32_t> g_removed;  // characters we asked the game to remove (they linger for a frame or two)
+// The character we asked the game to remove from each player slot, and when (it lingers for a frame or two). The
+// slot's next character can be made at the same address: on 2026-10-28 the host's rebuilt copy on the guest took
+// the old one's, was taken for the old one on its way out, and so was never checked again. It lived through two
+// more deaths of the host unrebuilt, invisible but for its health bar, until a team wipe reloaded the guest's world.
+// The record is dropped once the slot is seen empty, or after kRemoveLinger s.
+constexpr double kRemoveLinger = 5.0;
+uint32_t g_removed[3] = {};
+double g_removed_at[3] = {};
 // What each player slot's character was made with: a death since then leaves it stale. The host died in the
 // Undead Asylum and came back in Firelink Shrine, where the guest already was; the guest's character of the host
 // had its health back from the network at once and was never rebuilt, so only its health bar showed (2026-10-13
@@ -259,7 +264,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
     const bool loading = game::loading() || !game::in_game();
     if (loading) {
         g_was_loading = true;
-        g_removed.clear();
+        for (uint32_t& c : g_removed) c = 0;
         for (Made& m : g_made) m = Made{};
         for (int& d : g_deferred) d = 0;
         return;
@@ -286,7 +291,8 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
         const PeerState ps = peer ? peer(r.chr, r.name) : PeerState{};
         char name[64];
         WideCharToMultiByte(CP_UTF8, 0, r.name.c_str(), -1, name, sizeof(name), nullptr, nullptr);
-        if (!r.chr || g_removed.count(r.chr) || being_removed(r.chr)) {
+        if (g_removed[r.slot] && (!r.chr || now() - g_removed_at[r.slot] >= kRemoveLinger)) g_removed[r.slot] = 0;
+        if (!r.chr || r.chr == g_removed[r.slot] || being_removed(r.chr)) {
             if (r.chr) continue;  // the old character is on its way out
             if (waiting(member)) continue;
             // Only once they stand in the world again. After a team wipe the guest's game asked for the host's
@@ -355,7 +361,8 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
             continue;
         }
         if (remove_character(r.chr)) {
-            g_removed.insert(r.chr);
+            g_removed[r.slot] = r.chr;
+            g_removed_at[r.slot] = now();
             made = Made{};
             g_queued_at[r.slot] = now() - 4.0;  // ask for the new character on the next check
             LOG_INFO("[coop] %s is back after dying: their character is created again", name);

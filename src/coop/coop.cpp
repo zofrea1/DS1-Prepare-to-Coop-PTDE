@@ -207,15 +207,40 @@ bool use_item(int32_t id) {
     }
 }
 
-int blossom_count() { return coop::items::count(coop::items::kBlossom); }
-void wither_blossoms() { coop::items::remove_all(coop::items::kBlossom); }
+// The Crimson Blossoms we hold. In another player's world the key items sit in a key array of that world, which
+// every load there empties (session.cpp, g_keys_gained), and a death's Blossom is given at its respawn warp, a moment
+// before that load: a guest's Blossoms were gone when they stood again, and their debuff never came (2026-10-28,
+// three deaths). The count is kept here and put back after such a load (blossom_keep_tick).
+int g_blossoms_kept = 0;
+
+int blossom_count() { return std::max(coop::items::count(coop::items::kBlossom), g_blossoms_kept); }
+void wither_blossoms() {
+    g_blossoms_kept = 0;
+    coop::items::remove_all(coop::items::kBlossom);
+}
 bool give_blossom() {
     const int before = coop::items::count(coop::items::kBlossom);
-    if (before >= 5) return false;
+    const int held = std::max(before, g_blossoms_kept);
+    if (held >= 5) return false;
     coop::items::give(coop::items::kBlossom, 1);
     if (coop::items::count(coop::items::kBlossom) <= before) return false;
+    g_blossoms_kept = held + 1;
     coop::items::announce(coop::items::kGoodsCategory, coop::items::kBlossom, 1);
     return true;
+}
+
+void blossom_keep_tick() {
+    using namespace coop;
+    static ULONGLONG last = 0;
+    if (g_blossoms_kept <= 0 || GetTickCount64() - last < 1000) return;
+    last = GetTickCount64();
+    if (!session::in_session() || game::own_world() || !game::in_game() || game::loading() || !game::player()) return;
+    const int have = items::count(items::kBlossom);
+    if (have >= g_blossoms_kept) return;
+    if (items::give(items::kBlossom, g_blossoms_kept - have)) {
+        LOG_INFO("[coop] Crimson Blossoms back in the inventory after the load in another player's world (%d -> %d)",
+                 have, g_blossoms_kept);
+    }
 }
 
 // ---------------------------------------------------------------- the Homeward miracle
@@ -265,7 +290,7 @@ bool homeward_state() {
 void before_rest() {
     if (g_items) {
         coop::items::grant_missing();
-        coop::items::remove_all(coop::items::kBlossom);
+        wither_blossoms();
         coop::world::clear_death_debuff();
     }
     coop::session::remember_rest_point();
@@ -313,6 +338,7 @@ void tick_body() {
     if (g_items) {
         coop::items::tick();
         homeward_miracle_tick();
+        blossom_keep_tick();
     }
     if (g_cfg.hotkeys) hotkeys();
     static ULONGLONG last_beat = 0;

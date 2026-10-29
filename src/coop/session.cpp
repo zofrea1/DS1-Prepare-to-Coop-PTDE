@@ -547,6 +547,9 @@ int g_separation = 0;
 bool g_anim_log = false;  // animation sync diagnostic lines in the log (session only)
 // Which player each other character in our world belongs to (kept while both exist, see update_remote_players).
 std::map<uint32_t, uint64_t> g_chr_peer;
+// The session member record's name (the Steam name, cut to 16 characters) of each player whose character is matched
+// above: what the game writes on their floating health bar (nameplate_for), whatever Steam tells us of the name.
+std::vector<std::pair<std::wstring, uint64_t>> g_member_names;
 // Key items of a co-op guest in the host's world. Every load in another player's world empties the key array the
 // inventory uses there (MoveMapStep 0xEFC6C3 -> 0x51C520 with clear 1), so a guest arrives without keys, and a death
 // or a travel there takes the keys gained in that world as well. Keys gained there are written into the own world's
@@ -614,6 +617,11 @@ int g_estus_kept = 0;  // charges set aside for the trip home
 // Host: since when we have had no character (0: we have one), and whether the lobby is hidden for it.
 double g_away_since = 0;
 bool g_hidden = false;
+// Host: steam::reconnects() when our lobby was made, and the game's own session was lost while we hosted (see
+// host_lobby_watch).
+int g_lobby_reconnects = 0;
+int g_game_session_last = 0;  // the game's session state at the last check
+bool g_game_session_lost = false;
 // We invade and are in the host's world: the other players' health bars are shown (hk_bar_type; set every tick).
 uint8_t g_invader_bars = 0;
 
@@ -862,9 +870,20 @@ void broadcast(T& msg, bool reliable = true, uint64_t except = 0) {
     broadcast_raw(&msg, sizeof(msg), reliable, except);
 }
 
+// Steam knows another player's name only once it has heard of them: a joiner's hello can come before they are in our
+// lobby, and Steam then answers "[unknown]". Kept, that name matched nothing for the rest of the session: the host's
+// floating health bars kept the guest's Steam name instead of their character, soul level and ping, and the host's
+// game made a missing guest's character at once instead of waiting until they were up (2026-10-28).
+bool name_known(const std::string& name) { return !name.empty() && name != "?" && name != "[unknown]"; }
+
 PeerInfo* peer(uint64_t id) {
     for (auto& p : g_peers) {
-        if (p.id == id) return &p;
+        if (p.id != id) continue;
+        if (!name_known(p.name)) {
+            const std::string now_known = steam::persona(id);
+            if (name_known(now_known)) p.name = now_known;
+        }
+        return &p;
     }
     PeerInfo p;
     p.id = id;
@@ -1370,6 +1389,9 @@ void host_open_lobby() {
         publish_cooldown();  // a cooldown from our last session goes on
         g_away_since = 0;
         g_hidden = false;
+        g_lobby_reconnects = steam::reconnects();
+        g_game_session_last = game::session_state();
+        g_game_session_lost = false;
         auto& st = rules::state();
         st.active = true;
         st.host = true;
@@ -1381,6 +1403,11 @@ void host_open_lobby() {
 
 void host_ensure_game_session() {
     const int state = game::session_state();
+    if (g_game_session_last == 3 && state != 3 && !g_game_session_lost) {
+        g_game_session_lost = true;
+        LOG_INFO("[coop] The game's own session was lost while we host (state %d)", state);
+    }
+    g_game_session_last = state;
     if (state == 3) return;
     if (!game::in_game() || !game::own_world()) return;
     if (state == 2 || state == 5) {
@@ -1796,6 +1823,52 @@ void host_hide_while_away() {
     }
 }
 
+// Two checks in a row (kLobbyCheck s apart) that find us out of our lobby: we are out of it for good (steam::in_lobby).
+constexpr double kLobbyCheck = 5.0;
+
+bool out_of_lobby() {
+    static double last = 0;
+    static int misses = 0;
+    static uint64_t lobby = 0;
+    if (lobby != g_lobby) {
+        lobby = g_lobby;
+        misses = 0;
+    }
+    if (now() - last < kLobbyCheck) return false;
+    last = now();
+    if (!g_lobby || !steam::online()) return false;  // nothing to judge until Steam is back
+    misses = steam::in_lobby(g_lobby) ? 0 : misses + 1;
+    return misses >= 2;
+}
+
+// Host: our lobby is how other players find our world and how our messages reach them. A network change or a lost
+// connection to Steam takes us out of it, and Steam deletes a lobby its last member has left: the world could no
+// longer be found while everything else still said we hosted, and the host had to close it and open it again
+// (2026-10-28: the host's game lost its own session at 21:34 and made it again; a search at 21:50 found no world).
+// A new lobby is made once we are out of ours, or, while no other player is with us, once Steam is back after a
+// loss or the game's own session had to be made again (both cost a lobby nobody is in nothing).
+void host_lobby_watch() {
+    const char* why = nullptr;
+    if (out_of_lobby()) {
+        why = "we are no longer in it";
+    } else if (steam::online() && (steam::reconnects() != g_lobby_reconnects || g_game_session_lost) &&
+               game::session_state() == 3) {
+        bool alone = true;
+        for (const auto& p : g_peers) alone &= !(admitted(p.id) && now() - p.last_seen <= 10.0);
+        if (alone) {
+            why = g_game_session_lost ? "the game's own session was lost" : "the connection to Steam was lost";
+        } else {
+            g_lobby_reconnects = steam::reconnects();  // the players with us still reach us: it is kept
+            g_game_session_lost = false;
+        }
+    }
+    if (!why) return;
+    LOG_INFO("[coop] Our session's lobby may be gone (%s): a new one is made", why);
+    if (g_lobby) steam::leave_lobby(g_lobby);
+    g_lobby = 0;
+    host_open_lobby();
+}
+
 // Invaders' searches skip a world that would refuse them: ptdesc_invade reads "0" while a boss fight is on (and
 // with AllowInvaders off). 1.0.0 to 1.2.0 invaders search on that key. From 1.3.0 "ptdesc_boss" reads "1" during the
 // fight of a world that takes invaders otherwise: a 1.3.0 invader's search finds every world and tells the invader
@@ -2137,6 +2210,8 @@ void host_tick() {
     host_hide_while_away();
     host_invasions_open();
     host_ensure_game_session();
+    host_lobby_watch();
+    if (g_step != Step::Hosting) return;  // a new lobby is being made
     drop_quiet_players();
     const bool ready = game::session_state() == 3;
     for (size_t i = 0; i < g_pending.size();) {
@@ -2903,6 +2978,12 @@ void guest_tick() {
                     guest_go_home(kMsgHostLost, why);
                     break;
                 }
+            }
+            // Our own connection to Steam dropped (a network change): we are out of the host's lobby, so the host
+            // no longer sends to us. Home now, not after the minute of silence.
+            if (out_of_lobby()) {
+                guest_go_home(kMsgHostLost, "we are no longer in the host's lobby (our connection to Steam dropped)");
+                break;
             }
             if (g_world_wait > 0 && now() - g_world_wait > 30.0) {
                 LOG_INFO("[coop] The host's map flags did not come; our copy of their world stays as it is");
@@ -4135,6 +4216,11 @@ void update_remote_players() {
         key += line;
     }
     g_chr_peer = matched;
+    g_member_names.clear();
+    for (const auto& r : members) {
+        const auto it = r.chr ? matched.find(r.chr) : matched.end();
+        if (it != matched.end() && !r.name.empty()) g_member_names.emplace_back(r.name, it->second);
+    }
     static std::string last_key;
     static int reports = 0;
     if (key != last_key && reports < 100) {
@@ -5195,12 +5281,21 @@ const wchar_t* __stdcall nameplate_for(const wchar_t* shown) {
     if (g_role == Role::None) return nullptr;
     wchar_t name[24] = {};
     if (!read_shown_name(shown, name, 24) || wcslen(name) > 16) return nullptr;
+    auto member_is = [&](uint64_t id) {
+        for (const auto& [member_name, who] : g_member_names) {
+            if (who == id && member_name == name) return true;
+        }
+        return false;
+    };
     int slot = 0;
     for (const auto& p : g_peers) {
         if (slot >= 4) break;
         if (now() - p.last_seen > 10.0) continue;
         const int mine = slot++;
-        if (!utf8_is(name, p.name) && (p.char_name.empty() || wcscmp(name, p.char_name.c_str()) != 0)) continue;
+        if (!utf8_is(name, p.name) && (p.char_name.empty() || wcscmp(name, p.char_name.c_str()) != 0) &&
+            !member_is(p.id)) {
+            continue;
+        }
         const int mode = g_cfg.overhead_display;
         const std::wstring shown_as = shown_name(p).substr(0, 16);
         const wchar_t* who = shown_as.c_str();

@@ -39,6 +39,13 @@ std::string lobby_data(uint64_t lobby, const char* key);
 void set_lobby_joinable(uint64_t lobby, bool joinable);
 uint64_t lobby_owner(uint64_t lobby);
 std::vector<uint64_t> lobby_members(uint64_t lobby);
+// We are among `lobby`'s members. A lost connection to Steam takes us out of every lobby, and Steam deletes a lobby
+// its last member left.
+bool in_lobby(uint64_t lobby);
+// The connection to Steam's servers: false from Steam's word that it is lost until it is back. reconnects() counts
+// the returns.
+bool online();
+int reconnects();
 
 // Called when someone enters (true) or leaves (false) a lobby we are in.
 void on_lobby_member(std::function<void(uint64_t lobby, uint64_t user, bool entered)> fn);

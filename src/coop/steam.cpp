@@ -99,8 +99,24 @@ void await(SteamAPICall_t call, std::function<void(const T*, bool)> fn) {
 Callback<LobbyChatUpdate_t>* g_cb_chat = nullptr;
 Callback<P2PSessionRequest_t>* g_cb_p2p_request = nullptr;
 Callback<P2PSessionConnectFail_t>* g_cb_p2p_fail = nullptr;
+Callback<SteamServersConnected_t>* g_cb_connected = nullptr;
+Callback<SteamServersDisconnected_t>* g_cb_disconnected = nullptr;
+bool g_offline = false;  // Steam told us the connection to its servers is lost
+int g_reconnects = 0;
 
 void register_callbacks() {
+    g_cb_disconnected = new Callback<SteamServersDisconnected_t>([](const SteamServersDisconnected_t& d) {
+        if (!g_offline) LOG_INFO("[coop] Steam: the connection to Steam was lost (EResult %d)", d.m_eResult);
+        g_offline = true;
+    });
+    g_cb_connected = new Callback<SteamServersConnected_t>([](const SteamServersConnected_t&) {
+        if (!g_offline) return;
+        g_offline = false;
+        ++g_reconnects;
+        LOG_INFO("[coop] Steam: connected again");
+    });
+    g_api.register_callback(g_cb_disconnected, SteamServersDisconnected_t::k_iCallback);
+    g_api.register_callback(g_cb_connected, SteamServersConnected_t::k_iCallback);
     g_cb_chat = new Callback<LobbyChatUpdate_t>([](const LobbyChatUpdate_t& u) {
         // k_EChatMemberStateChangeEntered = 1; left/disconnected/kicked/banned = 2/4/8/16
         const bool entered = (u.m_rgfChatMemberStateChange & 1) != 0;
@@ -340,6 +356,17 @@ std::vector<uint64_t> lobby_members(uint64_t lobby) {
     for (int i = 0; i < n; ++i) out.push_back(g_mm->GetLobbyMemberByIndex(CSteamID(lobby), i).ConvertToUint64());
     return out;
 }
+
+bool in_lobby(uint64_t lobby) {
+    const uint64_t me = self();
+    for (uint64_t m : lobby_members(lobby)) {
+        if (m == me) return true;
+    }
+    return false;
+}
+
+bool online() { return !g_offline; }
+int reconnects() { return g_reconnects; }
 
 void on_lobby_member(std::function<void(uint64_t, uint64_t, bool)> fn) { g_member_fn = std::move(fn); }
 void on_p2p_failed(std::function<void(uint64_t, int)> fn) { g_fail_fn = std::move(fn); }

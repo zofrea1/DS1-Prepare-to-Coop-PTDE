@@ -47,6 +47,9 @@ void set_blossom_give(bool (*fn)());
 void clear_death_debuff();
 // Another player rested: reset this world (enemies respawn), wither the Crimson Blossoms, end limbo.
 void remote_rest();
+// The session is over for us (a guest back home, a host who closed the world): the Crimson Blossoms wither at once,
+// or as soon as we have a character again.
+void session_over_blossoms(const char* why);
 
 bool boss_fight();
 // The co-op scaling of this enemy's health is in place in this game (or none is wanted): its max HP is the scaled

@@ -1247,6 +1247,8 @@ void __stdcall hk_chr_light(uint32_t chr) {
 
 }  // namespace
 
+void session_over_blossoms(const char* why) { wither_blossoms(why, false); }
+
 int local_lights() { return slot_light_bits(game::player()); }
 
 void share_lights(const std::vector<RemoteLight>& peers) {

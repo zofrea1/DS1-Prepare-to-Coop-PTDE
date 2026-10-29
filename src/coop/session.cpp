@@ -583,6 +583,12 @@ std::vector<std::pair<std::wstring, uint64_t>> g_member_names;
 std::vector<int32_t> g_keys_arrival;  // held when we arrived in the host's world
 std::vector<int32_t> g_keys_seen;     // as last logged there
 std::vector<int32_t> g_keys_gained;   // gained in the host's world this visit (put back after a load there)
+// The Crimson Blossom is a key item (goodsType 1), so the key poll took a guest's Blossom for a key gained in the
+// host's world: it was written into the own world's array for home and listed for the give-back there (2026-10-29,
+// "gained here: 2012 2011 389007"); the 3 s wither at home took it away again, after it had been seen. No co-op item
+// is a key of a world. A guest's Blossoms wither on the first frame home; the host's when it closes the world.
+bool world_key(int32_t id) { return id < items::kFirst || id > items::kLast; }
+bool g_blossoms_home = false;  // a guest going home: the Blossoms wither on the first frame there
 std::vector<int32_t> g_keys_lent;     // ours that the host's world has too, carried there (not gained)
 std::vector<int32_t> g_keys_carried;  // gained there and held when we left
 double g_keys_polled = 0;
@@ -1792,6 +1798,7 @@ void host_close_tick() {
         if (g_close_forced) settle_party_counts();
         settle_after_session();
         LOG_INFO("[coop] Session disbanded (%.1f s); the host stays in the world", waited);
+        world::session_over_blossoms("the host closed the world");
         finish(L"");
         return;
     }
@@ -2682,11 +2689,12 @@ bool holds(const std::vector<int32_t>& v, int32_t id) { return std::find(v.begin
 
 void guest_go_home(const std::wstring& why, const char* reason) {
     LOG_INFO("[coop] Going home (%s; session state %d, step %d)", reason, game::session_state(), game::join_step());
+    g_blossoms_home = true;
     if (!g_invade && g_step == Step::InWorld) {
         const std::vector<int32_t> now_keys = items::key_items();
         g_keys_carried.clear();
         for (int32_t id : now_keys) {
-            if (!holds(g_keys_arrival, id) && !holds(g_keys_lent, id)) g_keys_carried.push_back(id);
+            if (world_key(id) && !holds(g_keys_arrival, id) && !holds(g_keys_lent, id)) g_keys_carried.push_back(id);
         }
         for (int32_t id : g_keys_gained) {
             if (!holds(g_keys_carried, id)) g_keys_carried.push_back(id);  // gone from here after a load
@@ -2981,7 +2989,10 @@ void guest_tick() {
                     g_keys_seen = k;
                     // A key gained here goes into the own world's key array as well (items::keep_key_for_home).
                     for (int32_t id : k) {
-                        if (holds(g_keys_arrival, id) || holds(g_keys_lent, id) || holds(g_keys_gained, id)) continue;
+                        if (!world_key(id) || holds(g_keys_arrival, id) || holds(g_keys_lent, id) ||
+                            holds(g_keys_gained, id)) {
+                            continue;
+                        }
                         g_keys_gained.push_back(id);
                         LOG_INFO("[coop] Key item %d, gained here, %s", id,
                                  items::keep_key_for_home(id) ? "is kept for home as well"
@@ -4632,6 +4643,11 @@ void tick() {
     if (g_role == Role::Host) host_tick();
     if (g_role == Role::Guest) guest_tick();
     text::set_seamless_active(g_role != Role::None);
+    if (g_blossoms_home && g_role == Role::None && game::in_game() && !game::loading() && game::own_world() &&
+        game::player()) {
+        g_blossoms_home = false;
+        world::session_over_blossoms("back home after the session");
+    }
     // Back home with keys gained in the host's world: three seconds in, any of them that is gone is given back.
     if (!g_keys_carried.empty() && g_role == Role::None && game::in_game() && !game::loading() && game::own_world()) {
         if (g_keys_home_at == 0) {

@@ -30,7 +30,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
    | Dried Fingers | Host: taunt invaders; an invader searching for a world is 50% more likely to pick yours. | host |
    | Cursed Pendant | Curse your own world: it counts as pure black World Tendency until you use the pendant again, and the NPC invaders come even while you are hollow. | your own world: alone or as host |
-   | Crimson Blossom | Not used: one blooms with each death in a session (up to five; none when the team defeats a boss while you are down), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0); it is given when the respawn warp goes and the reload keeps the world. They wither when anyone in the session rests (the health they took comes back), the whole team falls, or the player is in the world with no session for 3 s (at home they lie in the own world's key array, which a visit to another world does not show, so one from a death at home came back after a visit). | never |
+   | Crimson Blossom | Not used: one blooms with each death in a session (up to five; none when the team defeats a boss while you are down), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0); it is given when the respawn warp goes and the reload keeps the world. They wither when anyone in the session rests (the health they took comes back), the whole team falls, or the session ends: a guest's on the first frame home, a host's when it closes the world (Abyssal Eye Orb, Black Separation Crystal); and whenever the player is in the world with no session for 3 s (at home they lie in the own world's key array, which a visit to another world does not show, so one from a death at home came back after a visit). | never |
    | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
 
    The items are used like any other item (quick slot, the item animation); when one cannot be used it is
@@ -811,7 +811,8 @@ to `items::travel_key` (an Ember, Lord Soul or the Lordvessel handed over there 
 The Crimson Blossom is a key item too, and a death's Blossom is given at its respawn warp, just before that load: a
 guest's Blossoms were cleared with the second array, and their debuff never came (2026-10-28). The count is kept in
 memory (`coop.cpp`, `g_blossoms_kept`; the debuff follows it at once) and the Blossoms are put back a moment after a
-load in another player's world.
+load in another player's world. The key poll took a guest's Blossom for a key gained in the host's world and brought
+it home with the keys (2026-10-29: "gained here: 2012 2011 389007"); no co-op item counts as a world's key now.
 
 **The item-get window.** Items the mod gives (the co-op items at a rest, a death's Crimson Blossom, an invasion's
 Humanity, a one-time drop) go into the inventory with `0xC0B700` and are then shown in the game's own item-get window

@@ -711,16 +711,16 @@ its perch was nobody's until the session host next handed enemies out.
 When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part way
 and another begins, in every game. Players saw the Asylum Demon break off attacks in all three 2026-10-29 tests,
 mostly in the wind-up but once in mid-air in its jumping slam: a second after it landed from its perch, when the guest
-under it outbid the host whose game had run the leap, and in a fight in which it changed hands six times in 76 s
-(with neither game's copy more engaged, the bids differ only by nearness). Bids, targets and turning stay as the game
-has them; an attack animation the moving game's AI began plays to its natural end before the enemy changes hands. The
-game that moves an enemy whose action is an attack (3000-4999) bids the game's cap until the action changes, at most
-8 s for one action, ahead of every other rule (a fallen player's game finishes the swing too); a chain of attacks is
-a chain of animations, each played out, and the hand-out comes between two of them. The action is read from the
-character's controls (`[ChrCtrl+0x214]`, which the enemy network sample `0xE45340` sends as an animation id); the clip
-index the layer reports (`game::anim_state`) stayed 0 through a whole fight and showed only scripted animations (the
-perch leap, the death). Each awake boss's actions are logged as they change, with where an attack-range value sits
-in the character, its controls and their ActionCtrl, in case the action is not the id.
+under it outbid the host whose game had run the leap, and in fights in which it changed hands every 3 to 9 s (the
+session host hands enemies out every 3 s; with neither game's copy more engaged, the bids differ only by nearness).
+Bids, targets and turning stay as the game has them; an attack animation the moving game's AI began plays to its
+natural end before the enemy changes hands. While an enemy's animation is an attack (3000-4999), the game that moves
+it bids the game's cap and every other game, whose copy plays the same attack from the network, bids nothing, ahead of
+every other rule (a fallen player's game finishes the swing too); one animation holds the enemy at most 8 s. A chain
+of attacks is a chain of animations, each played out. The animation playing is `ChrCtrl+0x350` (the same as
+`ActionCtrl+0x60`), found by scanning the demon for attack-range values during a fight: both took each attack's id in
+turn in both games and left that range between attacks; `ActionCtrl+0x4F8`/`+0x518` took each attack first (the AI's
+request). The log follows each awake boss's animations and says when an attack holds it.
 
 A load at home starts every map's temporary flags (`xxxx5000`-`xxxx5999`: timers, who stands where, which runs of
 the map's events are done) over. A guest's death reload stays in the host's world, whose flags the game then left

@@ -312,10 +312,11 @@ struct AnimDoneMsg {
 struct NpcTalkMsg {
     Header h;
     int32_t talk;    // the NPC's talk id (its MSB part's; not its entity id)
-    int32_t row;     // the TalkParam row it says now (a line, or a later page of one)
+    int32_t line;    // the TalkParam row the line began with
+    int32_t row;     // the TalkParam row it says now (the line, or a later page of it)
     int32_t a2;      // TalkToPlayer's other two arguments
     int32_t a3;
-    uint8_t end;     // the line was cut short: it stops
+    uint8_t kind;    // talk::Kind: a page, the line cut short, or a line begun
 };
 struct CutFollowMsg {
     Header h;
@@ -534,6 +535,14 @@ int g_cut_follow_map = -1;
 int g_cut_follow_point = -1;
 int g_cut_follow_bonfire = -1;
 double g_cut_follow_at = 0;
+// When a cutscene of ours was last loading or playing. Its end moves us into its map in place (0xEE21F0 ->
+// 0xDE36E0), which need not be the same frame: the host skipped the crow's flight and the follow warp went the
+// frame the cutscene ended, taking the host to Firelink's bonfire under the game's own pending move. Afterwards the
+// host's talk with the Crestfallen Warrior turned no page by itself (the voice never reported its end, 0x6D13F0)
+// until the host pressed on, while the guest's game, moved by the cutscene, played the same talk normally
+// (2026-10-29); the cut-short move is the one difference found.
+double g_cut_busy_at = 0;
+constexpr double kCutMoveGrace = 4.0;
 // Guest bookkeeping.
 int g_home_bonfire = -1;
 int g_guest_bonfire = -1;  // respawn id while we are a guest (-1 none)
@@ -3805,7 +3814,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             } else if (from != g_host || g_step != Step::InWorld) {
                 return;
             }
-            talk::remote(m.talk, m.row, m.a2, m.a3, m.end != 0);
+            if (m.kind > talk::kStart) return;
+            talk::remote(m.talk, m.line, m.row, m.a2, m.a3, static_cast<talk::Kind>(m.kind));
             break;
         }
         case kCutFollow: {
@@ -4042,15 +4052,16 @@ void send_anim_done(int entity, int anim) {
 }
 
 // An NPC's line in our game, for the players near that NPC in theirs (talk.cpp). Invaders hear them too.
-void send_npc_talk(int talk, int row, int a2, int a3, bool end) {
+void send_npc_talk(int talk, int line, int row, int a2, int a3, talk::Kind kind) {
     if (g_role == Role::None || !g_lobby) return;
     NpcTalkMsg m{};
     fill_header(&m, kNpcTalk);
     m.talk = talk;
+    m.line = line;
     m.row = row;
     m.a2 = a2;
     m.a3 = a3;
-    m.end = end ? 1 : 0;
+    m.kind = static_cast<uint8_t>(kind);
     if (g_role == Role::Host) {
         broadcast(m);
     } else if (g_host && g_step == Step::InWorld) {
@@ -4378,6 +4389,7 @@ void cutscene_tick() {
     uint32_t hp = 0;
     const bool alive = me && read32(me + 0x2D4, &hp) && static_cast<int>(hp) > 0;
     const bool in_cutscene = rules::cutscene_loading() || rules::cutscene_playing();
+    if (in_cutscene) g_cut_busy_at = now();
     if (g_cut_own_map != -1 && settled) {
         // Our copy of the cutscene could not take us. Once it is over the event goes on and usually sets our respawn
         // in the new map (the crow: Firelink's bonfire); give it 3 s, then go there, or to the bonfire the other
@@ -4440,6 +4452,8 @@ void cutscene_tick() {
         // Our own copy is loading the map or playing (the crow's flight, then its arrival): it takes us itself.
         if (now() - g_cut_follow_at < 120.0) return;
         LOG_INFO("[coop] Our cutscene into map %08X is still not over after 2 minutes: following anyway", map);
+    } else if (g_cut_map == map && now() - g_cut_busy_at < kCutMoveGrace) {
+        return;  // our own cutscene into it has just ended: the game's own move comes first
     }
     g_cut_follow_map = -1;
     if (g_cut_map == map) {
@@ -5314,57 +5328,88 @@ bool utf8_is(const wchar_t* shown, const std::string& utf8) {
     return n > 1 && wcscmp(shown, buf) == 0;
 }
 
-// The bar's current name, or null when this string is not a companion we know. The game writes the player's Steam
+// The character of a floating bar's slot record (MenuMan+0x8F4 + 0x20 * slot, filled by 0x1012C30 from
+// PartyMemberInfo entry `slot`), or 0.
+uint32_t chr_of_bar(uint32_t rec) {
+    uint32_t mm = 0, gm = game::game_man(), party = 0, handle = 0xFFFFFFFF;
+    if (!read32(0x013786D0, &mm) || !mm || rec < mm + 0x8F4) return 0;  // MenuMan
+    const uint32_t slot = (rec - (mm + 0x8F4)) / 0x20;
+    if (slot > 3 || !gm || !read32(gm + game::kGmParty, &party) || party < 0x10000 ||
+        !read32(party + 0x18 + slot * 0x14, &handle)) {
+        return 0;
+    }
+    return rules::chr_of_handle(handle);
+}
+
+// The text for player `p`'s floating bar; `mine` picks its buffers.
+const wchar_t* plate_text(const PeerInfo& p, int mine) {
+    const int mode = g_cfg.overhead_display;
+    const std::wstring shown_as = shown_name(p).substr(0, 16);
+    const wchar_t* who = shown_as.c_str();
+    int ping = p.ping_ms;
+    // The host does not measure a round trip. A guest's own measurement is the host's ping.
+    if (g_role == Role::Guest && p.id == g_host) ping = g_ping_ms;
+    wchar_t ms[16] = L"--ms";
+    if (ping > 0) swprintf_s(ms, L"%dms", ping);
+    const int side = g_nameplate_n[mine] % 3;
+    g_nameplate_n[mine] = side + 1;
+    wchar_t* out = g_nameplate[mine][side];
+    constexpr size_t kCap = sizeof(g_nameplate[0][0]) / sizeof(wchar_t);
+    switch (mode) {
+        case 0: swprintf_s(out, kCap, L"%ls", who); break;
+        case 1: swprintf_s(out, kCap, L"(%ls, %ls)", who, ms); break;
+        case 2: swprintf_s(out, kCap, L"(%ls, SL: %d)", who, p.soul_level); break;
+        case 3: swprintf_s(out, kCap, L"(%ls, deaths: %d)", who, p.deaths); break;
+        default: swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", who, p.soul_level, ms); break;
+    }
+    return out;
+}
+
+// The bar's current name, or null when this bar is not a companion we know. The game writes the player's Steam
 // name there (its member record, member[n] in the "Character names" log line); the bar shows the character's name.
-const wchar_t* __stdcall nameplate_for(const wchar_t* shown) {
+// A record can hold no name: an invader saw a 1.2.0 guest's bar in the Kiln of the First Flame with no name, soul
+// level or ping (a Steam name of 22 characters, member[1]='', 2026-10-29). A bar whose name names no one is known by
+// its slot (`rec`, the caller's ebp): the slot's character, matched to its player as the world rules match them.
+const wchar_t* __stdcall nameplate_for(const wchar_t* shown, uint32_t rec) {
     if (g_role == Role::None) return nullptr;
     wchar_t name[24] = {};
-    if (!read_shown_name(shown, name, 24) || wcslen(name) > 16) return nullptr;
+    const bool named = read_shown_name(shown, name, 24) && wcslen(name) <= 16;
     auto member_is = [&](uint64_t id) {
         for (const auto& [member_name, who] : g_member_names) {
             if (who == id && member_name == name) return true;
         }
         return false;
     };
-    int slot = 0;
+    auto by_name = [&](const PeerInfo& p) {
+        return named && (utf8_is(name, p.name) || (!p.char_name.empty() && wcscmp(name, p.char_name.c_str()) == 0) ||
+                         member_is(p.id));
+    };
+    // The players heard from lately, in order: the index picks the buffers.
+    const PeerInfo* live[4] = {};
+    int n = 0;
     for (const auto& p : g_peers) {
-        if (slot >= 4) break;
-        if (now() - p.last_seen > 10.0) continue;
-        const int mine = slot++;
-        if (!utf8_is(name, p.name) && (p.char_name.empty() || wcscmp(name, p.char_name.c_str()) != 0) &&
-            !member_is(p.id)) {
-            continue;
-        }
-        const int mode = g_cfg.overhead_display;
-        const std::wstring shown_as = shown_name(p).substr(0, 16);
-        const wchar_t* who = shown_as.c_str();
-        int ping = p.ping_ms;
-        // The host does not measure a round trip. A guest's own measurement is the host's ping.
-        if (g_role == Role::Guest && p.id == g_host) ping = g_ping_ms;
-        wchar_t ms[16] = L"--ms";
-        if (ping > 0) swprintf_s(ms, L"%dms", ping);
-        const int side = g_nameplate_n[mine] % 3;
-        g_nameplate_n[mine] = side + 1;
-        wchar_t* out = g_nameplate[mine][side];
-        constexpr size_t kCap = sizeof(g_nameplate[0][0]) / sizeof(wchar_t);
-        switch (mode) {
-            case 0: swprintf_s(out, kCap, L"%ls", who); break;
-            case 1: swprintf_s(out, kCap, L"(%ls, %ls)", who, ms); break;
-            case 2: swprintf_s(out, kCap, L"(%ls, SL: %d)", who, p.soul_level); break;
-            case 3: swprintf_s(out, kCap, L"(%ls, deaths: %d)", who, p.deaths); break;
-            default: swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", who, p.soul_level, ms); break;
-        }
-        return out;
+        if (n >= 4) break;
+        if (now() - p.last_seen <= 10.0) live[n++] = &p;
+    }
+    for (int i = 0; i < n; ++i) {
+        if (by_name(*live[i])) return plate_text(*live[i], i);
+    }
+    const auto it = g_chr_peer.find(chr_of_bar(rec));
+    if (it == g_chr_peer.end()) return nullptr;
+    for (int i = 0; i < n; ++i) {
+        if (live[i]->id == it->second) return plate_text(*live[i], i);
     }
     return nullptr;
 }
 
-// ecx is the name widget. The wide string is the one stack argument (the callee pops it).
+// ecx is the name widget. The wide string is the one stack argument (the callee pops it); ebp is the bar's slot
+// record (0xFA8BA5: mov eax,[ebp+10h]).
 __declspec(naked) void hk_floating_name() {
     __asm {
         push ecx
         push edx
-        push dword ptr [esp + 12]
+        push ebp
+        push dword ptr [esp + 16]
         call nameplate_for
         test eax, eax
         jz keep
@@ -5423,14 +5468,7 @@ int g_bar_answer = 0;
 // 0 the game's own answer, 1 shown, 2 hidden.
 int __stdcall bar_answer(uint32_t rec) {
     if (g_role == Role::None) return 0;
-    uint32_t mm = 0, gm = game::game_man(), party = 0, handle = 0xFFFFFFFF;
-    if (!read32(0x013786D0, &mm) || !mm || rec < mm + 0x8F4) return 0;  // MenuMan
-    const uint32_t slot = (rec - (mm + 0x8F4)) / 0x20;
-    if (slot > 3 || !gm || !read32(gm + game::kGmParty, &party) || party < 0x10000 ||
-        !read32(party + 0x18 + slot * 0x14, &handle)) {
-        return 0;
-    }
-    const uint32_t chr = rules::chr_of_handle(handle);
+    const uint32_t chr = chr_of_bar(rec);
     if (!chr) return 0;
     const auto it = g_chr_peer.find(chr);
     if (it != g_chr_peer.end()) {

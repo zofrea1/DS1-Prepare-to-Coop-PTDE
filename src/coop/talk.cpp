@@ -46,23 +46,36 @@ constexpr float kHearReach = 30.0f;  // another game's line is played for a play
 constexpr int kLogLines = 60;
 constexpr int kLogSkips = 20;  // lines of another game not played here
 
-void (*g_listener)(int, int, int, int, bool) = nullptr;
+void (*g_listener)(int, int, int, int, int, Kind) = nullptr;
 void* g_start_orig = nullptr;
 void* g_stop_orig = nullptr;
 bool g_playing = false;  // our own call of the talk player: not told to the others
 int g_lines = 0;
 int g_skips = 0;
 
-// Lines of ours the others were told of, by TP: the NPC's talk id and TalkToPlayer's other two arguments, for its
-// pages.
+// Lines of ours the others were told of, by TP: the NPC's talk id, the line and TalkToPlayer's other two arguments,
+// for its pages.
 struct Sent {
     int talk;
+    int line;
     int a2;
     int a3;
 };
 std::map<uint32_t, Sent> g_sent;
-// Lines another game told us of, playing here, by TP: when they began.
-std::map<uint32_t, double> g_heard;
+// Lines another game told us of, by TP. Each game turns its own copy's pages: when the voice of one ends, or when
+// its player presses on. The speaker's turns come over too, and a listener whose copy had gone on by itself heard
+// the same pages again when the speaker turned to them later: in the host's Firelink talk with the Crestfallen
+// Warrior, whose pages turned only when the host pressed on (2026-10-29). A listener's copy goes at its own pace and
+// takes only the speaker's turns to a page it has not shown yet; once it has run out it keeps the line, so the
+// speaker's later pages of it are not said again.
+struct Heard {
+    double at;     // when it began here (or ran out)
+    int line;      // the TalkParam line
+    int furthest;  // the furthest page of it shown here
+    bool over;     // ran out here
+};
+std::map<uint32_t, Heard> g_heard;
+constexpr double kHeardKept = 120.0;  // a line that ran out here is known this long
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -179,7 +192,7 @@ bool __stdcall line_started(int row, uint32_t tp, int a2, int a3) {
     if (heard != g_heard.end()) {
         // Our own game makes the NPC speak while it says another game's line: ours goes on. Each game's script can
         // react to the same blow or death; the line it says already is not started again.
-        const bool same = row_of(tp) == row && now() - heard->second < 10.0;
+        const bool same = !heard->second.over && row_of(tp) == row && now() - heard->second.at < 10.0;
         g_heard.erase(heard);
         if (same) return true;
     }
@@ -188,33 +201,48 @@ bool __stdcall line_started(int row, uint32_t tp, int a2, int a3) {
     if (!chr_by_talk(talk)) return false;
     // A paused line goes on from its page (0xD455C0's own test).
     const int from = rd(tp + 0x28) == row ? row + std::max(0, rd(tp + 0x2C)) : row;
-    g_sent[tp] = Sent{talk, a2, a3};
+    g_sent[tp] = Sent{talk, row, a2, a3};
     if (++g_lines <= kLogLines) LOG_INFO("[coop] NPC (talk %d) says line %d here: told the others", talk, from);
-    g_listener(talk, from, a2, a3, false);
+    g_listener(talk, row, from, a2, a3, kStart);
     return false;
 }
 
 void __stdcall page_turned(uint32_t tp, int more) {
-    if (g_playing || !more || !g_listener || g_heard.count(tp)) return;
+    if (g_playing || !more) return;
+    const auto heard = g_heard.find(tp);
+    if (heard != g_heard.end()) {
+        heard->second.furthest = std::max(heard->second.furthest, row_of(tp));
+        return;
+    }
     const auto s = g_sent.find(tp);
-    if (s == g_sent.end() || !session::active()) return;
-    g_listener(s->second.talk, row_of(tp), s->second.a2, s->second.a3, false);
+    if (s == g_sent.end() || !g_listener || !session::active()) return;
+    g_listener(s->second.talk, s->second.line, row_of(tp), s->second.a2, s->second.a3, kPage);
 }
 
 void __stdcall line_stopped(uint32_t ret, uint32_t tp) {
     if (g_playing) return;
-    if (g_heard.erase(tp) && ret != kRanOut && ++g_lines <= kLogLines) {
-        LOG_INFO("[coop] NPC (talk %d): another game's line %d was stopped here by this game (from %08X)",
-                 rd(tp + 0xC), row_of(tp), ret);
+    const auto heard = g_heard.find(tp);
+    if (heard != g_heard.end()) {
+        if (ret == kRanOut && !heard->second.over) {
+            heard->second.furthest = std::max(heard->second.furthest, row_of(tp));
+            heard->second.over = true;
+            heard->second.at = now();
+        } else {
+            if (ret != kRanOut && ++g_lines <= kLogLines) {
+                LOG_INFO("[coop] NPC (talk %d): another game's line %d was stopped here by this game (from %08X)",
+                         rd(tp + 0xC), row_of(tp), ret);
+            }
+            g_heard.erase(heard);
+        }
     }
     const auto s = g_sent.find(tp);
     if (s == g_sent.end()) return;
-    const int talk = s->second.talk;
+    const Sent sent = s->second;
     const int row = row_of(tp);
     g_sent.erase(s);
     // A line that ran out runs out in the other games too.
     if (ret == kRanOut || !g_listener || !session::active()) return;
-    g_listener(talk, row, 0, 0, true);
+    g_listener(sent.talk, sent.line, row, 0, 0, kEnd);
 }
 
 __declspec(naked) void hk_line_start() {
@@ -275,26 +303,33 @@ bool install() {
     return true;
 }
 
-void set_listener(void (*fn)(int, int, int, int, bool)) { g_listener = fn; }
+void set_listener(void (*fn)(int, int, int, int, int, Kind)) { g_listener = fn; }
 
-void remote(int talk, int row, int a2, int a3, bool end) {
+void remote(int talk, int line, int row, int a2, int a3, Kind kind) {
     if (game::loading() || !game::player()) return;
     const uint32_t chr = chr_by_talk(talk);
     const uint32_t tp = chr ? find_tp(talk) : 0;
     if (!tp) {
-        if (!end && ++g_skips <= kLogSkips) {
+        if (kind != kEnd && ++g_skips <= kLogSkips) {
             LOG_INFO("[coop] NPC (talk %d) says line %d in another game: not here (%s)", talk, row,
                      chr ? "no talker" : "no character");
         }
         return;
     }
-    const auto heard = g_heard.find(tp);
-    if (end) {
+    auto heard = g_heard.find(tp);
+    if (heard != g_heard.end() && heard->second.over && now() - heard->second.at > kHeardKept) {
+        g_heard.erase(heard);
+        heard = g_heard.end();
+    }
+    if (kind == kEnd) {
         if (heard != g_heard.end()) {
-            if (rd(tp + 0x10) != -1) stop(tp);
+            if (!heard->second.over && rd(tp + 0x10) != -1) stop(tp);
             g_heard.erase(heard);
         }
         return;
+    }
+    if (kind == kPage && heard != g_heard.end() && heard->second.line == line && row <= heard->second.furthest) {
+        return;  // shown here already: this copy went on by itself
     }
     game::Vec3 me{}, at{};
     if (!game::position(&me, nullptr) || !game::chr_position(chr, &at)) return;
@@ -308,7 +343,7 @@ void remote(int talk, int row, int a2, int a3, bool end) {
         return;
     }
     if (rd(tp + 0x10) != -1) {
-        if (heard == g_heard.end()) {  // the NPC says a line of our own game's: it is not cut short
+        if (heard == g_heard.end() || heard->second.over) {  // a line of our own game's: it is not cut short
             if (++g_skips <= kLogSkips) {
                 LOG_INFO("[coop] NPC (talk %d) says line %d in another game: it says our line %d here", talk, row,
                          row_of(tp));
@@ -323,7 +358,7 @@ void remote(int talk, int row, int a2, int a3, bool end) {
         if (++g_skips <= kLogSkips) LOG_INFO("[coop] NPC (talk %d): line %d from another game faulted here", talk, row);
         return;
     }
-    g_heard[tp] = now();
+    g_heard[tp] = Heard{now(), line, row, false};
     if (++g_lines <= kLogLines) LOG_INFO("[coop] NPC (talk %d) says line %d from another game here", talk, row);
 }
 

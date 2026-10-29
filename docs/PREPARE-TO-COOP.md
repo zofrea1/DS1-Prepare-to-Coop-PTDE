@@ -44,6 +44,10 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    the record of the character matched to that player. Steam answers "[unknown]" for a player it has not heard of
    yet, as for a joiner whose hello came before they were in the lobby; that name was kept for the session, and the
    host saw the guests' Steam names on their bars instead of the line (2026-10-28). It is asked again until known.
+   A record can also hold no name at all: an invader in the Kiln of the First Flame saw a 1.2.0 guest's bar with
+   no name, soul level or ping (a Steam name of 22 characters, the record empty, 2026-10-29). A bar whose name names
+   no one is known by its slot instead: slot *n* shows party entry *n* (`0x1012C30`), whose character is matched to
+   its player as for the world rules.
 
 **Your save.** With Prepare to Co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to
 `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to
@@ -95,7 +99,7 @@ it is encoded as WMV9 with Windows' own encoder, like the original, then built i
 | Invasions | With `AllowInvaders`, others can invade as evil spirits. While an invader is in the world, bonfires are out of use, the Abyssal Eye Orb, Homeward Bone, Humanity, Twin Humanities, Divine Blessing, Elizabeth's Mushroom and Fire Keeper Souls cannot be used; the Darksign (the host's or a co-op guest's) can, and sends the invaders home (nobody wins) before everyone goes to the host's bonfire at its usual cost. With `SealBossFogsDuringInvasions` (the host's, off by default; a guest takes it from the host's state, `StateMore2`), boss fogs stay shut for the host and the guests while an invader is in the world; off, they work as in vanilla (the host's entry sends the invader home). Nobody joins while anyone in the world is in a boss fight: an invader tries another world (a 1.3.0 invader's search passes over such a world; older invaders' searches do not list it), a co-op guest is told to come back when the fight is over. After an invasion ends, the world takes no other invader for `InvasionCooldown` minutes (default 3). An invader who finds no world that can take them is told why (a cooldown with the time left, a boss fight, a full world). An invader arrives at the game's own black invasion point for the play region the host stands in, else at the nearest one of the host's map within 30 m across and 6 m up or down, else on the host (Firelink Shrine and the Undead Asylum have none; invasions are allowed there). The invader wins when every co-op player has fallen (the host's death alone does not end an invasion while a guest stands; with a 1.0.0 invader it still does); when the invader dies the invasion fails. Invaders of one world are a team (1.3.0, a host of 1.3.0 or later): an invader who falls while another invader stands spectates them (spectate.cpp, with the other invaders as teammates), its death report says the invasion is not lost (`lost` 0), and the invasion is decided for all of them: every co-op player down (all win, the fallen too; a fallen one's held death then takes them home) or every invader down (each fallen one reports `lost` 2, so the co-op team earns a Humanity per invader). The fallen stay in the session, so no new invader takes their place, and InvasionCooldown starts once the last has gone. A boss that dies while an invader is in the world sends the invader home, as the game does (its boss-clear script), but an invader takes none of the boss's rewards: not the clear bonus souls (`GetClearBonus`, `0xD5DEB0`) nor the event's item awards to every player (2003[36]); an invader who arrived in a 1.2.0 host's world during a guest's Moonlight Butterfly fight was sent home 8 s later with 6500 of its souls (2026-10-26). An invader can drink from the Estus Flask (the game forbids it to invaders): up to 5 charges per invasion, any more are set aside on arrival and come back once home, so an invasion costs only what was drunk. With `InvasionRewards`, the winning side gets Humanity: the invader one per co-op player defeated (once home), or, when the invader falls, the host and every guest one each. |
 | Enemy scaling | Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`, percent per player); bosses are the characters on team 7 and every boss with a health bar (the Bell Gargoyles are on team 6). The game's own co-op boss buff (2009[04], Lua_MultiDoping) is left out, as Remastered Seamless Co-op leaves out its ApplyMultiDoping: it came on top (the first gargoyle at 999 x 1.8 x 1.5). Enemies far from a player get the same scaled health in that player's game, so a fight ends at the same time in every game. The host's six settings are used by every game in its world (sent behind the state message, `StateMore3`): the host's game decides the enemies' health as a number, so a guest with other settings saw the host's whole Asylum Demon fill 95 % of its bar (x2.05 against x2.15, 2026-10-26). When the scaling changes (a player joins or leaves, the scaling first comes on), an enemy keeps its share of health: the game's own recompute kept the health it had lost in points (a hurt boss whole again when a player left), and the second Bell Gargoyle, which its own effect (SpEffect 5490) brings in at 48 %, came in whole. A boss with a health bar whose fight has not begun in a player's game does not pass that game's "health at most X %" tests (X above 0): a reload's unscaled health, passed between games as a number, read 46 % on a scaled copy and brought the second gargoyle in during a Hellkite fight 200 m away. |
 | NPC summons | The host can summon NPC phantoms (Solaire and the other white signs). Every guest, and an invader, sees the same gold phantom, also when they join later or arrive somewhere else in the world, and he fights the invader. He stays when the host closes the world. He does not take one of the four places: four players fit with NPCs on top (the party list holds four, so one of them then has no floating health bar). |
-| NPC voice lines | What an NPC says, in a conversation or when it is hit or killed, is heard with its subtitle by every player whose character stands within 30 m of that NPC, not only by the player whose game made it speak. Turning a page of a conversation (pressing on, or the voice ending) and cutting a line short carry over too. A line the NPC already says in a game is not started again there, and a game whose own player is talking to the NPC keeps its own line. |
+| NPC voice lines | What an NPC says, in a conversation or when it is hit or killed, is heard with its subtitle by every player whose character stands within 30 m of that NPC, not only by the player whose game made it speak. Each game turns the pages of its own copy (the voice ending, or its player pressing on); a listener's copy jumps ahead when the speaker presses on past it, and a page it has shown already is not said again when the speaker turns to it later. Cutting a line short carries over too. A line the NPC already says in a game is not started again there, and a game whose own player is talking to the NPC keeps its own line. |
 | Shared light | Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game. |
 
 ## How it works
@@ -500,11 +504,16 @@ TalkToPlayer (talk command 1:1, `0xFCEB24`, through `0xD46BC0`, which follows th
 voice ends or the player presses on; `0xD44410` stops a line that ran out, was paused or was cut short. `talk.cpp`
 hooks the three (the start and the stop by detour, the tick's page call `0xD45521`): a line our game starts on an NPC,
 each page it turns to and a line it cuts short (not one that ran out: the others' copy runs out as well) go to the
-others as message 33 (`kNpcTalk`: talk id, row, a2, a3, end; the host passes a guest's on). A game whose player stands
-within 30 m of its own copy of that NPC starts the same row on that NPC's talker, with the handle cleared for the call
-so that no character turns towards the local player. A talker already saying a line of its own game's is left alone;
-one saying another game's line takes the new row (or stops). When a game's own script then makes the NPC say the line
-it says already, the line is not started again. The voice and the subtitle are the game's own; the item use block
+others as message 33 (`kNpcTalk`: talk id, the line, the row, a2, a3, and whether a line began, a page turned or the
+line was cut short; the host passes a guest's on). A game whose player stands within 30 m of its own copy of that NPC
+starts the same row on that NPC's talker, with the handle cleared for the call so that no character turns towards the
+local player. A talker already saying a line of its own game's is left alone; one saying another game's line takes
+the new row (or stops). When a game's own script then makes the NPC say the line it says already, the line is not
+started again. Each copy turns its own pages, so a listener's copy goes at the voice's pace while the speaker may
+press on or wait: in the host's Firelink talk with the Crestfallen Warrior the host's pages turned only when the host
+pressed on, the guest's copy ran ahead by itself, and each of the host's later turns made the guest hear a page again
+(2026-10-29). A listener now takes a turn only to a page its copy has not shown yet, and keeps a line its copy ran
+out of for 2 minutes, so the speaker's later pages of it are not said again. The voice and the subtitle are the game's own; the item use block
 while an NPC speaks (`[0x137D7C8]+0x78C`, as in a single-player conversation) comes with them.
 
 ### NPC summons
@@ -698,6 +707,15 @@ closer (2026-10-18). A standing player's game then wins, unless its copy sleeps,
 game after a retry, stood idle once the guest's game took it over. The AI-off copy still bids, so an enemy whose
 copies all sleep is still some game's to move: at first such a game did not bid at all, and the sleeping demon on
 its perch was nobody's until the session host next handed enemies out.
+
+When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part way
+and another begins, in every game. Players saw the Asylum Demon break off attacks in both 2026-10-29 tests: a second
+after it landed from its perch, when the guest under it outbid the host whose game had run the leap, and in a fight
+in which it changed hands six times in 76 s. With no engagement steps between the games the bids differ only by
+nearness, so two players trading places around a boss passed it back and forth. The game that moves an enemy now bids
+40 more (about 10 m of nearness): it keeps the enemy while its player stays in the fight, and gives it up when the
+player falls, walks off, or another game outbids it by engagement. The log names the animation each boss plays when
+it changes hands (the network's index and its clip entry), for a later rule against handing a boss over mid-attack.
 
 A load at home starts every map's temporary flags (`xxxx5000`-`xxxx5999`: timers, who stands where, which runs of
 the map's events are done) over. A guest's death reload stays in the host's world, whose flags the game then left

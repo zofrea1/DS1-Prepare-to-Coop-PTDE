@@ -3695,6 +3695,28 @@ bool ai_off_here(uint32_t chr) {
 // whose copy runs, keeps the enemy.
 constexpr uint32_t kBidFallen = 2;
 
+// When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part
+// way and another begins, in every game, as the new game moves both copies. Players saw the Asylum Demon break off
+// attacks in both 2026-10-29 tests: in the first a second after it landed from its perch, when the guest under it
+// outbid the host whose game had run the leap (the host's game lost it 1.1 s after the leap ended); in the second it
+// changed hands six times in one fight (14:54:15 to 14:55:31). With no engagement steps between the games the bids
+// differ only by nearness, (1 - distance / 64) x 255, so two players trading places around a boss passed it back
+// and forth. The game that moves an enemy bids kBidKeep more, about 10 m of nearness: it keeps the
+// enemy while its player stays in the fight, and gives it up when the player falls (kBidFallen), walks off, or the
+// others' game outbids it by engagement. The bid stays below the game's own cap (0x7FFF; 0xE56270 packs bid << 16).
+constexpr uint32_t kBidKeep = 40;
+constexpr uint32_t kBidCap = 0x7FFF;
+
+bool moved_here(uint32_t chr) {
+    uint32_t current = 0, own_ai = 0;
+    return read32(chr + 0x2C, &current) && read32(chr + 0x410, &own_ai) && current && current == own_ai;
+}
+
+uint32_t keep_bid(uint32_t chr, uint32_t bid) {
+    if (!moved_here(chr)) return bid;
+    return bid + kBidKeep < kBidCap ? bid + kBidKeep : kBidCap;
+}
+
 // The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
 uint32_t g_watch_chr = 0;
 uint32_t g_watch_bid = 0;
@@ -3729,7 +3751,7 @@ uint32_t net_priority(uint32_t chr) {
         }
     }
     const float mine = dist3(me, at);
-    if (mine <= kBidReach) return bid;
+    if (mine <= kBidReach) return keep_bid(chr, bid);
     for (const PeerSpot& p : g_peer_spots) {
         if (p.dead) continue;
         const float theirs = dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at);
@@ -3743,7 +3765,7 @@ uint32_t net_priority(uint32_t chr) {
             return 0;
         }
     }
-    return bid;
+    return keep_bid(chr, bid);
 }
 
 uint32_t __stdcall hk_net_priority(uint32_t chr) {
@@ -4043,6 +4065,27 @@ bool force_change_target(int entity, int target) {
     }
 }
 
+// The animation layer 0 plays, for the log: the index the network carries (game::anim_state) and the first words of
+// its clip entry (ActionCtrl = ChrCtrl+0x2C, layer +0x20: [+0] the clip, whose +0x10 is the entry, 0x24 bytes in
+// [+0x14]+4), where the animation id (3000s: attacks) may be.
+std::string anim_probe(uint32_t chr) {
+    char out[160] = "";
+    const uint32_t packed = game::anim_state(chr, 0);
+    uint32_t ctrl = 0, ac = 0, clip = 0, entry = 0;
+    int n = std::snprintf(out, sizeof(out), "animation %d", packed == 0xFFFFFFFF ? -1 : static_cast<int>(packed & 0xFFFF));
+    if (read32(chr + 0x28, &ctrl) && ctrl && read32(ctrl + 0x2C, &ac) && ac && read32(ac + 0x20, &clip) && clip &&
+        read32(clip + 0x10, &entry) && entry) {
+        n += std::snprintf(out + n, sizeof(out) - n, " (entry");
+        for (uint32_t i = 0; i < 9 && n < static_cast<int>(sizeof(out)) - 12; ++i) {
+            uint32_t w = 0;
+            if (!read32(entry + i * 4, &w)) break;
+            n += std::snprintf(out + n, sizeof(out) - n, " %X", w);
+        }
+        std::snprintf(out + n, sizeof(out) - n, ")");
+    }
+    return out;
+}
+
 void boss_handover_tick() {
     static double last = 0;
     const double t = seconds();
@@ -4064,15 +4107,20 @@ void boss_handover_tick() {
         auto& s = g_boss_moved_by[chr];
         const int was = s.first;
         s.first = by;
+        if (was == 1 && by == 2) {
+            static int lost = 0;
+            if (++lost <= 60) LOG_INFO("[coop] Boss %d: another game moves it now; %s", e, anim_probe(chr).c_str());
+        }
         if (was != 2 || by != 1 || chr_dead(chr) || ai_off_here(chr) || !g_awake_bosses.count(e)) continue;
         game::Vec3 at{};
         if (!game::chr_position(chr, &at)) continue;
         const float d = dist3(mine, at);
         if (d > 40.0f || t - s.second < 10.0) continue;
         s.second = t;
+        const std::string playing = anim_probe(chr);
         const bool turned = force_change_target(e, 10000);
-        LOG_INFO("[coop] Boss %d: this game moves it now (another game did); turned on our player %.0f m away%s", e, d,
-                 turned ? "" : " (refused)");
+        LOG_INFO("[coop] Boss %d: this game moves it now (another game did); turned on our player %.0f m away%s; %s", e,
+                 d, turned ? "" : " (refused)", playing.c_str());
     }
 }
 

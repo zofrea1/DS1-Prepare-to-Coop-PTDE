@@ -15,6 +15,7 @@
 #include "spectate.h"
 #include "steam.h"
 #include "summons.h"
+#include "talk.h"
 #include "text.h"
 #include "updates.h"
 #include "world.h"
@@ -400,6 +401,7 @@ void coop_install(const CoopConfig& config) {
     coop::spectate::install();
     coop::deathtext::install();
     coop::drops::install();
+    coop::talk::install();
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");

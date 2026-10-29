@@ -14,6 +14,7 @@
 #include "spectate.h"
 #include "steam.h"
 #include "summons.h"
+#include "talk.h"
 #include "text.h"
 #include "world.h"
 #include "version.h"
@@ -97,6 +98,7 @@ enum MsgType : uint8_t {
     kAnimDone = 31,      // 1.3.0, anyone -> all (through the host): an event's animation on a character I move ended
     kHomewardAsk = 32,   // 1.3.0, co-op guest -> host: my Homeward Bone, Darksign or Homeward miracle (Simple: its
                          // HomewardKind); the host's trip takes everyone (a host whose StateMore4 says it takes them)
+    kNpcTalk = 33,       // 1.3.0, anyone -> all (through the host): an NPC says a line in my game, or stops (talk.cpp)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -306,6 +308,14 @@ struct AnimDoneMsg {
     Header h;
     int32_t entity;  // the character's entity id
     int32_t anim;    // the animation the event waited for (rules.cpp, follow_wait)
+};
+struct NpcTalkMsg {
+    Header h;
+    int32_t entity;  // the NPC's entity id
+    int32_t row;     // the TalkParam row it says now (a line, or a later page of one)
+    int32_t a2;      // TalkToPlayer's other two arguments
+    int32_t a3;
+    uint8_t end;     // the line was cut short: it stops
 };
 struct CutFollowMsg {
     Header h;
@@ -3787,6 +3797,17 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!g_invade) rules::remote_anim_done(m.entity, m.anim);
             break;
         }
+        case kNpcTalk: {
+            NpcTalkMsg m;
+            if (!as(&m)) return;
+            if (g_role == Role::Host) {
+                broadcast(m, true, from);
+            } else if (from != g_host || g_step != Step::InWorld) {
+                return;
+            }
+            talk::remote(m.entity, m.row, m.a2, m.a3, m.end != 0);
+            break;
+        }
         case kCutFollow: {
             CutFollowMsg m;
             if (!as(&m) || peer(from)->invader) return;
@@ -4016,6 +4037,23 @@ void send_anim_done(int entity, int anim) {
     if (g_role == Role::Host) {
         broadcast(m);
     } else if (g_host && g_step == Step::InWorld && !g_invade) {
+        send_to(g_host, m);
+    }
+}
+
+// An NPC's line in our game, for the players near that NPC in theirs (talk.cpp). Invaders hear them too.
+void send_npc_talk(int entity, int row, int a2, int a3, bool end) {
+    if (g_role == Role::None || !g_lobby) return;
+    NpcTalkMsg m{};
+    fill_header(&m, kNpcTalk);
+    m.entity = entity;
+    m.row = row;
+    m.a2 = a2;
+    m.a3 = a3;
+    m.end = end ? 1 : 0;
+    if (g_role == Role::Host) {
+        broadcast(m);
+    } else if (g_host && g_step == Step::InWorld) {
         send_to(g_host, m);
     }
 }
@@ -4424,6 +4462,7 @@ void set_callbacks() {
     rules::set_bonfire_warp_listener(&send_bonfire_warp);
     rules::set_bonfire_lit_listener(&send_bonfire_lit);
     rules::set_anim_done_listener(&send_anim_done);
+    talk::set_listener(&send_npc_talk);
     rules::set_cutscene_listener(&on_cutscene);
     rules::set_separation_listener([](bool host) { g_separation = host ? 2 : 1; });
     steam::on_lobby_member([](uint64_t lobby, uint64_t user, bool entered) {

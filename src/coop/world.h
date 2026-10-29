@@ -15,8 +15,8 @@ namespace coop::world {
 
 struct Config {
     bool death_debuffs = false;
-    int enemy_health = 40, enemy_damage = 0, enemy_posture = 25;
-    int boss_health = 115, boss_damage = 0, boss_posture = 40;
+    int enemy_health = 45, enemy_damage = 0, enemy_posture = 30;
+    int boss_health = 125, boss_damage = 0, boss_posture = 40;
 };
 
 bool install();

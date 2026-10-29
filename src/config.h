@@ -2,7 +2,8 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #pragma once
 
-// The [PrepareToCoop] settings. They live in PTDE-FPS-Unlock.ini beside the FPS Unlock's own, which ignores
+// The [PrepareToCoop] settings. They live in PTDE-Coop-FPS-Unlock.ini (or the older PTDE-FPS-Unlock.ini) beside the
+// FPS Unlock's own, which ignores
 // them; this reads them through the FPS Unlock's INI reader (settings_read_keys). Section headers carry no
 // meaning, as for the FPS Unlock's keys.
 struct CoopConfig {
@@ -36,13 +37,13 @@ struct CoopConfig {
     // (6, the game's own, to 30). Guests and invaders use their host's.
     int net_rate = 30;
     // Each player's own: above the game's rate, the ms other players' characters (and the enemies other games move)
-    // stay behind their updates as a margin for late ones (0 to 200).
-    int net_smoothing = 32;
+    // stay behind their updates as a margin for late ones (0 to 200). 33 ms is about a frame at 30 FPS.
+    int net_smoothing = 33;
     // Enemy and boss scaling per extra player, in percent.
-    int enemy_health = 40;
+    int enemy_health = 45;
     int enemy_damage = 0;
-    int enemy_posture = 25;
-    int boss_health = 115;
+    int enemy_posture = 30;
+    int boss_health = 125;
     int boss_damage = 0;
     int boss_posture = 40;
     // Co-op characters live in their own save file (DRAKS0005.<extension>) so vanilla saves stay apart.
@@ -59,5 +60,6 @@ struct CoopConfig {
     char test_version[16] = {};
 };
 
-// Reads the keys from PTDE-FPS-Unlock.ini next to the DLL (missing keys keep their defaults).
+// Reads the keys from PTDE-Coop-FPS-Unlock.ini next to the DLL, or PTDE-FPS-Unlock.ini when there is none (any
+// letter case; missing keys keep their defaults).
 CoopConfig coop_config_load(const wchar_t* dll_path);

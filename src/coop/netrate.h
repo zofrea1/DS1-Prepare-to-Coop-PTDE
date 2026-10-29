@@ -12,7 +12,7 @@
 // came for a player in one frame only the newest is taken (the game took each, and the second jumped), and a
 // character covers each update in at least the gap plus the smoothing (the game's 20% of slack is a few ms at thirty
 // a second, so an update a little late made it stop and go). A character is then drawn about one update interval
-// plus the smoothing behind, plus the ping: about 65 ms at thirty a second with the default 32 ms.
+// plus the smoothing behind, plus the ping: about 66 ms at thirty a second with the default 33 ms.
 //
 // A game sends at most one update a frame: one drawing fewer frames a second than the rate sends every frame (25 a
 // second at 25 FPS), and the others' games take the gap as it comes.

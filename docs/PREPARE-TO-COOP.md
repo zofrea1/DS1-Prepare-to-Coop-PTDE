@@ -3,7 +3,7 @@
 Play all of Dark Souls together with up to three friends, from the Undead Asylum to the Kiln, without the
 limits of the game's own co-op. A mod for Dark Souls: Prepare to Die Edition built on the DS1 FPS Unlock,
 which it includes: its `xinput1_3.dll` is the FPS Unlock plus the co-op, switched on by
-`[PrepareToCoop] PrepareToCoop` in `PTDE-FPS-Unlock.ini`. The co-op works with the FPS unlock on or off.
+`[PrepareToCoop] PrepareToCoop` in `PTDE-Coop-FPS-Unlock.ini` (or the older `PTDE-FPS-Unlock.ini`). The co-op works with the FPS unlock on or off.
 
 It is inspired by Yui's **Seamless Co-op** mod for Dark Souls Remastered (`ds1sc.dll`, called ds1sc
 below), which only exists for Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and written again
@@ -644,10 +644,10 @@ again for testing; 30 stays the default.)
 Above the game's own rate the
 receiving side changes too (`netrate.cpp`): the pop takes every update that is waiting and keeps the newest (each
 holds the whole state); the movement covers an update in at least the gap plus `NetworkSmoothing` (each player's
-own, default 32 ms; stubs at `0xE1F3A1` and `0xE21663`), where the game's 20% (10%) of slack is a few ms at thirty
+own, default 33 ms; stubs at `0xE1F3A1` and `0xE21663`), where the game's 20% (10%) of slack is a few ms at thirty
 a second and an update a little late left the character standing; and the turn is a 30 FPS frame over the gap plus
 the smoothing (stubs at `0xE1F83C` and `0xE1F8CB`, never less than the game's fifth, at most the whole turn). A
-character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 65 ms
+character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 66 ms
 at thirty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
 older keeps sending six a second.
 

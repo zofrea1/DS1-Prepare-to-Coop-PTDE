@@ -6,7 +6,7 @@ Play all of **Dark Souls: Prepare to Die Edition** together with up to three fri
 
 It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of that mod is used: its behaviour was studied and written again for Prepare to Die Edition's engine, with the same items, rules and session behaviour wherever the engine allows.
 
-**Prepare to Co-op includes the DS1 FPS Unlock.** Its `xinput1_3.dll` is the [DS1 FPS Unlock](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered) for Prepare to Die Edition plus the co-op, built into one file, and its `PTDE-FPS-Unlock.ini` holds the settings of both. If you have Prepare to Co-op, you have the FPS Unlock: do not install both. The co-op works with the FPS unlock on or off (`FPSUnlock`).
+**Prepare to Co-op includes the DS1 FPS Unlock.** Its `xinput1_3.dll` is the [DS1 FPS Unlock](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered) for Prepare to Die Edition plus the co-op, built into one file, and its `PTDE-Coop-FPS-Unlock.ini` holds the settings of both. If you have Prepare to Co-op, you have the FPS Unlock: do not install both. The co-op works with the FPS unlock on or off (`FPSUnlock`).
 
 | Release | Includes |
 | --- | --- |
@@ -35,8 +35,8 @@ The full list is in the [1.2.0 release notes](release-notes/v1.2.0.md). 1.1.0, a
 
 ## Install
 
-1. From the zip on the [Releases](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE/releases) page, copy `xinput1_3.dll` and `PTDE-FPS-Unlock.ini` next to `DARKSOULS.exe` (`dxvk_d3d9.dll` too, only for the FPS Unlock's experimental DXVK). If the FPS Unlock or an older Prepare to Co-op is already installed, these replace its files; set your settings again in the new INI, which has all of them.
-2. In `PTDE-FPS-Unlock.ini`, set the same `Password` as your friends. `PrepareToCoop = true` is already set.
+1. From the zip on the [Releases](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE/releases) page, copy `xinput1_3.dll` and `PTDE-Coop-FPS-Unlock.ini` next to `DARKSOULS.exe` (`dxvk_d3d9.dll` too, only for the FPS Unlock's experimental DXVK). If the FPS Unlock or an older Prepare to Co-op is already installed, these replace its files; set your settings again in the new INI, which has all of them.
+2. In `PTDE-Coop-FPS-Unlock.ini`, set the same `Password` as your friends. `PrepareToCoop = true` is already set. (The older name `PTDE-FPS-Unlock.ini` is still read when there is no `PTDE-Coop-FPS-Unlock.ini`; if both are there, the one with Coop in its name is used and the other is ignored. File names are not case sensitive.)
 3. Steam Deck and Linux: add the launch option `WINEDLLOVERRIDES="xinput1_3=n,b" %command%` so Proton loads the DLL (the same as for the FPS Unlock).
 4. Your save: with Prepare to Co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to `DRAKS0005.co2` before starting. Back up your saves.
 
@@ -95,7 +95,7 @@ Prepare to Co-op 1.0.0, 1.1.0 and 1.2.0 use the same co-op protocol, so their pl
 
 ## Settings
 
-In the `[PrepareToCoop]` section of `PTDE-FPS-Unlock.ini` (the FPS Unlock's settings follow it in the same file; see [its README](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered#readme)).
+In the `[PrepareToCoop]` section of `PTDE-Coop-FPS-Unlock.ini` (the FPS Unlock's settings follow it in the same file; see [its README](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered#readme)).
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -109,10 +109,10 @@ In the `[PrepareToCoop]` section of `PTDE-FPS-Unlock.ini` (the FPS Unlock's sett
 | `GuestWorldEvents` | `true` | Guests run the world's scripted events in their own game, as the host does (bosses, lifts, cutscenes, the Hellkite). |
 | `BonfireAnimations` | `true` | The others see you sit, rest and stand at a bonfire. |
 | `OverheadPlayerDisplay` | `4` | Another player's health bar: their character's name, with 0 nothing more, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping. |
-| `NetworkTickRate` | `30` | How many times a second every game of your session sends where its player is (and the enemies it moves): 6, the game's own, up to 60 (30 recommended). Higher draws the others closer to where they really are, for a little more upload (about 2 KB a second to each other player at 30). On an uneven connection raise `NetworkSmoothing` rather than lowering this. The host's setting is used by the whole session (players of 1.2.0 or older still send 6). |
-| `NetworkSmoothing` | `32` | Above 6 updates a second, how many ms other players' characters (and enemies other games move) stay behind their updates, as a margin for late ones: they are drawn about one update interval plus this behind, plus the ping (about 65 ms at 30 a second, 99 ms at 15; 6 a second stays the game's 200 ms). Each player's own, 0 to 200; raise it if others move in jerks. |
-| `EnemyHealthScaling`, `EnemyDamageScaling`, `EnemyPostureScaling` | `40`, `0`, `25` | Enemy scaling per extra player, in percent. The host's settings are used by everyone in its world (guests of 1.3.0 or later). |
-| `BossHealthScaling`, `BossDamageScaling`, `BossPostureScaling` | `115`, `0`, `40` | The same for bosses. |
+| `NetworkTickRate` | `30` | How many times a second every game of your session sends where its player is (and the enemies it moves): 6, the game's own, up to 60. 30 is the default and a big improvement over the game's 6; 60 is viable and recommended when everyone in the session has a low-latency or excellent connection. Higher draws the others closer to where they really are, for more upload (about 2 KB a second to each other player at 30, twice that at 60). On an uneven connection raise `NetworkSmoothing` rather than lowering this. The host's setting is used by the whole session (players of 1.2.0 or older still send 6). |
+| `NetworkSmoothing` | `33` | Above 6 updates a second, how many ms other players' characters (and enemies other games move) stay behind their updates, as a margin for late ones: they are drawn about one update interval plus this behind, plus the ping (about 66 ms at 30 a second, 50 ms at 60, 100 ms at 15; 6 a second stays the game's 200 ms). 33 ms is about one frame at 30 FPS or two at 60 FPS, enough to hide most ping spikes. Each player's own, 0 to 200; raise it if others move in jerks. |
+| `EnemyHealthScaling`, `EnemyDamageScaling`, `EnemyPostureScaling` | `45`, `0`, `30` | Enemy scaling per extra player, in percent. The host's settings are used by everyone in its world (guests of 1.3.0 or later). |
+| `BossHealthScaling`, `BossDamageScaling`, `BossPostureScaling` | `125`, `0`, `40` | The same for bosses. |
 | `SaveFileExtension` | `co2` | The save file while the co-op is on (vanilla: `sl2`). |
 | `CoopHotkeys` | `true` | The Ctrl+F1..F4 shortcuts. |
 | `CheckForUpdates` | `true` | At each start, look on the GitHub Releases page for a newer Prepare to Co-op, and say so on the title screen when there is one (until a character is loaded). One small request to api.github.com; `false` turns it off. |
@@ -141,7 +141,7 @@ cd DS1-Prepare-to-Coop-PTDE
 build.bat
 ```
 
-`build.bat` compiles the FPS Unlock's sources (`fps-unlock\src\ptde\sources.txt`) together with this repository's (`src\sources.txt`) into `build\xinput1_3.dll`, writes `build\PTDE-FPS-Unlock.ini` (`PrepareToCoop.ini` followed by the FPS Unlock's INI) and fetches DXVK through the FPS Unlock's script. The co-op plugs into the FPS Unlock's start-up through `fps-unlock\src\ptde\extension.h`; `src\extension.cpp` replaces its `extension_none.cpp`. `package_release.bat` makes the release zip. To move to a newer FPS Unlock, check out its release in `fps-unlock`, rebuild and commit the submodule.
+`build.bat` compiles the FPS Unlock's sources (`fps-unlock\src\ptde\sources.txt`) together with this repository's (`src\sources.txt`) into `build\xinput1_3.dll`, writes `build\PTDE-Coop-FPS-Unlock.ini` (`PrepareToCoop.ini` followed by the FPS Unlock's INI) and fetches DXVK through the FPS Unlock's script. The co-op plugs into the FPS Unlock's start-up through `fps-unlock\src\ptde\extension.h`; `src\extension.cpp` replaces its `extension_none.cpp`. `package_release.bat` makes the release zip. To move to a newer FPS Unlock, check out its release in `fps-unlock`, rebuild and commit the submodule.
 
 `tools\build_title_movie.bat` remakes the title movie from the game's own and `assets\PrepareToCoop-Title.png`. It also needs the game's original title texture (the 512 x 512 `Title` texture in `menu/english/menu_local.tpf`, saved as a PNG) as `assets\Title-original-PTDE.png`; that file is the game's own and is not in the repository. `tools\embed_title.py` remakes `src\title_art.inc` from the PNG.
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Writes the shipped PTDE-FPS-Unlock.ini: Prepare to Co-op's section (PrepareToCoop.ini) followed by the FPS
+# Writes the shipped PTDE-Coop-FPS-Unlock.ini: Prepare to Co-op's section (PrepareToCoop.ini) followed by the FPS
 # Unlock's own INI (fps-unlock\PTDE-FPS-Unlock.ini), with both versions filled in. Run from the repository root.
-param([string]$Out = "build\PTDE-FPS-Unlock.ini")
+param([string]$Out = "build\PTDE-Coop-FPS-Unlock.ini")
 $ErrorActionPreference = 'Stop'
 
 $coop = [regex]::Match((Get-Content -Raw 'src\version.h'), '#define\s+PREPARE_TO_COOP_VERSION\s+"([^"]+)"').Groups[1].Value

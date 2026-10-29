@@ -3,7 +3,7 @@
 #pragma once
 
 // Prepare to Co-op Edition: co-op for Dark Souls: Prepare to Die Edition ([PrepareToCoop] in
-// PTDE-FPS-Unlock.ini).
+// PTDE-Coop-FPS-Unlock.ini).
 //
 // A reimplementation for PTDE of the ideas of Yui's Dark Souls Remastered Seamless Co-op (ds1sc),
 // written from reverse engineering notes; no code of that mod is used. Play the whole game together:

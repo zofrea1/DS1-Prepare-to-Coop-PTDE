@@ -15,7 +15,7 @@ if not exist build\xinput1_3.dll (
 if exist build\release rmdir /s /q build\release
 mkdir build\release\files
 copy /y build\xinput1_3.dll build\release\files >nul
-copy /y build\PTDE-FPS-Unlock.ini build\release\files >nul
+copy /y build\PTDE-Coop-FPS-Unlock.ini build\release\files >nul
 copy /y build\dxvk_d3d9.dll build\release\files >nul
 copy /y README.md build\release\files >nul
 copy /y NOTICE.md build\release\files >nul

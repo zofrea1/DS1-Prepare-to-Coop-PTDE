@@ -374,10 +374,6 @@ void coop_install(const CoopConfig& config) {
     coop::spectate::install();
     coop::deathtext::install();
     coop::drops::install();
-    coop::drops::set_per_world(g_cfg.drops_per_world);
-    LOG_INFO("[coop] One-time drops: %s (OneTimeDropsPerWorld)",
-             g_cfg.drops_per_world ? "each world's own (the same enemy in another world drops for you again)"
-                                   : "once (the same enemy in another world does not drop them for you again)");
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");

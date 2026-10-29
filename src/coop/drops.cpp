@@ -87,7 +87,6 @@ bool g_installed = false;
 int g_loads = 0;              // map loads seen
 bool g_was_loading = false;
 bool g_was_active = false;    // we were in a session at the last tick
-bool g_per_world = true;      // OneTimeDropsPerWorld
 std::wstring g_owner;         // the character the records are for
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -347,28 +346,18 @@ void forget(State* s) {
     s->ours = 0;
 }
 
-// A record is made in one world (session::world_owner). With OneTimeDropsPerWorld it belongs to that world: the same
-// enemy elsewhere (another host's world) is another enemy, so a record from another world is forgotten before it is
-// used (what is owed stays); this is the default, and the game's own one-time item flags (in the player's save)
-// still keep boss souls and keys to one per character. Off, the record is the character's while the game runs: a
-// drop it has (rolled by the game or by the mod) is not dropped again by the same enemy in another world
-// (`elsewhere`). Only in the world it was made in does a flag found off mean a new playthrough.
-State& in_this_world(State& s, bool* elsewhere) {
+// A record belongs to one world: the same enemy elsewhere (a guest's own world after the trip home, another host's)
+// is another enemy, and the flag that says it is gone is that world's. A record from another world is forgotten
+// before it is used; what is owed stays.
+State& in_this_world(State& s) {
     const uint64_t w = session::world_owner();
-    *elsewhere = false;
-    if (s.world == 0 || s.world == w) {
-        s.world = w;
-        return s;
-    }
-    if (g_per_world) {
+    if (s.world != w) {
         if (s.got || s.ours || s.armed_at > 0) {
             LOG_INFO("[coop] One-time drop: a record from another world (%016llX) does not count here", s.world);
         }
         forget(&s);
         s.world = w;
-        return s;
     }
-    *elsewhere = true;
     return s;
 }
 
@@ -430,13 +419,7 @@ int __stdcall floor_drop_here(uint32_t chr) {
         for (auto it = g_rows.begin(); it != g_rows.end(); ++it) {
             const Row& r = kRows[it->first];
             if (!r.entity || r.floor <= 0 || chr_by_entity(r.entity) != chr) continue;
-            bool elsewhere = false;
-            State& s = in_this_world(it->second, &elsewhere);
-            if (elsewhere) {
-                if (!(s.got & kFloorBit)) return 1;
-                LOG_INFO("[coop] One-time drop: enemy %d's drop was had in another world; not again", r.entity);
-                return 0;
-            }
+            State& s = in_this_world(it->second);
             if (!game::flag(r.flag)) {
                 forget(&s);  // a new playthrough's enemy
                 return 1;
@@ -453,13 +436,12 @@ int __stdcall floor_drop_here(uint32_t chr) {
     }
     const int row = row_of_entity(chr);
     if (row < 0) return 1;
-    bool elsewhere = false;
-    State& s = in_this_world(g_rows[row], &elsewhere);
-    if (!elsewhere && (s.got & kFloorBit) && !game::flag(kRows[row].flag)) forget(&s);  // a new playthrough's enemy
+    State& s = in_this_world(g_rows[row]);
+    if ((s.got & kFloorBit) && !game::flag(kRows[row].flag)) forget(&s);  // a new playthrough's enemy
     s.touched = now();
     if (s.got & kFloorBit) {
-        LOG_INFO("[coop] One-time drop: enemy %d died here after its drop was had%s; no second drop",
-                 kRows[row].entity, elsewhere ? " in another world" : "");
+        LOG_INFO("[coop] One-time drop: enemy %d died here after its drop was given; no second drop",
+                 kRows[row].entity);
         return 0;
     }
     s.got |= kFloorBit;
@@ -506,15 +488,12 @@ bool install() {
     return true;
 }
 
-void set_per_world(bool on) { g_per_world = on; }
-
 bool watched(int flag) { return g_installed && std::binary_search(g_flags.begin(), g_flags.end(), flag); }
 
 void flag_changed(int flag, bool on) {
     if (!on) {
-        const uint64_t w = session::world_owner();
         for (auto& [i, s] : g_rows) {
-            if (kRows[i].flag == flag && (s.world == 0 || s.world == w)) forget(&s);  // this world's flag
+            if (kRows[i].flag == flag) forget(&s);
         }
         return;
     }
@@ -522,8 +501,7 @@ void flag_changed(int flag, bool on) {
     const double t = now();
     for (int i = 0; i < kRowCount; ++i) {
         if (kRows[i].flag != flag) continue;
-        bool elsewhere = false;
-        State& s = in_this_world(g_rows[i], &elsewhere);
+        State& s = in_this_world(g_rows[i]);
         if (s.armed_at > 0) continue;
         s.armed_at = t;
         s.touched = t;
@@ -567,13 +545,7 @@ bool allow_award(int lot, int event, int slot) {
         // After the session: a drop the mod rolls is held back (while its flag is on); one the game pays is noted.
         const auto it = g_rows.find(row);
         if (it == g_rows.end()) return true;
-        bool elsewhere = false;
-        State& s = in_this_world(it->second, &elsewhere);
-        if (elsewhere) {
-            if (!(s.got & b)) return true;
-            LOG_INFO("[coop] One-time drop: lot %d was had in another world; not again", lot);
-            return false;
-        }
+        State& s = in_this_world(it->second);
         if (!game::flag(kRows[row].flag)) {
             forget(&s);  // a new playthrough's enemy
             return true;
@@ -585,13 +557,8 @@ bool allow_award(int lot, int event, int slot) {
         if (s.armed_at > 0) s.got |= b;
         return true;
     }
-    bool elsewhere = false;
-    State& s = in_this_world(g_rows[row], &elsewhere);
-    if (elsewhere && (s.got & b)) {
-        LOG_INFO("[coop] One-time drop: lot %d was had in another world; not again", lot);
-        return false;
-    }
-    if (!elsewhere && (s.got & b) && !game::flag(kRows[row].flag)) forget(&s);  // a new playthrough's enemy
+    State& s = in_this_world(g_rows[row]);
+    if ((s.got & b) && !game::flag(kRows[row].flag)) forget(&s);  // a new playthrough's enemy
     s.touched = now();
     if ((s.got & b) && (s.ours & b)) {
         LOG_INFO("[coop] One-time drop: our scripts award lot %d after it was given; skipped", lot);

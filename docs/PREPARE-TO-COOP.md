@@ -709,14 +709,18 @@ copies all sleep is still some game's to move: at first such a game did not bid 
 its perch was nobody's until the session host next handed enemies out.
 
 When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part way
-and another begins, in every game. Players saw the Asylum Demon break off attacks in both 2026-10-29 tests, mostly
-early in a move: a second after it landed from its perch, when the guest under it outbid the host whose game had run
-the leap, and in a fight in which it changed hands six times in 76 s (with neither game's copy more engaged, the bids
-differ only by nearness). The rule to come leaves the bids and the AI's targets as they are: an attack the moving
-game's AI began (an animation in the 3000-4999 range of every boss's list) plays to its end before the enemy changes
-hands. The animation the network carries is an index into the character's Havok clips, not that id, so for now each
-boss's animations are logged as they change (the index, how long the last one played, which game moves it, the clip
-entry), to find the id.
+and another begins, in every game. Players saw the Asylum Demon break off attacks in all three 2026-10-29 tests,
+mostly in the wind-up but once in mid-air in its jumping slam: a second after it landed from its perch, when the guest
+under it outbid the host whose game had run the leap, and in a fight in which it changed hands six times in 76 s
+(with neither game's copy more engaged, the bids differ only by nearness). Bids, targets and turning stay as the game
+has them; an attack animation the moving game's AI began plays to its natural end before the enemy changes hands. The
+game that moves an enemy whose action is an attack (3000-4999) bids the game's cap until the action changes, at most
+8 s for one action, ahead of every other rule (a fallen player's game finishes the swing too); a chain of attacks is
+a chain of animations, each played out, and the hand-out comes between two of them. The action is read from the
+character's controls (`[ChrCtrl+0x214]`, which the enemy network sample `0xE45340` sends as an animation id); the clip
+index the layer reports (`game::anim_state`) stayed 0 through a whole fight and showed only scripted animations (the
+perch leap, the death). Each awake boss's actions are logged as they change, with where an attack-range value sits
+in the character, its controls and their ActionCtrl, in case the action is not the id.
 
 A load at home starts every map's temporary flags (`xxxx5000`-`xxxx5999`: timers, who stands where, which runs of
 the map's events are done) over. A guest's death reload stays in the host's world, whose flags the game then left

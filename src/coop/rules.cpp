@@ -3694,16 +3694,20 @@ bool ai_off_here(uint32_t chr) {
 // the least but one (2): a standing player's game wins, unless its copy sleeps (1), when the fallen player's game,
 // whose copy runs, keeps the enemy.
 constexpr uint32_t kBidFallen = 2;
+constexpr uint32_t kBidCap = 0x7FFF;  // the game's own cap (0xE6D250)
 
 // The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
 uint32_t g_watch_chr = 0;
 uint32_t g_watch_bid = 0;
 double g_watch_bid_at = -100;
 
+bool attack_hold(uint32_t chr);
+
 uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
     const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
     if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
+    if (attack_hold(chr)) return kBidCap;
     game::Vec3 at{}, me{};
     if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return bid;
     if (world::local_dead()) {
@@ -4043,122 +4047,153 @@ bool force_change_target(int entity, int target) {
     }
 }
 
+// The animation a character's own controls asked for: [ChrCtrl+0x214] -> int, 0 none. The enemy network sample
+// (0xE45340) sends it in place of the layer-0 clip (id | 0xC0000000) when it is set, which makes it the candidate for
+// the animation id (attacks 3000-4999; the Asylum Demon's TAE lists 3000-3023 and 3500). The clip index the layer
+// itself reports (game::anim_state) stayed 0 through a whole fight: only the scripted ones showed there (the perch
+// leap 9060 as clip 114, the death as 35 and 36; 2026-10-29 test 3).
+int action_of(uint32_t chr) {
+    uint32_t ctrl = 0, req = 0, id = 0;
+    if (!read32(chr + 0x28, &ctrl) || !ctrl || !read32(ctrl + 0x214, &req) || req < 0x10000 || !read32(req, &id)) {
+        return 0;
+    }
+    return static_cast<int>(id);
+}
+
+bool attack_action(int id) { return id >= 3000 && id < 5000; }
+
 // When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part
 // way and another begins, in every game, as the new game moves both copies. Players saw the Asylum Demon break off
-// attacks in both 2026-10-29 tests, mostly early in a move: a second after it landed from its perch, when the guest
-// under it outbid the host whose game had run the leap, and in a fight in which it changed hands six times in 76 s
-// (the bids differ only by nearness when neither game's copy is more engaged). The rule to come: an attack the
-// moving game's AI began plays to its end before the enemy changes hands. That needs the animation's id (attacks
-// are 3000-4999 in every boss's animation list), and the animation the network carries (game::anim_state) is an
-// index into the character's Havok clips (0x73DE60 -> 0x73EB20: the clip entry's place, 0x24 bytes each), not the
-// id. So each boss's animations are logged as they change (anim_timeline_tick): the index, how long the last one
-// played, which game moves it, the clip entry's words, and for the first sighting of each index what the entry's
-// pointer words point at (text, if any, or their first words), to find the id. The perch leap (9060, the event
-// animation lines) is the last of the Asylum Demon's 40 animations: if indexes follow the animation list, it is 39.
-
-// Up to 15 printable characters at `addr` (ASCII, or UTF-16 shown as u'...'), or "".
-std::string text_at(uint32_t addr) {
-    if (addr < 0x10000) return "";
-    uint8_t b[32] = {};
-    for (uint32_t i = 0; i < 8; ++i) {
-        uint32_t w = 0;
-        if (!read32(addr + i * 4, &w)) return "";
-        std::memcpy(b + i * 4, &w, 4);
-    }
-    auto printable = [](uint8_t c) { return c >= 0x20 && c < 0x7F; };
-    std::string s;
-    for (int i = 0; i < 15 && printable(b[i]); ++i) s += static_cast<char>(b[i]);
-    if (s.size() >= 3) return "'" + s + "'";
-    s.clear();
-    for (int i = 0; i < 15 && printable(b[i * 2]) && b[i * 2 + 1] == 0; ++i) s += static_cast<char>(b[i * 2]);
-    if (s.size() >= 3) return "u'" + s + "'";
-    return "";
-}
-
-// The clip layer 0 plays: its index (-1 none) and its entry (0 none).
-int clip_of(uint32_t chr, uint32_t* entry) {
-    const uint32_t packed = game::anim_state(chr, 0);
-    uint32_t ctrl = 0, ac = 0, clip = 0;
-    *entry = 0;
-    if (read32(chr + 0x28, &ctrl) && ctrl && read32(ctrl + 0x2C, &ac) && ac && read32(ac + 0x20, &clip) && clip) {
-        read32(clip + 0x10, entry);
-    }
-    return packed == 0xFFFFFFFF ? -1 : static_cast<int>(packed & 0xFFFF);
-}
-
-std::string anim_probe(uint32_t chr, bool deep = false) {
-    uint32_t entry = 0;
-    const int index = clip_of(chr, &entry);
-    std::string out = "animation " + std::to_string(index);
-    if (!entry) return out;
-    out += " (entry";
-    char w8[16];
-    for (uint32_t i = 0; i < 9; ++i) {
-        uint32_t w = 0;
-        if (!read32(entry + i * 4, &w)) break;
-        std::snprintf(w8, sizeof(w8), " %X", w);
-        out += w8;
-        if (!deep || w < 0x10000) continue;
-        const std::string text = text_at(w);
-        if (!text.empty()) {
-            out += "=" + text;
-            continue;
-        }
-        uint32_t inner[4] = {};
-        if (!read32(w, &inner[0]) || !read32(w + 4, &inner[1]) || !read32(w + 8, &inner[2]) ||
-            !read32(w + 12, &inner[3])) {
-            continue;
-        }
-        char deeper[64];
-        std::snprintf(deeper, sizeof(deeper), "=[%X %X %X %X]", inner[0], inner[1], inner[2], inner[3]);
-        out += deeper;
-        for (uint32_t v : inner) {
-            const std::string t = text_at(v);
-            if (!t.empty()) {
-                out += "->" + t;
-                break;
-            }
-        }
-    }
-    return out + ")";
-}
-
-struct BossClip {
-    int index = -2;
+// attacks in all three 2026-10-29 tests, in the wind-up mostly, but once in mid-air in its jumping slam: a second
+// after it landed from its perch, when the guest under it outbid the host whose game had run the leap, and in a
+// fight in which it changed hands six times in 76 s (with neither game's copy more engaged, the bids differ only by
+// nearness). The user's rule: bids, targets and turning stay as the game has them; an attack animation the moving
+// game's AI began plays to its natural end before the enemy changes hands. Each animation counts alone: a chain of
+// attacks is a chain of animations, each of which plays out. So the game that moves an enemy whose action is an
+// attack (attack_action) bids the cap (0x7FFF; 0xE56270 packs bid << 16) until the action changes, at most
+// kAttackHold for one action, before any other rule (a player who fell, a copy far away): the hand-out then comes
+// between two actions. An enemy whose AI is off attacks nothing, so the AI-off rule is not affected.
+constexpr double kAttackHold = 8.0;
+struct AttackHold {
+    int action = 0;
     double since = 0;
-    std::set<int> seen;  // indexes logged in full
+    bool told = false;
 };
-std::map<uint32_t, BossClip> g_boss_clips;
+std::map<uint32_t, AttackHold> g_attack_holds;  // enemies moved here, while in an attack
+
+bool moved_here(uint32_t chr) {
+    uint32_t current = 0, own_ai = 0;
+    return read32(chr + 0x2C, &current) && read32(chr + 0x410, &own_ai) && current && current == own_ai;
+}
+
+bool attack_hold(uint32_t chr) {
+    const int action = attack_action(action_of(chr)) && moved_here(chr) ? action_of(chr) : 0;
+    auto it = g_attack_holds.find(chr);
+    if (!action) {
+        if (it != g_attack_holds.end()) g_attack_holds.erase(it);
+        return false;
+    }
+    const double t = seconds();
+    if (it == g_attack_holds.end() || it->second.action != action) {
+        g_attack_holds[chr] = AttackHold{action, t, false};
+        return true;
+    }
+    if (t - it->second.since <= kAttackHold) return true;
+    if (!it->second.told) {
+        it->second.told = true;
+        static int lines = 0;
+        if (++lines <= 20) {
+            LOG_INFO("[coop] Enemy %08X: attack %d has played for %.0f s; it can change hands again", chr, action,
+                     kAttackHold);
+        }
+    }
+    return false;
+}
+
+// Diagnostics: each awake boss's action and clip as they change (the action's length, which game moves it), and,
+// in case the action is not the animation id, where in the character, its controls (ChrCtrl) and their ActionCtrl
+// (ChrCtrl+0x2C, 0x520 bytes) a value in the attack range (3000-3999) sits, whenever that set changes.
+std::string anim_probe(uint32_t chr) {
+    const uint32_t packed = game::anim_state(chr, 0);
+    char out[64];
+    std::snprintf(out, sizeof(out), "action %d, clip %d", action_of(chr),
+                  packed == 0xFFFFFFFF ? -1 : static_cast<int>(packed & 0xFFFF));
+    return out;
+}
+
+std::string attack_values(uint32_t chr) {
+    std::string out;
+    uint32_t ctrl = 0, ac = 0;
+    read32(chr + 0x28, &ctrl);
+    if (ctrl) read32(ctrl + 0x2C, &ac);
+    const struct {
+        const char* name;
+        uint32_t base, size;
+    } areas[] = {{"chr", chr, 0x600}, {"ctrl", ctrl, 0x400}, {"act", ac, 0x520}};
+    char one[32];
+    for (const auto& a : areas) {
+        if (!a.base) continue;
+        for (uint32_t off = 0; off < a.size; off += 4) {
+            uint32_t v = 0;
+            if (!read32(a.base + off, &v)) break;
+            if (v < 3000 || v > 3999) continue;
+            std::snprintf(one, sizeof(one), " %s+%X=%u", a.name, off, v);
+            out += one;
+        }
+    }
+    return out;
+}
+
+struct BossAnim {
+    int action = -2;
+    int clip = -2;
+    double since = 0;
+    std::string values;
+    double scanned = 0;
+};
+std::map<uint32_t, BossAnim> g_boss_anims;
 
 void anim_timeline_tick() {
-    static int lines = 0;
-    if (lines >= 600 || !g_state.active || game::loading()) {
-        if (game::loading()) g_boss_clips.clear();
-        return;
+    static int lines = 0, scans = 0;
+    if (game::loading()) {
+        g_boss_anims.clear();
+        g_attack_holds.clear();
     }
+    if (!g_state.active || game::loading()) return;
     const double t = seconds();
     for (int e : g_awake_bosses) {
         const uint32_t chr = chr_by_entity(e);
         if (!chr) continue;
-        uint32_t entry = 0, current = 0, own_ai = 0, net_ai = 0;
-        const int index = clip_of(chr, &entry);
-        BossClip& b = g_boss_clips[chr];
-        if (index == b.index) continue;
+        BossAnim& b = g_boss_anims[chr];
+        uint32_t current = 0, own_ai = 0, net_ai = 0;
         read32(chr + 0x2C, &current);
         read32(chr + 0x410, &own_ai);
         read32(chr + 0x414, &net_ai);
         const char* by = current && current == own_ai ? "this game" : current && current == net_ai ? "another game" : "?";
-        const bool deep = b.seen.insert(index).second;
-        char head[96];
-        std::snprintf(head, sizeof(head), "[coop] Boss %d: %d -> ", e, b.index);
-        ++lines;
-        if (b.index == -2) {
-            LOG_INFO("%s%s, moved by %s", head, anim_probe(chr, deep).c_str(), by);
-        } else {
-            LOG_INFO("%s%s after %.2f s, moved by %s", head, anim_probe(chr, deep).c_str(), t - b.since, by);
+        const int action = action_of(chr);
+        const uint32_t packed = game::anim_state(chr, 0);
+        const int clip = packed == 0xFFFFFFFF ? -1 : static_cast<int>(packed & 0xFFFF);
+        if ((action != b.action || clip != b.clip) && lines < 800) {
+            ++lines;
+            if (b.action == -2) {
+                LOG_INFO("[coop] Boss %d: action %d, clip %d, moved by %s", e, action, clip, by);
+            } else {
+                LOG_INFO("[coop] Boss %d: action %d -> %d, clip %d -> %d, after %.2f s, moved by %s%s", e, b.action,
+                         action, b.clip, clip, t - b.since, by, attack_hold(chr) ? " (holds it: an attack)" : "");
+            }
+            b.action = action;
+            b.clip = clip;
+            b.since = t;
         }
-        b.index = index;
-        b.since = t;
+        if (t - b.scanned >= 0.25 && scans < 300) {
+            b.scanned = t;
+            std::string values = attack_values(chr);
+            if (values != b.values) {
+                ++scans;
+                LOG_INFO("[coop] Boss %d attack-range values (%s):%s", e, by, values.empty() ? " none" : values.c_str());
+                b.values = std::move(values);
+            }
+        }
     }
 }
 

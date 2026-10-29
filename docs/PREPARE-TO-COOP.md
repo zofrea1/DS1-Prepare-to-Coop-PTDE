@@ -821,8 +821,9 @@ the Burg), or who was down (spectating) got nothing, and the enemy is gone for g
 drop also went with the next load, and a session forces loads (a teammate's Homeward Bone, a team wipe).
 
 `drops.cpp` keeps a table of these drops (`drops_table.inc`, generated from every map's script, MSB and the params:
-141 rows of {the flag that is on once it is gone, the enemy's entity, its floor lot, the lots its script awards},
-common event 970's rows without an enemy and with the event's slot for that boss). The flags are shared in a session (a guest's go through the host), so
+141 rows of {the flag that is on once it is gone, the enemy's entity, its floor lot, the lots its script awards,
+the common event's slot, the common event}, common event 970's rows without an enemy and with the event's slot for
+that boss), and 54 rows for the NPCs' gifts (below). The flags are shared in a session (a guest's go through the host), so
 every game sees each such flag turn on, whoever killed the enemy and wherever. When one does (the setter hook,
 `rules::after_set_flag`, our own scripts' or another player's applied), the row waits: 12 s for our game's own roll
 (the death animation, our copy's death, event 970's second and third lots 5 s after the first), and then for the
@@ -852,6 +853,20 @@ player's own save, a guest's in their own world's flags) still come once, the mo
 game's does. What is owed is kept through a return to the title
 and given when the same character is back in the world. An invader's game keeps the vanilla drops. Tail cuts (the Drake Sword, the Gargoyle Tail Axe, the Moonlight Greatsword) are not
 in the table: they are paid on the cut, not the death.
+
+**NPC gifts.** An NPC's gift is given by a common event: the talk script turns a flag on (Solaire's 11010591, Oscar's
+11810591, Frampt's Lordvessel 11510592, ...) and common event 911 (49 gifts), 890 (4) or 910 (1, Eingyi's Egg
+Vermifuge) awards the lot with Award Items (Including Clients). Common events run in every game whatever its map, and
+the flag is shared, so every player of the session gets the gift wherever they are, once per character (the lots'
+own flags). A common event starts again at every load and ends at once on a flag that is already on: a player whose
+game was loading when the flag came missed the gift for good (2026-10-28). The gifts are rows of the same table
+(the talk flag, no enemy, the lot, the event's slot and the event), and the award is told to its row by the event and
+slot. A gift our game has not awarded 12 s after its flag turned on is rolled by the mod, with "A gift you missed" in
+the action box. A gift that may come again (911 slot 41 and 910) turns its flag off right after its award; a game
+that gets the flag's on and off together never sees it on, so a row still waiting when its flag goes off is rolled
+too. A guest who joins later gets the host's flags as a whole (the snapshot is written to the store, not through the
+setter), so no gift given before they came is rolled for them. Common event 960 (a gift that needs the NPC dead too)
+is not in the table.
 
 ### World rules
 

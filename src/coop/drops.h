@@ -15,6 +15,9 @@
 // is not standing in our game, it rolls the lot as the game does (our own luck, our own one-time item flags) and
 // puts what it draws in the inventory. In a session the floor drops of these enemies go into the inventory too,
 // so no reload (a death, a team wipe, a trip home) can take one off the floor before it is picked up.
+//
+// An NPC's gift works the same way: the talk script turns a shared flag on and a common event in every game awards
+// the gift, wherever its player is; a game that was loading at that moment gets its roll from here.
 
 namespace coop::drops {
 

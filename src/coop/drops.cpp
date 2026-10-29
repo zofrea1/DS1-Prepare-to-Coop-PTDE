@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -29,15 +30,22 @@ namespace {
 // disabled), with what the script awards when it dies (Award Items (Including Clients) 2003[36], Award Item Lot
 // 2003[04]) and its own NpcParam lot (itemLotId_1, dropped at its death by 0xE80670), unless that script drops its
 // treasure again on every load (the NPCs, whose lots carry their own one-time flags). The bosses' rewards from
-// common event 970 (a boss flag, then up to three lots) are rows without an enemy. 141 rows, from every map's
+// common event 970 (a boss flag, then up to three lots) are rows without an enemy. 141 such rows, from every map's
 // script: the Black Knights, crystal lizards, drakes, Titanite Demons, mimics, Pinwheel's masks, the Stray Demon's
 // slab, the Taurus and Capra Demons' weapons, Havel, Ricard's Rapier, the Oolacile Humanity sprites.
+//
+// And the NPCs' gifts (54 rows): a talk script turns a flag on and common event 911 (49 gifts), 890 (4) or 910 (1)
+// awards the gift's lot to every player whose game sees the flag turn on, wherever they are. A common event starts
+// again at every load and ends at once on a flag already on, so a player whose game was loading missed the gift for
+// good (2026-10-28). A gift that may come again (911 slot 41, 910) turns its flag off right after: a game that gets
+// the on and the off together (another game's award came between) never sees it on either.
 struct Row {
-    int32_t flag;       // on once it is gone for good: its script's own done flag, or the boss flag
-    int32_t entity;     // the enemy (0: common event 970's boss rewards)
-    int32_t floor;      // its own drop, on the floor where it dies (0 none)
-    int32_t lots[3];    // what its scripts award, into the inventory (0 none)
-    int32_t boss_slot;  // event 970's slot that awards a boss's rewards (-1: an enemy's row)
+    int32_t flag;     // on once it is gone for good: its script's own done flag, the boss flag, the gift's talk flag
+    int32_t entity;   // the enemy (0: a common event's row)
+    int32_t floor;    // its own drop, on the floor where it dies (0 none)
+    int32_t lots[3];  // what its scripts award, into the inventory (0 none)
+    int32_t slot;     // the common event's slot that awards it (-1: an enemy's row)
+    int32_t event;    // the common event: 970 a boss's rewards, 911/890/910 an NPC's gift (0: an enemy's row)
 };
 const Row kRows[] = {
 #include "drops_table.inc"
@@ -103,6 +111,19 @@ uint8_t needs(const Row& r) {
 }
 
 int lot_of(const Row& r, int bit) { return bit == 3 ? r.floor : r.lots[bit]; }
+
+bool gift(const Row& r) { return r.event == 911 || r.event == 890 || r.event == 910; }
+
+// For the log: "enemy 1010700", "boss rewards (event 970 slot 3)", "NPC gift (event 911 slot 0)".
+std::string what(const Row& r) {
+    char buf[64];
+    if (r.entity) {
+        std::snprintf(buf, sizeof(buf), "enemy %d", r.entity);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%s (event %d slot %d)", gift(r) ? "NPC gift" : "boss rewards", r.event, r.slot);
+    }
+    return buf;
+}
 
 // ---------------------------------------------------------------- the game's characters
 constexpr uint32_t kChrByEntity = 0x00D6C360;  // eax = entity id -> character, or 0
@@ -368,8 +389,7 @@ void claim(State* s, const Row& r, uint8_t missing, double t, const char* when) 
     s->give |= missing;
     s->missed = true;
     s->touched = t;
-    LOG_INFO("[coop] One-time drop: %sflag %d (enemy %d) is on and our game did not roll its drop; we roll it", when,
-             r.flag, r.entity);
+    LOG_INFO("[coop] One-time drop: %sour game did not roll %s (flag %d); we roll it", when, what(r).c_str(), r.flag);
 }
 
 // The session is over: the hooks no longer tell a drop of ours from the game's, only record what the game pays (got)
@@ -484,7 +504,9 @@ bool install() {
         return false;
     }
     g_installed = true;
-    LOG_INFO("[coop] One-time drops: %d enemies and boss rewards watched", kRowCount);
+    int gifts = 0;
+    for (const Row& r : kRows) gifts += gift(r) ? 1 : 0;
+    LOG_INFO("[coop] One-time drops: %d enemies and boss rewards, %d NPC gifts watched", kRowCount - gifts, gifts);
     return true;
 }
 
@@ -493,7 +515,15 @@ bool watched(int flag) { return g_installed && std::binary_search(g_flags.begin(
 void flag_changed(int flag, bool on) {
     if (!on) {
         for (auto& [i, s] : g_rows) {
-            if (kRows[i].flag == flag) forget(&s);
+            const Row& r = kRows[i];
+            if (r.flag != flag) continue;
+            // A gift that may come again: its flag goes off right after the award. Still armed without our game's
+            // award, the flag was on and off before our game saw it on (or while it was loading).
+            const uint8_t missing = needs(r) & ~s.got;
+            if (gift(r) && active() && s.armed_at > 0 && missing) {
+                claim(&s, r, missing, now(), "its flag went off before our game saw it on; ");
+            }
+            forget(&s);
         }
         return;
     }
@@ -506,18 +536,19 @@ void flag_changed(int flag, bool on) {
         s.armed_at = t;
         s.touched = t;
         s.loads = g_loads;
-        LOG_INFO("[coop] One-time drop: flag %d is on (enemy %d): our game's own roll has %.0f s", flag,
-                 kRows[i].entity, kWait);
+        LOG_INFO("[coop] One-time drop: flag %d is on (%s): our game's own roll has %.0f s", flag,
+                 what(kRows[i]).c_str(), kWait);
     }
 }
 
 bool allow_award(int lot, int event, int slot) {
     if (!g_installed || lot <= 0) return true;
     int row = -1, bit = -1;
-    if (event == 970) {
-        // A boss's rewards: the row of this slot of the event (each boss has its own; the Humanity lots are shared).
+    if (event == 970 || event == 911 || event == 890 || event == 910) {
+        // A boss's rewards or an NPC's gift: the row of this slot of the event (each boss and each gift has its own;
+        // the Humanity lots are shared).
         for (int i = 0; i < kRowCount && row < 0; ++i) {
-            if (kRows[i].boss_slot != slot) continue;
+            if (kRows[i].event != event || kRows[i].slot != slot) continue;
             for (int k = 0; k < 3; ++k) {
                 if (kRows[i].lots[k] == lot) {
                     row = i;
@@ -529,7 +560,7 @@ bool allow_award(int lot, int event, int slot) {
     } else if (event > 0) {
         const int flag = event + slot;
         for (int i = 0; i < kRowCount && row < 0; ++i) {
-            if (kRows[i].flag != flag) continue;
+            if (gift(kRows[i]) || kRows[i].flag != flag) continue;
             for (int k = 0; k < 3; ++k) {
                 if (kRows[i].lots[k] == lot) {
                     row = i;
@@ -606,8 +637,8 @@ void tick() {
     g_was_active = act;
     if (g_rows.empty()) return;
     const bool take = can_take();
-    std::vector<std::wstring> found, missed, full;
-    bool any_missed = false;
+    std::vector<std::wstring> found, missed, gifts, full;
+    bool any_missed = false, any_gift = false;
     for (auto it = g_rows.begin(); it != g_rows.end();) {
         const Row& r = kRows[it->first];
         State& s = it->second;
@@ -624,8 +655,9 @@ void tick() {
             s.give = 0;
             std::vector<std::wstring> no_room;
             s.landed = 0;
-            deliver(&s, s.missed ? &missed : &found, &no_room);
-            if (s.missed && s.landed) any_missed = true;
+            const bool is_gift = gift(r) && s.missed;
+            deliver(&s, is_gift ? &gifts : s.missed ? &missed : &found, &no_room);
+            if (s.missed && s.landed) (is_gift ? any_gift : any_missed) = true;
             if (s.owed.empty()) {
                 s.told_full = false;
             } else {
@@ -648,6 +680,11 @@ void tick() {
         text::show(L"From a kill you missed: " + join(missed));
     } else if (any_missed) {
         text::show(L"From a kill you missed");
+    }
+    if (!gifts.empty()) {
+        text::show(L"A gift you missed: " + join(gifts));
+    } else if (any_gift) {
+        text::show(L"A gift you missed");
     }
     if (!full.empty()) text::show(L"No room in your inventory for " + join(full) + L"; it comes once there is room");
 }

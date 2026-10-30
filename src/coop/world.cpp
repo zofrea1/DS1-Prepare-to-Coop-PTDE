@@ -105,13 +105,19 @@ bool (*g_blossom_give_fn)() = nullptr;  // one more Crimson Blossom (coop.cpp)
 double g_no_session_since = 0;     // in the world without a session since then (the blossoms go)
 const char* g_wither_pending = nullptr;  // they are to wither once we have a character again (why)
 bool g_wither_tell = false;
-// The health the death debuff took, given back once our max HP is whole again (wither_blossoms).
+// The health the death debuff took, given back once our max HP is whole again (wither_blossoms). A load can come in
+// between: a guest's Blossoms wither as the trip home begins (the game takes the world for its own a moment before
+// its load), and the refill was dropped there, so the guest stood at home with the health the Blossoms had taken
+// (2026-10-29). After a load the share is given on top of the health the character has once back.
 struct Refill {
     int blossoms = 0;   // the debuff's strength when it came off; 0 nothing to give back
     int hp = 0, max = 0;  // our health and max HP then
     bool grow = false;  // the effect was on: the game raises the max first
     double until = 0;
+    double load_at = 0;  // a load (no character) began then; 0 none
+    double back_at = 0;  // our character is back from it since then
 } g_refill;
+constexpr double kRefillLoadMax = 60.0;  // a load longer than this (the title, another character) drops the refill
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -1161,10 +1167,30 @@ void debuff_tick(uint32_t me) {
 // fills with it, for the share of the max the debuff had (10% a Blossom).
 void refill_tick(uint32_t me) {
     if (!g_refill.blossoms) return;
-    const int m = me ? max_hp(me) : 0;
-    if (!me || game::loading() || hp(me) <= 0 || now() > g_refill.until) {
+    if (!me || game::loading()) {
+        if (g_refill.load_at == 0) g_refill.load_at = now();
+        g_refill.back_at = 0;
+        if (now() - g_refill.load_at > kRefillLoadMax) {
+            LOG_INFO("[coop] The death debuff's health was not given back (no character for %.0f s)", kRefillLoadMax);
+            g_refill = {};
+        }
+        return;
+    }
+    if (g_refill.load_at != 0) {
+        // Back from a load: the debuff is off (effects do not survive one) and the max is whole. The character's
+        // health settles first.
+        if (g_refill.back_at == 0) g_refill.back_at = now();
+        if (now() - g_refill.back_at < 1.0) return;
+        g_refill.load_at = 0;
+        g_refill.back_at = 0;
+        g_refill.grow = false;
+        g_refill.hp = hp(me);
+        g_refill.until = now() + 3.0;
+    }
+    const int m = max_hp(me);
+    if (hp(me) <= 0 || now() > g_refill.until) {
         LOG_INFO("[coop] The death debuff's health was not given back (%s)",
-                 !me || game::loading() ? "a load" : hp(me) <= 0 ? "we fell" : "our max HP did not grow back");
+                 hp(me) <= 0 ? "we fell" : "our max HP did not grow back");
         g_refill = {};
         return;
     }

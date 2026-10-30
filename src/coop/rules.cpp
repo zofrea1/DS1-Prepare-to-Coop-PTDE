@@ -4074,8 +4074,11 @@ bool attack_action(int id) { return id >= 3000 && id < 5000; }
 // animation is an attack, the game that moves it bids the cap (0x7FFF; 0xE56270 packs bid << 16) and every other
 // game, whose copy plays the same attack from the network, bids nothing: a bid sent before the attack began still
 // loses. This comes before every other rule (a player who fell, a copy far away): a fallen player's game finishes
-// the swing. One animation holds the enemy at most kAttackHold. An enemy whose AI is off attacks nothing.
-constexpr double kAttackHold = 8.0;
+// the swing. One animation holds the enemy at most kAttackHold, against a value that never changes: the same attack
+// played again reads as one, and the 2026-10-29 cap of 8 s let the Asylum Demon change hands 5.7 s into its second
+// jumping slam in a row (3008 twice, 12.6 s; attacks there ran 0.6 to 6.9 s, three 3005s in a row 12 s). An enemy
+// whose AI is off attacks nothing.
+constexpr double kAttackHold = 20.0;
 struct AttackHold {
     int action = 0;
     double since = 0;
@@ -4104,7 +4107,7 @@ int attack_hold(uint32_t chr) {
             it->second.told = true;
             static int lines = 0;
             if (++lines <= 20) {
-                LOG_INFO("[coop] Enemy %08X: attack %d has played for %.0f s; it can change hands again", chr, action,
+                LOG_INFO("[coop] Enemy %08X: attack %d has gone on for %.0f s; it can change hands again", chr, action,
                          kAttackHold);
             }
         }

@@ -30,7 +30,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
    | Dried Fingers | Host: taunt invaders; an invader searching for a world is 50% more likely to pick yours. | host |
    | Cursed Pendant | Curse your own world: it counts as pure black World Tendency until you use the pendant again, and the NPC invaders come even while you are hollow. | your own world: alone or as host |
-   | Crimson Blossom | Not used: one blooms with each death in a session (up to five; none when the team defeats a boss while you are down), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0); it is given when the respawn warp goes and the reload keeps the world. They wither when anyone in the session rests (the health they took comes back), the whole team falls, or the session ends: a guest's on the first frame home, a host's when it closes the world (Abyssal Eye Orb, Black Separation Crystal); and whenever the player is in the world with no session for 3 s (at home they lie in the own world's key array, which a visit to another world does not show, so one from a death at home came back after a visit). | never |
+   | Crimson Blossom | Not used: one blooms with each death in a session (up to five; none when the team defeats a boss while you are down), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0); it is given when the respawn warp goes and the reload keeps the world. They wither when anyone in the session rests (the health they took comes back), the whole team falls, or the session ends: a guest's as the trip home begins, a host's when it closes the world (Abyssal Eye Orb, Black Separation Crystal), with the health they took given back as at a rest (after the trip's load, on top of the health the guest has at home); and whenever the player is in the world with no session for 3 s (at home they lie in the own world's key array, which a visit to another world does not show, so one from a death at home came back after a visit). | never |
    | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
 
    The items are used like any other item (quick slot, the item animation); when one cannot be used it is
@@ -716,7 +716,7 @@ session host hands enemies out every 3 s; with neither game's copy more engaged,
 Bids, targets and turning stay as the game has them; an attack animation the moving game's AI began plays to its
 natural end before the enemy changes hands. While an enemy's animation is an attack (3000-4999), the game that moves
 it bids the game's cap and every other game, whose copy plays the same attack from the network, bids nothing, ahead of
-every other rule (a fallen player's game finishes the swing too); one animation holds the enemy at most 8 s. A chain
+every other rule (a fallen player's game finishes the swing too); one animation holds the enemy at most 20 s (the same attack played again reads as one: three of the demon's 4 s swings in a row read as 12 s). A chain
 of attacks is a chain of animations, each played out. The animation playing is `ChrCtrl+0x350` (the same as
 `ActionCtrl+0x60`), found by scanning the demon for attack-range values during a fight: both took each attack's id in
 turn in both games and left that range between attacks; `ActionCtrl+0x4F8`/`+0x518` took each attack first (the AI's

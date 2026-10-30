@@ -414,6 +414,7 @@ void coop_install(const CoopConfig& config) {
     g_miracle = coop::world::set_homeward_state_handler(&homeward_state);
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
     coop::netrate::set_smoothing(g_cfg.net_smoothing);
+    coop::netrate::set_dynamic(g_cfg.dynamic_smoothing);
     coop::world::set_blossom_counter(&blossom_count);
     if (g_items) coop::world::set_blossom_wither(&wither_blossoms);
     if (g_items) coop::world::set_blossom_give(&give_blossom);
@@ -442,8 +443,9 @@ void coop_install(const CoopConfig& config) {
     cfg.test_version = g_cfg.test_version;
     coop::session::configure(cfg);
     static const char* const kOverhead[] = {"name only", "name and ping", "name and soul level", "name and deaths",
-                                            "name, soul level and ping"};
-    const int overhead = g_cfg.overhead_display >= 0 && g_cfg.overhead_display <= 4 ? g_cfg.overhead_display : 4;
+                                            "name, soul level and ping",
+                                            "name, soul level, ping and smoothing"};
+    const int overhead = g_cfg.overhead_display >= 0 && g_cfg.overhead_display <= 5 ? g_cfg.overhead_display : 5;
     LOG_INFO("[coop] Companion health bars show the %s", kOverhead[overhead]);
     LOG_INFO("[coop] Invasion rewards: %s", g_cfg.invasion_rewards ? "Humanity for the side that wins" : "off");
     if (g_cfg.invasion_cooldown_s > 0) {
@@ -455,9 +457,12 @@ void coop_install(const CoopConfig& config) {
     LOG_INFO("[coop] Boss fogs while an invader is in this world: %s (SealBossFogsDuringInvasions)",
              g_cfg.seal_boss_fogs ? "shut for the host and the guests" : "open, as in vanilla");
     LOG_INFO("[coop] Network updates when hosting: %d a second (NetworkTickRate; guests use their host's); smoothing "
-             "%d ms above 6 a second (NetworkSmoothing)",
+             "%d ms above 6 a second (NetworkSmoothing)%s",
              std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)),
-             std::max(0, std::min(coop::netrate::kMaxSmoothing, g_cfg.net_smoothing)));
+             std::max(0, std::min(coop::netrate::kMaxSmoothing, g_cfg.net_smoothing)),
+             g_cfg.dynamic_smoothing ? ", then each player's and enemy's own from how evenly their updates come, "
+                                       "16 to 200 ms (DynamicSmoothing)"
+                                     : "");
     g_installed = true;
     if (g_cfg.check_updates) {
         coop::updates::start(g_cfg.test_version);

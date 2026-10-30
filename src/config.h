@@ -31,14 +31,18 @@ struct CoopConfig {
     bool guest_world_events = true;
     // The other players see your bonfire animations (sitting, kindling, Reverse Hollowing).
     bool bonfire_animations = true;
-    // Text over other players: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping.
-    int overhead_display = 4;
+    // Text over other players: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul level,
+    // ping and the smoothing their character is drawn with.
+    int overhead_display = 5;
     // Host: how many times a second every game of the session sends its player's character and the enemies it moves
     // (6, the game's own, to 30). Guests and invaders use their host's.
     int net_rate = 30;
     // Each player's own: above the game's rate, the ms other players' characters (and the enemies other games move)
     // stay behind their updates as a margin for late ones (0 to 200). 33 ms is about a frame at 30 FPS.
     int net_smoothing = 33;
+    // Each player's own: the smoothing follows each other player's (and each enemy copy's) connection, from 16 ms on
+    // an even one up to 200 ms on a poor one, starting at NetworkSmoothing. false = NetworkSmoothing for all.
+    bool dynamic_smoothing = true;
     // Enemy and boss scaling per extra player, in percent.
     int enemy_health = 45;
     int enemy_damage = 0;

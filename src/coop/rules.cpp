@@ -7,7 +7,9 @@
 #include "hook.h"
 #include "log.h"
 #include "motion.h"
+#include "netrate.h"
 #include "session.h"
+#include "steam.h"
 #include "text.h"
 #include "world.h"
 
@@ -3702,10 +3704,17 @@ uint32_t g_watch_bid = 0;
 double g_watch_bid_at = -100;
 
 int attack_hold(uint32_t chr);
+int lead_mode(uint32_t handle);
+const char* mover(uint32_t chr);
 
 uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
     const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
+    uint32_t handle = 0;
+    if (seamless_rules() && read32(chr + 0x78, &handle)) {
+        const int lead = lead_mode(handle);
+        if (lead >= 0) return lead == 1 ? kBidCap : 0;
+    }
     if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
     if (const int hold = attack_hold(chr)) return hold == 1 ? kBidCap : 0;
     game::Vec3 at{}, me{};
@@ -4158,6 +4167,35 @@ void anim_timeline_tick() {
     }
 }
 
+// How the copy of a boss another game moves takes its updates (netrate.cpp): every second with a jump in it (the copy
+// went to an update at once instead of moving there: a slide on screen), else every 10 s while the boss is awake.
+// For the 2026-10-29 report of the Taurus Demon sliding down the bridge at sixty a second.
+void boss_copy_tick() {
+    static double last = 0;
+    static int lines = 0;
+    static std::map<uint32_t, double> quiet;  // chr -> when its last line without a jump went
+    const double t = seconds();
+    if (t - last < 1.0 || lines > 400 || !seamless_rules() || game::loading()) return;
+    last = t;
+    for (int e : kGaugeBosses) {
+        if (!g_awake_bosses.count(e)) continue;
+        const uint32_t chr = chr_by_entity(e);
+        uint32_t current = 0, net_ai = 0;
+        if (!chr || !read32(chr + 0x2C, &current) || !read32(chr + 0x414, &net_ai) || !current || current != net_ai) {
+            continue;
+        }
+        netrate::CopyStats st;
+        if (!netrate::copy_stats(net_ai, &st) || st.updates == 0) continue;
+        double& q = quiet[chr];
+        if (st.jumps == 0 && t - q < 10.0) continue;
+        if (st.jumps == 0) q = t;
+        ++lines;
+        LOG_INFO("[coop] Boss %d's copy: %d update(s) and %d jump(s) in the last second, smoothing %d ms (jitter %d "
+                 "ms, gap %d ms), speed %.1f m/s, animation %d", e, st.updates, st.jumps, st.smoothing_ms,
+                 st.jitter_ms, st.gap_ms, st.speed, action_of(chr));
+    }
+}
+
 void boss_handover_tick() {
     static double last = 0;
     const double t = seconds();
@@ -4246,7 +4284,12 @@ std::map<std::pair<int, int>, std::vector<double>> g_anim_done_heard;  // (entit
 bool moved_elsewhere(uint32_t chr) {
     if (!chr || chr == game::player()) return false;
     if (is_remote_player(chr)) return true;
-    uint32_t current = 0, net_ai = 0;
+    uint32_t current = 0, net_ai = 0, handle = 0;
+    // A scripted move's lead counts from its first frame: the controller follows on the next character update.
+    if (read32(chr + 0x78, &handle)) {
+        const int lead = lead_mode(handle);
+        if (lead >= 0) return lead == 0;
+    }
     return read32(chr + 0x2C, &current) && read32(chr + 0x414, &net_ai) && current && current == net_ai;
 }
 
@@ -4370,6 +4413,248 @@ uint32_t __cdecl hk_anim_wait(int entity, int anim) {
     return wait;
 }
 
+// ---------------------------------------------------------------- who moves a character through an event animation
+// A scripted move (Force Animation Playback, 2003[18]: a flight, a leap, a landing) moves the character by its
+// animation's root motion, and only the game that moves the character plays that motion; the copies elsewhere follow
+// its positions. Which game moves an enemy is the session host's hand-out (every 3 s, by bids), so at the start of a
+// scripted move it may be no game at all: the Hellkite's flight over the Undead Burg's first bridge (11010790,
+// animation 7012 on 1010302) is a second dragon parked out of sight, 92 m from the host at Firelink and 93 m from the
+// guest who walked into its trigger, so neither game bid for it (each saw the other nearer), it stayed nobody's, and
+// in both games it hung at its start point until the event took it away again: no flight for either player
+// (2026-10-29, new characters). A hand-out in the middle of such a move plays only its end, from where the copy
+// stood (the Asylum Demon's leap, 2026-10-18).
+// So the game whose own run of the event starts the animation (its player met the event's condition; a run another
+// player's game started and the event sync passed on is not its own) moves the character from that frame until the
+// animation's request ([chr+0x10]+4) ends, up to kLeadCap: the ownership test 0xE3E250 (fastcall(WorldChrMan,
+// net handle), the per-handle table at WorldChrMan+0x2B4 that the hand-out fills; the character's controller is
+// picked from it every frame, 0xE5A940 via EnemyIns vt+0x64 from the character loop 0xE41680, and the position
+// sender 0xE56BC0 asks it too) answers "ours" for it, and it bids the most (kBidCap), so the hand-out gives it to
+// this game as well. It tells the others (kEventLead); their test answers "not ours" and they bid nothing until it
+// says the animation is over, so no second game plays the move. Two games that start the same move on their own
+// settle it by Steam id (the lower leads).
+constexpr double kLeadCap = 30.0;    // the longest a lead lasts (a request that never clears)
+constexpr double kLeadGrace = 0.5;   // the request may come a frame or two after the call
+constexpr uint32_t kOwnTest = 0x00E3E250;
+constexpr int kMaxLeads = 8;
+
+struct EventLead {
+    uint32_t handle = 0;  // the character's net handle (chr+0x78: block << 11 | place), the same in every game
+    int entity = -1;      // its entity id, when this game knows it (log)
+    int anim = 0;
+    double since = 0;
+    uint64_t leader = 0;  // the game that moves it (Steam id; ours when mine)
+    bool mine = false;
+    bool seen = false;    // the request was seen in our game (mine)
+};
+std::vector<EventLead> g_leads;
+// The ownership test reads these (it can run on the loading thread): handles and 1 ours / 0 another game's.
+volatile LONG g_lead_n = 0;
+uint32_t g_lead_handles[kMaxLeads] = {};
+int32_t g_lead_modes[kMaxLeads] = {};
+void* g_own_test_orig = nullptr;
+void (*g_lead_fn)(uint32_t handle, int entity, int anim, bool start) = nullptr;
+uint64_t g_lead_self = 0;
+
+void publish_leads() {
+    InterlockedExchange(&g_lead_n, 0);
+    int n = 0;
+    for (const EventLead& l : g_leads) {
+        if (n >= kMaxLeads) break;
+        g_lead_handles[n] = l.handle;
+        g_lead_modes[n] = l.mine ? 1 : 0;
+        ++n;
+    }
+    InterlockedExchange(&g_lead_n, n);
+}
+
+int lead_mode(uint32_t handle) {
+    const LONG n = g_lead_n;
+    for (LONG i = 0; i < n && i < kMaxLeads; ++i) {
+        if (g_lead_handles[i] == handle) return g_lead_modes[i];
+    }
+    return -1;
+}
+
+int __stdcall own_test_lead(uint32_t handle) { return lead_mode(handle); }
+
+// 0xE3E250: push esi ; mov esi,[ecx+2B4h] (stolen, 7 bytes). Callers read al only.
+__declspec(naked) void hk_own_test() {
+    __asm {
+        cmp dword ptr [g_lead_n], 0
+        jne check
+        jmp dword ptr [g_own_test_orig]
+    check:
+        push ecx
+        push edx
+        push edx
+        call own_test_lead
+        pop edx
+        pop ecx
+        test eax, eax
+        js original
+        ret
+    original:
+        jmp dword ptr [g_own_test_orig]
+    }
+}
+
+// The character of a net handle in our game (as the game's damage packets find it, 0xE413B0), 0 if none.
+uint32_t chr_by_net_handle(uint32_t handle) {
+    uint32_t wcm = 0, set = 0, n = 0, entries = 0, chr = 0, own = 0;
+    const uint32_t block = (handle >> 11) & 0x1F, at = handle & 0x7FF;
+    if (static_cast<int>(handle) < 0 || block > 0x1C || !read32(kWorldChrManAddr, &wcm) || !wcm ||
+        !read32(wcm + 0x240 + block * 4, &set) || !set || !read32(set, &n) || at >= n || !read32(set + 4, &entries) ||
+        !read32(entries + at * 0x20, &chr) || !chr || !read32(chr + 0x78, &own) || own != handle) {
+        return 0;
+    }
+    return chr;
+}
+
+EventLead* find_lead(uint32_t handle) {
+    for (EventLead& l : g_leads) {
+        if (l.handle == handle) return &l;
+    }
+    return nullptr;
+}
+
+int g_lead_lines = 0;
+
+void end_lead(uint32_t handle, const char* why) {
+    for (auto it = g_leads.begin(); it != g_leads.end(); ++it) {
+        if (it->handle != handle) continue;
+        const EventLead l = *it;
+        g_leads.erase(it);
+        publish_leads();
+        if (l.mine && g_lead_fn) g_lead_fn(l.handle, l.entity, l.anim, false);
+        if (++g_lead_lines <= 120) {
+            LOG_INFO("[coop] Animation %d on %d (%08X): %s moves it no longer (%s, %.1f s)", l.anim, l.entity,
+                     l.handle, l.mine ? "this game" : "the other game", why, seconds() - l.since);
+        }
+        return;
+    }
+}
+
+// An event of ours forces an animation on a character other than a player's.
+void lead_event_anim(uint32_t chr, int anim, bool loop, bool remote_run, int event) {
+    if (!seamless_rules() || !g_world_events || loop || remote_run || game::loading()) return;
+    if (chr == game::player() || is_remote_player(chr)) return;
+    uint32_t handle = 0;
+    if (!read32(chr + 0x78, &handle) || static_cast<int>(handle) < 0 || chr_by_net_handle(handle) != chr) return;
+    if (!g_lead_self) g_lead_self = steam::self();
+    EventLead* l = find_lead(handle);
+    if (l && !l->mine) {
+        if (++g_lead_lines <= 120) {
+            LOG_INFO("[coop] Event %d: animation %d on %08X; the game that began it first moves it", event, anim, handle);
+        }
+        return;
+    }
+    if (!l) {
+        if (g_leads.size() >= kMaxLeads) return;
+        g_leads.push_back(EventLead{});
+        l = &g_leads.back();
+    }
+    l->handle = handle;
+    l->entity = -1;
+    for (int e : kWatchedEnemies) {
+        if (chr_by_entity(e) == chr) l->entity = e;
+    }
+    if (l->entity < 0) {
+        if (const int boss = gauge_boss_of(chr)) l->entity = boss;
+    }
+    l->anim = anim;
+    l->since = seconds();
+    l->leader = g_lead_self;
+    l->mine = true;
+    l->seen = false;
+    publish_leads();
+    if (g_lead_fn) g_lead_fn(handle, l->entity, anim, true);
+    if (++g_lead_lines <= 120) {
+        LOG_INFO("[coop] Event %d: animation %d on %d (%08X) began here: this game moves it until it ends (%s)", event,
+                 anim, l->entity, handle, mover(chr));
+    }
+}
+
+void lead_tick() {
+    if (g_leads.empty()) return;
+    if (!seamless_rules() || game::loading()) {
+        while (!g_leads.empty()) end_lead(g_leads.front().handle, !seamless_rules() ? "session over" : "a load");
+        return;
+    }
+    const double t = seconds();
+    for (size_t i = 0; i < g_leads.size();) {
+        EventLead& l = g_leads[i];
+        const double age = t - l.since;
+        const char* why = nullptr;
+        if (age > kLeadCap) {
+            why = "time limit";
+        } else if (!l.mine) {
+            const auto& peers = session::peers();
+            if (std::none_of(peers.begin(), peers.end(), [&](const session::PeerInfo& p) { return p.id == l.leader; })) {
+                why = "its player left";
+            }
+        } else {
+            const uint32_t chr = chr_by_net_handle(l.handle);
+            if (!chr) {
+                why = "the character is gone here";
+            } else if (requesting_anim(chr, l.anim)) {
+                l.seen = true;
+            } else if (l.seen || age > kLeadGrace) {
+                why = "the animation is over";
+            }
+        }
+        if (why) {
+            end_lead(l.handle, why);
+            continue;
+        }
+        ++i;
+    }
+}
+
+void set_event_lead_listener(void (*fn)(uint32_t handle, int entity, int anim, bool start)) { g_lead_fn = fn; }
+
+void remote_event_lead(uint32_t handle, int entity, int anim, bool start, uint64_t leader) {
+    if (!seamless_rules() || static_cast<int>(handle) < 0) return;
+    if (!g_lead_self) g_lead_self = steam::self();
+    EventLead* l = find_lead(handle);
+    if (!start) {
+        if (l && !l->mine && l->leader == leader) end_lead(handle, "its game said so");
+        return;
+    }
+    if (l && l->mine) {
+        if (g_lead_self < leader) return;  // ours stands; that game hears ours and follows
+        if (++g_lead_lines <= 120) {
+            LOG_INFO("[coop] Animation %d on %d (%08X) began in another game too: that game moves it", anim, entity,
+                     handle);
+        }
+        g_leads.erase(g_leads.begin() + (l - g_leads.data()));
+        l = nullptr;
+    }
+    if (!l) {
+        if (g_leads.size() >= kMaxLeads) return;
+        g_leads.push_back(EventLead{});
+        l = &g_leads.back();
+    }
+    l->handle = handle;
+    l->entity = entity;
+    l->anim = anim;
+    l->since = seconds();
+    l->leader = leader;
+    l->mine = false;
+    publish_leads();
+    if (++g_lead_lines <= 120) {
+        const uint32_t chr = chr_by_net_handle(handle);
+        LOG_INFO("[coop] Animation %d on %d (%08X) began in another player's game: that game moves it until it ends "
+                 "(%s here)", anim, entity, handle, chr ? mover(chr) : "not loaded");
+    }
+}
+
+bool install_own_test() {
+    // push esi ; mov esi,[ecx+2B4h]
+    static const uint8_t k[7] = {0x56, 0x8B, 0xB1, 0xB4, 0x02, 0x00, 0x00};
+    g_own_test_orig = detour(kOwnTest, k, sizeof(k), reinterpret_cast<void*>(&hk_own_test));
+    return g_own_test_orig != nullptr;
+}
+
 void __stdcall note_ai_state(int entity, int state) {
     if (gauge_boss(entity)) {
         if (state) {
@@ -4451,8 +4736,15 @@ void anim_watch_tick() {
              ai_off_here(g_watch_chr) ? "off" : "on", at.x, at.y, at.z, bid);
 }
 
-void note_event_anim(uint32_t chr, int anim) {
+void note_event_anim(uint32_t chr, int anim, bool loop) {
     if (!g_state.active || GetCurrentThreadId() != g_main_thread || !chr || chr == game::player()) return;
+    if (g_cur_event) {
+        uint32_t id = 0, by = 0;
+        read32(g_cur_event + 0x28, &id);
+        read32(g_cur_event + 0x44, &by);
+        lead_event_anim(chr, anim, loop, static_cast<int>(by) >= 10001 && static_cast<int>(by) <= 10010,
+                        static_cast<int>(id));
+    }
     if (g_cur_event) {
         uint32_t team = 0;
         if (read32(chr + 0x74, &team) && team == kBossTeam) {
@@ -4704,6 +4996,7 @@ int install() {
     }
     failed += install_one("enemies moved by a game whose player is near",
                           redirect_call(kNetPrioritySite, kNetPriority, reinterpret_cast<void*>(&hk_net_priority)));
+    failed += install_one("event animations moved by the game that began them", install_own_test());
     failed += install_one("Black Separation Crystal (guest)",
                           redirect_call(kSepGuestSite, kSepGuestOrig, reinterpret_cast<void*>(&hk_separation_guest)));
     failed += install_one("Black Separation Crystal (host)",
@@ -4932,9 +5225,11 @@ void tick() {
     track_boss_control();
     own_gauge_tick();
     boss_handover_tick();
+    boss_copy_tick();
     anim_timeline_tick();
     party_team_tick();
     anim_watch_tick();
+    lead_tick();
     invader_walls_tick();
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();

@@ -17,6 +17,8 @@
 // A game sends at most one update a frame: one drawing fewer frames a second than the rate sends every frame (25 a
 // second at 25 FPS), and the others' games take the gap as it comes.
 
+#include <cstdint>
+
 namespace coop::netrate {
 
 constexpr int kVanilla = 6;         // the game's own rate: every 5 frames at 30 FPS
@@ -28,6 +30,23 @@ constexpr int kMaxSmoothing = 200;  // ms
 bool install();
 // NetworkSmoothing in ms (0 .. kMaxSmoothing): the margin for late updates above the game's own rate.
 void set_smoothing(int ms);
+// DynamicSmoothing: each other player's character and each enemy copy gets its own margin from how evenly its updates
+// come (16 ms .. kMaxSmoothing; NetworkSmoothing is where it starts). Off: NetworkSmoothing for all.
+void set_dynamic(bool on);
+// The smoothing in ms that a character's network manipulator (chr+0x2C of another player's character, or of an
+// enemy another game moves) is drawn with now, -1 when none (the game's own rate, or no update lately).
+int smoothing_ms(uint32_t manip);
+// A copy's updates since the last call (which resets the counts): how many, how many jumped, its smoothing, jitter
+// and mean gap, and (an enemy) its speed between the last two updates. False if the manipulator has none.
+struct CopyStats {
+    int updates = 0;
+    int jumps = 0;
+    int smoothing_ms = 0;
+    int jitter_ms = 0;
+    int gap_ms = 0;
+    float speed = 0;
+};
+bool copy_stats(uint32_t manip, CopyStats* out);
 // Every frame on the game thread: send `rate` updates a second (kVanilla .. kMax), and receive as that rate wants.
 void tick(int rate);
 

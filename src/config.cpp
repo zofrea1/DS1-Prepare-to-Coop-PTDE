@@ -40,6 +40,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.net_rate = std::atoi(val.c_str());
         } else if (key == "networksmoothing") {
             c.net_smoothing = std::atoi(val.c_str());
+        } else if (key == "dynamicsmoothing") {
+            c.dynamic_smoothing = settings_parse_bool(val);
         } else if (key == "enemyhealthscaling") {
             c.enemy_health = std::atoi(val.c_str());
         } else if (key == "enemydamagescaling") {

@@ -99,6 +99,8 @@ enum MsgType : uint8_t {
     kHomewardAsk = 32,   // 1.3.0, co-op guest -> host: my Homeward Bone, Darksign or Homeward miracle (Simple: its
                          // HomewardKind); the host's trip takes everyone (a host whose StateMore4 says it takes them)
     kNpcTalk = 33,       // 1.3.0, anyone -> all (through the host): an NPC says a line in my game, or stops (talk.cpp)
+    kEventLead = 34,     // 1.4.0, anyone -> all (through the host): my game moves this character through an event's
+                         // animation until it ends (EventLeadMsg; rules.cpp, lead_event_anim)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -308,6 +310,14 @@ struct AnimDoneMsg {
     Header h;
     int32_t entity;  // the character's entity id
     int32_t anim;    // the animation the event waited for (rules.cpp, follow_wait)
+};
+struct EventLeadMsg {
+    Header h;
+    uint32_t handle;  // the character's net handle (chr+0x78), the same in every game
+    int32_t entity;   // its entity id if the sender knows it, else -1 (log)
+    int32_t anim;
+    uint8_t start;    // 1 the move began, 0 it is over
+    uint64_t leader;  // the game that moves it (Steam id); the host relays it
 };
 struct NpcTalkMsg {
     Header h;
@@ -3821,6 +3831,18 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!g_invade) rules::remote_anim_done(m.entity, m.anim);
             break;
         }
+        case kEventLead: {
+            EventLeadMsg m;
+            if (!as(&m) || peer(from)->invader) return;
+            if (g_role == Role::Host) {
+                m.leader = from;
+                broadcast(m, true, from);
+            } else if (from != g_host) {
+                return;
+            }
+            if (!g_invade) rules::remote_event_lead(m.handle, m.entity, m.anim, m.start != 0, m.leader);
+            break;
+        }
         case kNpcTalk: {
             NpcTalkMsg m;
             if (!as(&m)) return;
@@ -4060,6 +4082,22 @@ void send_anim_done(int entity, int anim) {
     fill_header(&m, kAnimDone);
     m.entity = entity;
     m.anim = anim;
+    if (g_role == Role::Host) {
+        broadcast(m);
+    } else if (g_host && g_step == Step::InWorld && !g_invade) {
+        send_to(g_host, m);
+    }
+}
+
+void send_event_lead(uint32_t handle, int entity, int anim, bool start) {
+    if (g_role == Role::None || !g_lobby) return;
+    EventLeadMsg m{};
+    fill_header(&m, kEventLead);
+    m.handle = handle;
+    m.entity = entity;
+    m.anim = anim;
+    m.start = start ? 1 : 0;
+    m.leader = steam::self();
     if (g_role == Role::Host) {
         broadcast(m);
     } else if (g_host && g_step == Step::InWorld && !g_invade) {
@@ -4503,6 +4541,7 @@ void set_callbacks() {
     rules::set_bonfire_warp_listener(&send_bonfire_warp);
     rules::set_bonfire_lit_listener(&send_bonfire_lit);
     rules::set_anim_done_listener(&send_anim_done);
+    rules::set_event_lead_listener(&send_event_lead);
     talk::set_listener(&send_npc_talk);
     rules::set_cutscene_listener(&on_cutscene);
     rules::set_separation_listener([](bool host) { g_separation = host ? 2 : 1; });
@@ -5373,8 +5412,14 @@ uint32_t chr_of_bar(uint32_t rec) {
     return rules::chr_of_handle(handle);
 }
 
-// The text for player `p`'s floating bar; `mine` picks its buffers.
-const wchar_t* plate_text(const PeerInfo& p, int mine) {
+// The smoothing our game draws a character with (netrate, DynamicSmoothing), -1 none: its network manipulator.
+int chr_smoothing(uint32_t chr) {
+    uint32_t manip = 0;
+    return chr && read32(chr + 0x2C, &manip) ? netrate::smoothing_ms(manip) : -1;
+}
+
+// The text for player `p`'s floating bar; `mine` picks its buffers, `chr` is their character here (0 unknown).
+const wchar_t* plate_text(const PeerInfo& p, int mine, uint32_t chr) {
     const int mode = g_cfg.overhead_display;
     const std::wstring shown_as = shown_name(p).substr(0, 16);
     const wchar_t* who = shown_as.c_str();
@@ -5392,7 +5437,17 @@ const wchar_t* plate_text(const PeerInfo& p, int mine) {
         case 1: swprintf_s(out, kCap, L"(%ls, %ls)", who, ms); break;
         case 2: swprintf_s(out, kCap, L"(%ls, SL: %d)", who, p.soul_level); break;
         case 3: swprintf_s(out, kCap, L"(%ls, deaths: %d)", who, p.deaths); break;
-        default: swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", who, p.soul_level, ms); break;
+        case 4: swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", who, p.soul_level, ms); break;
+        default: {
+            // The smoothing ("lerp", as the shooters' net graphs call their interpolation delay).
+            const int lerp = chr_smoothing(chr);
+            if (lerp >= 0) {
+                swprintf_s(out, kCap, L"(%ls, SL: %d, %ls, lerp %dms)", who, p.soul_level, ms, lerp);
+            } else {
+                swprintf_s(out, kCap, L"(%ls, SL: %d, %ls)", who, p.soul_level, ms);
+            }
+            break;
+        }
     }
     return out;
 }
@@ -5423,13 +5478,14 @@ const wchar_t* __stdcall nameplate_for(const wchar_t* shown, uint32_t rec) {
         if (n >= 4) break;
         if (now() - p.last_seen <= 10.0) live[n++] = &p;
     }
+    const uint32_t bar_chr = chr_of_bar(rec);
     for (int i = 0; i < n; ++i) {
-        if (by_name(*live[i])) return plate_text(*live[i], i);
+        if (by_name(*live[i])) return plate_text(*live[i], i, bar_chr);
     }
-    const auto it = g_chr_peer.find(chr_of_bar(rec));
+    const auto it = g_chr_peer.find(bar_chr);
     if (it == g_chr_peer.end()) return nullptr;
     for (int i = 0; i < n; ++i) {
-        if (live[i]->id == it->second) return plate_text(*live[i], i);
+        if (live[i]->id == it->second) return plate_text(*live[i], i, bar_chr);
     }
     return nullptr;
 }

@@ -130,8 +130,14 @@ void arm_trip_reload();
 // connected blocks), instead of ours. Null when done, else why not (no floor, its block not loaded here).
 const char* draw_from(uint32_t chr);
 // An event animation starts on a character other than ours (motion.cpp's hook): bosses and watched enemies are
-// followed for a few seconds in the log (diagnostic).
-void note_event_anim(uint32_t chr, int anim);
+// followed for a few seconds in the log (diagnostic), and the game whose own event run began it moves the character
+// until it ends (the others are told through set_event_lead_listener).
+void note_event_anim(uint32_t chr, int anim, bool loop);
+// Our game began (start) or ended a scripted move of a character (its net handle, the same in every game): `fn`
+// tells the others, who follow ours meanwhile.
+void set_event_lead_listener(void (*fn)(uint32_t handle, int entity, int anim, bool start));
+// Another player's game (Steam id `leader`) said so.
+void remote_event_lead(uint32_t handle, int entity, int anim, bool start, uint64_t leader);
 
 // Per-frame record of where the local player stood, for the bloodstain of a guest who dies in the host's world.
 void track_safe_position();

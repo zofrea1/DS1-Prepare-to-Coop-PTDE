@@ -13,22 +13,24 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
 
-## What's new in 1.2.0
+## What's new in 1.3.0
 
-- **Anyone can travel.** A guest's bonfire warp takes everyone along, to any bonfire the host's own warp could reach.
-- **Your keys come with you** into the host's world, when the host has them too.
-- **Keep your seat.** A player already sitting at a bonfire when a teammate's boss fight starts can still level up, attune, use the box, kindle or reverse hollowing.
-- **The Darksign** takes everyone home like the Homeward Bone, at the cost of the host's souls and humanity.
-- **YOUR TEAM DIED** after a team wipe, and **invaders can drink Estus** (up to 5 charges per invasion).
-- **Fixes**: guests no longer fall through the world after following a warp, and another player's character no longer comes back intangible and without attacks after a respawn.
+- **NPC summons** (Solaire and the other white signs) appear for every player, and **NPC voice lines** are heard, with their subtitles, by everyone near the NPC.
+- **One-time drops and boss rewards reach every player**: a Black Knight's, a lizard's, a boss's, also for a player whose game was loading, far away or down.
+- **Guests can use the Homeward Bone, the Darksign and the Homeward miracle**; the bone costs everyone a bone and works in a boss fight, the Darksign costs everyone's souls and humanity and works anytime.
+- **Up to ten times the network updates** (`NetworkTickRate`, `NetworkSmoothing`): other players and enemies are drawn much closer to where they are.
+- **An attack is never cut short** when an enemy changes hands between games.
+- **Invasions**: invaders of one world are a team, a cooldown between invasions (`InvasionCooldown`), invaders are told why no world can take them, and boss fog sealing is optional (`SealBossFogsDuringInvasions`).
+- Guests use the host's enemy scaling, posture scaling works, an update notice on the title screen, and the settings file is now `PTDE-Coop-FPS-Unlock.ini`.
+- **Fixes**: a join crash, the host turning invisible, lost Crimson Blossoms, empty or wrong nameplates, a lost lobby after a network drop, and a skipped cutscene warping the slower player.
 
-The full list is in the [1.2.0 release notes](release-notes/v1.2.0.md). 1.1.0, a major update, made the session one shared world with teamwork rules: boss fights and invasions won or lost together, deaths that keep the world, Crimson Blossoms ([1.1.0 release notes](release-notes/v1.1.0.md)).
+The full list is in the [1.3.0 release notes](release-notes/v1.3.0.md). 1.2.0 made travel shared and brought your keys along ([1.2.0 release notes](release-notes/v1.2.0.md)); 1.1.0, a major update, made the session one shared world with teamwork rules: boss fights and invasions won or lost together, deaths that keep the world, Crimson Blossoms ([1.1.0 release notes](release-notes/v1.1.0.md)).
 
 ## Requirements
 
 - Dark Souls: Prepare to Die Edition, the current Steam build (the same check as the FPS Unlock's).
 - Steam running. While Prepare to Co-op is on, the game runs as Steam's Spacewar (app 480): Prepare to Die Edition's own Steam lobbies were switched off in 2022, and Spacewar is the long-standing community route for its multiplayer. Steam shows you as playing Spacewar.
-- Everyone in a session uses the same `Password`. Prepare to Co-op 1.0.0, 1.1.0 and 1.2.0 play together, but the team rules (spectating, wipes, the rest lock, deaths that keep the world) need everyone on 1.1.0 or later, and guest travel and carried keys need the host on 1.2.0.
+- Everyone in a session uses the same `Password`. Prepare to Co-op 1.0.0 to 1.3.0 play together, but the team rules (spectating, wipes, the rest lock, deaths that keep the world) need everyone on 1.1.0 or later, guest travel and carried keys need the host on 1.2.0 or later, and what is new in 1.3.0 needs the players involved on 1.3.0. Update together.
 - Works with DSfix (set `unlockFPS 0` in `DSfix.ini` if the FPS unlock is on).
 
 ## Install
@@ -58,7 +60,7 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 
 The items are used like any other item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1** host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Another player's floating health bar shows their character's name with their soul level and ping (`OverheadPlayerDisplay`): everyone sees everyone's, invaders included, except a player under Chameleon, who has none. Joins, departures, deaths and rule changes are told at the bottom of the screen, by character name. If a player's connection drops (a crash, a lost network, a Steam Deck put to sleep), the others are told within seconds and that player is sent home.
 
-Prepare to Co-op 1.0.0, 1.1.0 and 1.2.0 use the same co-op protocol, so their players join and invade each other (each version's new features work between players who have it). When a later version has to change the protocol, players who cannot play together are told so instead of "No sessions found": three times at the bottom of the screen, with the versions and who needs to update. A host is told the same when such a player tries to join (from 1.1.0 on; Prepare to Co-op 1.0.0 itself only says "Failed to connect").
+Prepare to Co-op 1.0.0, 1.1.0, 1.2.0 and 1.3.0 use the same co-op protocol, so their players join and invade each other (each version's new features work between players who have it). When a later version has to change the protocol, players who cannot play together are told so instead of "No sessions found": three times at the bottom of the screen, with the versions and who needs to update. A host is told the same when such a player tries to join (from 1.1.0 on; Prepare to Co-op 1.0.0 itself only says "Failed to connect").
 
 ## Playing together
 
@@ -83,7 +85,7 @@ Prepare to Co-op 1.0.0, 1.1.0 and 1.2.0 use the same co-op protocol, so their pl
 
 **World rules.** The Ominous Tome makes co-op allies hostile to each other (everyone fights everyone) or splits them into teams (the host against the guests); invaders are always hostile. The Cursed Pendant makes a world pure black World Tendency until it is used again, and Dried Fingers draws invaders to it.
 
-**Enemies.** Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`); bosses (every enemy with a boss health bar) use their own row, and the game's own extra boss health for co-op is left out. Each game scales its own copy of an enemy, so health bars drain correctly with extra players. Each enemy is moved by one game, normally the one whose player is nearest and whose copy of it is awake; a game far away, a sleeping copy, and a player who fell defer to a standing player nearby.
+**Enemies.** Every enemy gets more health, damage and poise per extra co-op player (`EnemyHealthScaling` ... `BossPostureScaling`); bosses (every enemy with a boss health bar) use their own row, and the game's own extra boss health for co-op is left out. Each game scales its own copy of an enemy, so health bars drain correctly with extra players. Each enemy is moved by one game, normally the one whose player is nearest and whose copy of it is awake; a game far away, a sleeping copy, and a player who fell defer to a standing player nearby. An attack the enemy has begun plays to its natural end before another game takes it over, so a change of hands never cuts a swing short or turns it into another; targets, turning and the AI's choices stay the game's own. The host's scaling settings are used in every game of its world.
 
 **Light.** Another player's Skull Lantern, Cast Light or Sunlight Maggot also lights your game.
 

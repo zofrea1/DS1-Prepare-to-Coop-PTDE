@@ -3666,7 +3666,7 @@ int apply_world_globals(const uint8_t* data, size_t size, std::string* changes) 
 // guest rested at the Undead Burg bridge bonfire, the host's game at Firelink won the Hellkite (the event
 // "Set Network Update Authority" gives both games 4095), and the guest's dragon followed the host's copy, which
 // had landed with no floor loaded so far from the host and fell through the bridge (2026-10-13). A game whose
-// player is beyond the 64 m of the distance term bids the least (1) while another player stands nearer the enemy:
+// player is beyond the 64 m of the distance term bids the least (kBidFar) while another player stands nearer the enemy:
 // the nearer player's game wins whenever it bids at all. Until 1.4.0 it did not bid then, which left an enemy with
 // no game when the nearer player's game had no bid of its own for it: the Hellkite that flies over the Undead Burg's
 // first bridge (1010302) waits out of sight, 83 to 102 m from a player in Firelink Shrine and 93 m from one on the
@@ -3683,7 +3683,7 @@ float dist3(const game::Vec3& a, const game::Vec3& b) {
 }
 
 // The world's events switch an enemy's AI on and off in each game by that game's own player (Set Character AI State,
-// ChrCtrl+0xC0 bit 0), so the copies can differ. A game whose copy has its AI off bids the least (1) while another
+// ChrCtrl+0xC0 bit 0), so the copies can differ. A game whose copy has its AI off bids low (kBidAiOff) while another
 // player is near enough to take the enemy, so it goes to a game where its AI runs; a player who fell counts too
 // (their game still runs the enemy while they spectate). It still bids: a boss whose copies all sleep (the Asylum
 // Demon on its perch, AI off in every game) must still be moved by some game. With no bid at all it was nobody's
@@ -3698,9 +3698,16 @@ bool ai_off_here(uint32_t chr) {
 // A player who fell is no one for an enemy to fight, but the bid's nearness term counts from their body: a guest
 // who fell in the Taurus Demon's arena outbid the host fighting it 9 m away, and the demon walked back to the body
 // until the host came closer (2026-10-18). While a standing player is near the enemy, a fallen player's game bids
-// the least but one (2): a standing player's game wins, unless its copy sleeps (1), when the fallen player's game,
+// low (kBidFallen): a standing player's game wins, unless its copy sleeps (kBidAiOff), when the fallen player's game,
 // whose copy runs, keeps the enemy.
-constexpr uint32_t kBidFallen = 2;
+// The low bids, lowest first: a game whose player is beyond the distance term's 64 m while another player is nearer
+// (kBidFar), one whose copy sleeps while another player is near (kBidAiOff), one whose player fell while a standing
+// player is near (kBidFallen). Each replaces a bid the game made itself (0xE6D250 says nothing at all for an enemy
+// that game does not update), so none of them adds an enemy to the bidding; they only order the games that already
+// bid: a nearer standing player's game always wins, and the enemy is never left with no game.
+constexpr uint32_t kBidFar = 1;
+constexpr uint32_t kBidAiOff = 2;
+constexpr uint32_t kBidFallen = 3;
 constexpr uint32_t kBidCap = 0x7FFF;  // the game's own cap (0xE6D250)
 
 // The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
@@ -3743,7 +3750,7 @@ uint32_t net_priority(uint32_t chr) {
                 LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): its AI is off in this game; the lowest bid from here "
                          "while another player is near it", chr, at.x, at.y, at.z);
             }
-            return 1;  // the bid's high word (0xE56270 packs bid << 16 | index); the highest wins
+            return kBidAiOff;  // the bid's high word (0xE56270 packs bid << 16 | index); the highest wins
         }
     }
     const float mine = dist3(me, at);
@@ -3758,7 +3765,7 @@ uint32_t net_priority(uint32_t chr) {
                          "in map %08X is %.0f m away)",
                          chr, at.x, at.y, at.z, mine, p.map, theirs);
             }
-            return 1;
+            return kBidFar;
         }
     }
     return bid;

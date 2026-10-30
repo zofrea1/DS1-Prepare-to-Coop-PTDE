@@ -23,4 +23,5 @@ src\coop\talk.cpp
 src\coop\deathtext.cpp
 src\coop\summons.cpp
 src\coop\netrate.cpp
+src\coop\players.cpp
 src\coop\updates.cpp

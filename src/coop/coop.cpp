@@ -10,6 +10,7 @@
 #include "log.h"
 #include "motion.h"
 #include "netrate.h"
+#include "players.h"
 #include "rules.h"
 #include "session.h"
 #include "spectate.h"
@@ -336,6 +337,7 @@ void tick_body() {
     coop::deathtext::tick();
     coop::spectate::tick();
     coop::netrate::tick(coop::session::net_rate());
+    coop::players::tick();
     coop::updates::tick();
     if (g_items) {
         coop::items::tick();
@@ -367,6 +369,8 @@ void coop_install_early(const CoopConfig& config) {
     g_enabled = g_cfg.enabled;
     if (!g_enabled) return;
     patch_save_extension(g_cfg.save_extension);
+    // Before the game makes its session and character managers.
+    coop::players::install_early(g_cfg.max_players);
     g_steam_hooked = coop::steam::install_early(static_cast<uint32_t>(g_cfg.app_id), &tick,
                                                 coop::session::game_tag(g_cfg.password));
 }
@@ -376,8 +380,10 @@ void coop_install(const CoopConfig& config) {
         LOG_INFO("[coop] Prepare to Co-op: off");
         return;
     }
-    LOG_INFO("[coop] Prepare to Co-op: on (Steam app %d, password %s, invaders %s, max 4 players)", g_cfg.app_id,
-             g_cfg.password[0] ? "set" : "EMPTY", g_cfg.allow_invaders ? "allowed" : "off");
+    LOG_INFO("[coop] Prepare to Co-op: on (Steam app %d, password %s, invaders %s, max %d players)", g_cfg.app_id,
+             g_cfg.password[0] ? "set" : "EMPTY", g_cfg.allow_invaders ? "allowed" : "off",
+             coop::players::max_players());
+    coop::players::log_status();
     LOG_INFO("[coop] %s", g_save_report.c_str());
     if (!g_steam_hooked) {
         LOG_ERROR("[coop] Could not hook the game's Steam calls; Prepare to Co-op is unavailable.");
@@ -436,6 +442,7 @@ void coop_install(const CoopConfig& config) {
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
+    cfg.max_players = coop::players::max_players();
     const int scaling[6] = {g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture,
                             g_cfg.boss_health,  g_cfg.boss_damage,  g_cfg.boss_posture};
     std::copy(std::begin(scaling), std::end(scaling), cfg.scaling);

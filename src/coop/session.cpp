@@ -217,7 +217,8 @@ struct InfoMore3 {
 struct InfoMore4 {
     InfoMore3 more3;
     uint8_t disguised;  // Chameleon is on the sender (SpEffect 1500): the others hide their floating health bar
-    uint8_t spare[3];
+    uint8_t max_players;  // 1.4.0: the players the sender's game can hold (MaxPlayers, players.cpp); 0 = the game's 4
+    uint8_t spare[2];
 };
 struct BonfireMsg {
     Header h;
@@ -344,6 +345,12 @@ struct FlagsMsg {
         uint8_t on;
     } f[kFlagsPerMsg];
 };
+// 1.4.0, behind Hello: an older host copies the Hello part and ignores the rest.
+struct HelloMore {
+    Hello hello;
+    uint8_t max_players;  // the players the joiner's game can hold (MaxPlayers); an older joiner's game holds 4
+    uint8_t spare[3];
+};
 #pragma pack(pop)
 // How much of a hello 1.0.0 sends: a host reads at least this much, and the version only when it is there.
 constexpr size_t kHelloV1Size = offsetof(Hello, version);
@@ -446,6 +453,7 @@ struct Pending {
     bool invade = false;
     double since = 0;
     bool knows_refusals = false;  // 1.3.0 or later (kRefusalsVersion): an invader is told kBossFight and kCooldown
+    int max_players = 4;          // what the joiner's game can hold (HelloMore)
 };
 
 struct RestPoint {
@@ -1548,9 +1556,20 @@ void host_answer(const Pending& p) {
     // NPC phantoms do not count: four players always fit, with NPCs on top. The party list has four entries, so with
     // four players and an NPC one character has none in each game (no floating health bar for them); a 1.2.0 host's
     // world held four players and an NPC so (2026-10-25).
+    // Above the game's four every game in the session needs room for one more (MaxPlayers, players.cpp): one that
+    // holds four could not make the fifth player's character, nor the fifth anyone else's.
     int in_session = 1;
-    for (uint64_t id : g_admitted) in_session += id == p.from ? 0 : 1;
-    if (in_session >= g_cfg.max_players) w.status = kFull;
+    int room = std::min(g_cfg.max_players, p.max_players);
+    for (uint64_t id : g_admitted) {
+        if (id == p.from) continue;
+        ++in_session;
+        int theirs = 4;
+        for (const PeerInfo& q : g_peers) {
+            if (q.id == id && q.max_players > 0) theirs = q.max_players;
+        }
+        room = std::min(room, theirs);
+    }
+    if (in_session >= room) w.status = kFull;
     if (p.invade && !g_cfg.allow_invaders) w.status = kRefused;
     // InvasionCooldown: no invader for a while after an invasion of our world ended. Checked before a boss fight: the
     // wait is the least the invader has to wait in any case.
@@ -2319,7 +2338,9 @@ void host_tick() {
 
 // ---------------------------------------------------------------- guest
 void guest_send_hello() {
-    Hello h{};
+    HelloMore more{};
+    more.max_players = static_cast<uint8_t>(g_cfg.max_players);
+    Hello& h = more.hello;
     fill_header(&h, kHello);
     h.protocol = g_protocol;
     h.invade = g_invade ? 1 : 0;
@@ -2327,7 +2348,7 @@ void guest_send_hello() {
     strncpy_s(h.name, utf8(own_name()).c_str(), _TRUNCATE);
     strncpy_s(h.version, g_version.c_str(), _TRUNCATE);
     steam::accept(g_host);
-    send_to(g_host, h);
+    send_to(g_host, more);
     ++g_hello_tries;
     set_step(Step::Hello);
 }
@@ -3128,6 +3149,7 @@ void send_info() {
     more2.event_anim = held < 0 ? 1 : held;  // held with no id known: still "held" (-1 is "not reported")
     more3.bones = items::count(kHomewardBone);
     more4.disguised = me && !game::loading() && world::has_effect(me, kChameleonEffect) ? 1 : 0;
+    more4.max_players = static_cast<uint8_t>(g_cfg.max_players);
     broadcast(more4, false);
 }
 
@@ -3440,7 +3462,14 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             g_pending.erase(std::remove_if(g_pending.begin(), g_pending.end(),
                                            [from](const Pending& q) { return q.from == from; }),
                             g_pending.end());
-            g_pending.push_back(Pending{from, m.invade != 0, now(), compare_versions(them.mod, kRefusalsVersion) >= 0});
+            Pending pending{from, m.invade != 0, now(), compare_versions(them.mod, kRefusalsVersion) >= 0};
+            if (size >= sizeof(HelloMore)) {
+                HelloMore more{};
+                std::memcpy(&more, data, sizeof(more));
+                if (more.max_players >= 4) pending.max_players = more.max_players;
+            }
+            p->max_players = pending.max_players;
+            g_pending.push_back(pending);
             break;
         }
         case kWelcome: {
@@ -3529,6 +3558,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             p->bones = as(&more3) ? more3.bones : -1;
             InfoMore4 more4{};
             p->disguised = as(&more4) && more4.disguised != 0;
+            if (as(&more4) && more4.max_players >= 4) p->max_players = more4.max_players;
             p->boss_fight = more_ok && more.boss_fight != 0;
             p->team_respawn = more_ok && more.team_respawn != 0;
             if (more_ok && (more.respawn & kRespawnPhase) == kRespawnWent && g_role == Role::Guest && from == g_host) {
@@ -4597,7 +4627,7 @@ std::string game_tag(const std::string& password) { return "g" + password_key(pa
 
 void configure(const Config& cfg) {
     g_cfg = cfg;
-    g_cfg.max_players = std::max(2, std::min(4, g_cfg.max_players));
+    g_cfg.max_players = std::max(2, std::min(kMaxSessionPlayers, g_cfg.max_players));
     g_cfg.net_rate = std::max(netrate::kVanilla, std::min(netrate::kMax, g_cfg.net_rate));
     g_cfg.invasion_cooldown_s = std::max(0, std::min(10 * 60, g_cfg.invasion_cooldown_s));
     g_key = password_key(g_cfg.password);
@@ -5376,8 +5406,8 @@ constexpr uint32_t kFloatingNameB = 0x00FA8BDF;
 void* g_name_set = nullptr;
 // Three buffers per companion. One update sets two widgets, and a setter that keeps the pointer must see a
 // different buffer on the next update or the soul level and ping stay at whatever the first frame copied.
-wchar_t g_nameplate[4][3][96] = {};
-int g_nameplate_n[4] = {};
+wchar_t g_nameplate[kMaxSessionPlayers][3][96] = {};
+int g_nameplate_n[kMaxSessionPlayers] = {};
 
 bool read_shown_name(const wchar_t* at, wchar_t* out, int cap) {
     if (!at || cap < 2) return false;
@@ -5472,10 +5502,10 @@ const wchar_t* __stdcall nameplate_for(const wchar_t* shown, uint32_t rec) {
                          member_is(p.id));
     };
     // The players heard from lately, in order: the index picks the buffers.
-    const PeerInfo* live[4] = {};
+    const PeerInfo* live[kMaxSessionPlayers] = {};
     int n = 0;
     for (const auto& p : g_peers) {
-        if (n >= 4) break;
+        if (n >= kMaxSessionPlayers) break;
         if (now() - p.last_seen <= 10.0) live[n++] = &p;
     }
     const uint32_t bar_chr = chr_of_bar(rec);

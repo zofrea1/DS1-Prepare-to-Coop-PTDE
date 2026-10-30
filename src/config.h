@@ -43,6 +43,9 @@ struct CoopConfig {
     // Each player's own: the smoothing follows each other player's (and each enemy copy's) connection, from 16 ms on
     // an even one up to 200 ms on a poor one, starting at NetworkSmoothing. false = NetworkSmoothing for all.
     bool dynamic_smoothing = true;
+    // Players in a session, the host and every guest and invader together (2 to 8). The game holds 4; above that
+    // the co-op makes room for more (players.cpp). NPC summons do not count.
+    int max_players = 4;
     // Enemy and boss scaling per extra player, in percent.
     int enemy_health = 45;
     int enemy_damage = 0;

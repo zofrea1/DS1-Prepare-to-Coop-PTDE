@@ -5,6 +5,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "players.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -24,6 +25,9 @@ constexpr uint32_t kRemoteState = 0x10;
 constexpr uint32_t kRemoteSize = 0x4C0;
 constexpr uint32_t kNameOffset = 0xA0;
 constexpr int kNameChars = 16;
+
+// The other players' slots: the game's three, or more with MaxPlayers (players.cpp).
+int remote_slots() { return players::max_players() - 1; }
 
 // Game functions that take a member id by value (0x24 bytes, copied with 0x6F80F0, destroyed by the callee).
 constexpr uint32_t kMemberCopy = 0x006F80F0;   // thiscall(dst, const src*), ret 4
@@ -166,7 +170,9 @@ std::vector<Node> slot_nodes() {
     if (!sm || !read32(sm + kSlotList, &head) || !head || !read32(head, &node)) return out;
     for (int guard = 0; node && node != head && guard < 16; ++guard) {
         uint32_t slot = 0;
-        if (read32(node + 0x2C, &slot) && slot < 3) out.push_back({node + 8, static_cast<int>(slot)});
+        if (read32(node + 0x2C, &slot) && static_cast<int>(slot) < remote_slots()) {
+            out.push_back({node + 8, static_cast<int>(slot)});
+        }
         if (!read32(node, &node)) break;
     }
     return out;
@@ -231,7 +237,7 @@ bool party_reads_character(uint32_t chr) {
     }
     return false;
 }
-Made g_made[3];
+Made g_made[players::kMaxPlayers - 1];
 
 }  // namespace
 
@@ -281,7 +287,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
     const std::vector<Node> nodes = slot_nodes();
     const std::vector<Remote> list = remotes();
     for (const Remote& r : list) {
-        if (!r.data_ready || r.slot < 0 || r.slot > 2) continue;
+        if (!r.data_ready || r.slot < 0 || r.slot >= remote_slots()) continue;
         if (now() - g_queued_at[r.slot] < 5.0) continue;
         uint32_t member = 0;
         for (const Node& n : nodes) {

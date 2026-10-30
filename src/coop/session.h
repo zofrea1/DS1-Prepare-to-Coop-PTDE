@@ -11,6 +11,9 @@
 
 namespace coop::session {
 
+// The most players a session can hold (MaxPlayers): the game's own is 4 (players.cpp makes room for more).
+constexpr int kMaxSessionPlayers = 8;
+
 struct Config {
     std::string password;
     bool allow_invaders = true;
@@ -24,7 +27,7 @@ struct Config {
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul
     // level, ping and the smoothing their character is drawn with.
     int overhead_display = 5;
-    int max_players = 4;  // PTDE keeps three remote players (GameDataMan+0xC holds 3 x 0x4C0)
+    int max_players = 4;  // MaxPlayers: PTDE's own 4, or up to kMaxSessionPlayers with players.cpp's patches
     int net_rate = 6;     // NetworkTickRate: the session's updates a second (netrate.h), sent to the others
     // Hidden test keys: pretend to speak another protocol / be another version (0 / empty: the real ones).
     int test_protocol = 0;
@@ -63,6 +66,7 @@ struct PeerInfo {
     uint32_t hurt_list_sent = 0;  // the list of our world's hurt enemies last sent them while they were down
     int bones = -1;               // the Homeward Bones they hold, as they report it (1.3.0), -1 not reported
     bool disguised = false;       // Chameleon is on them (1.3.0): their floating health bar is hidden
+    int max_players = 0;          // the players their game can hold (1.4.0, MaxPlayers), 0 not reported (4)
 };
 
 void configure(const Config& cfg);

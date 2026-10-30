@@ -44,12 +44,16 @@ constexpr uint32_t kOwnPoiseSlot = 0x160;           // ChrIns vtable: own poise 
 
 // ---------------------------------------------------------------- our SpEffect rows
 // Remastered Seamless Co-op's rows and ids: enemy and boss scaling for 1..5 extra players, and the death debuff
-// for 1..5 Crimson Blossoms. SpEffectParam has the same 0x170-byte layout in both games.
-constexpr int kScaleEnemy = 2147418000;  // + (players - 1), 0..4
-constexpr int kScaleBoss = 2147418005;   // + (players - 1), 0..4
-constexpr int kDebuff = 2147419000;      // + (blossoms - 1), 0..4
-constexpr int kRow = 0x170;              // SP_EFFECT_PARAM_ST
-constexpr int kRows = 15;
+// for 1..5 Crimson Blossoms. SpEffectParam has the same 0x170-byte layout in both games. Sessions of more than six
+// (MaxPlayers, players.cpp) go on with ids of our own for 6 and 7 extra players.
+constexpr int kScaleEnemy = 2147418000;   // + (players - 1), 0..4
+constexpr int kScaleBoss = 2147418005;    // + (players - 1), 0..4
+constexpr int kScaleEnemy2 = 2147418010;  // + (players - 7), 0..1
+constexpr int kScaleBoss2 = 2147418012;   // + (players - 7), 0..1
+constexpr int kDebuff = 2147419000;       // + (blossoms - 1), 0..4
+constexpr int kRow = 0x170;               // SP_EFFECT_PARAM_ST
+constexpr int kMaxLevel = 7;              // extra players
+constexpr int kRows = 19;
 
 Config g_cfg;
 uint8_t g_rows[kRows][kRow];
@@ -59,6 +63,7 @@ void* g_fx_orig = nullptr;
 int row_index(int id) {
     if (id >= kScaleEnemy && id < kScaleEnemy + 10) return id - kScaleEnemy;
     if (id >= kDebuff && id < kDebuff + 5) return 10 + (id - kDebuff);
+    if (id >= kScaleEnemy2 && id < kScaleEnemy2 + 4) return 15 + (id - kScaleEnemy2);
     return -1;
 }
 
@@ -185,6 +190,10 @@ void build_rows() {
         scale_row(g_rows[5 + k], k + 1, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture);
         debuff_row(g_rows[10 + k], k + 1);
     }
+    for (int k = 0; k < 2; ++k) {
+        scale_row(g_rows[15 + k], 6 + k, g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture);
+        scale_row(g_rows[17 + k], 6 + k, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture);
+    }
     g_rows_ready = true;
 }
 
@@ -198,10 +207,14 @@ void build_rows() {
 // The posture rate of one of our scaling rows (n * percent / 100), 0 for any other row.
 float posture_rate(uint32_t row) {
     const auto* r = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(row));
-    if (r < g_rows[0] || r >= g_rows[10]) return 0;  // the enemy rows 0..4 and the boss rows 5..9
+    if (r < g_rows[0] || r >= g_rows[kRows]) return 0;
     const int i = static_cast<int>((r - g_rows[0]) / kRow);
-    const int percent = i < 5 ? g_cfg.enemy_posture : g_cfg.boss_posture;
-    const float rate = (i % 5 + 1) * (percent / 100.0f);
+    // The enemy rows 0..4 (levels 1..5) and 15..16 (6..7), the boss rows 5..9 and 17..18; 10..14 are the debuff's.
+    if (i >= 10 && i < 15) return 0;
+    const bool boss = (i >= 5 && i < 10) || i >= 17;
+    const int level = i < 10 ? i % 5 + 1 : 6 + (i - 15) % 2;
+    const int percent = boss ? g_cfg.boss_posture : g_cfg.enemy_posture;
+    const float rate = level * (percent / 100.0f);
     return rate < -1.0f ? -1.0f : rate;
 }
 
@@ -994,7 +1007,7 @@ void scale_tick() {
     if (now() - g_last_scale < 0.5) return;
     g_last_scale = now();
     int level = g_active ? g_players - 1 : 0;
-    level = std::max(0, std::min(5, level));
+    level = std::max(0, std::min(kMaxLevel, level));
     if (level != g_logged_level) {
         LOG_INFO("[coop] Enemy scaling level %d (%d co-op player(s)): health x%.2f, bosses x%.2f", level, level + 1,
                  level * (g_cfg.enemy_health / 100.0f) + 1.0f, level * (g_cfg.boss_health / 100.0f) + 1.0f);
@@ -1009,7 +1022,9 @@ void scale_tick() {
         read32(chr + 0x74, &team);
         const bool boss = static_cast<int>(team) == kBossTeam ||
                           std::find(gauge_bosses.begin(), gauge_bosses.end(), chr) != gauge_bosses.end();
-        const int want = level ? (boss ? kScaleBoss : kScaleEnemy) + level - 1 : 0;
+        const int want = !level      ? 0
+                         : level <= 5 ? (boss ? kScaleBoss : kScaleEnemy) + level - 1
+                                      : (boss ? kScaleBoss2 : kScaleEnemy2) + level - 6;
         auto it = g_scaled.find(chr);
         const int have = it == g_scaled.end() ? 0 : it->second;
         const auto fill = g_fill_hp.find(chr);

@@ -4538,6 +4538,9 @@ void end_lead(uint32_t handle, const char* why) {
 void lead_event_anim(uint32_t chr, int anim, bool loop, bool remote_run, int event) {
     if (!seamless_rules() || !g_world_events || loop || remote_run || game::loading()) return;
     if (chr == game::player() || is_remote_player(chr)) return;
+    // Not the host's people (team 8 Ally, 9 Hostile Ally): their state is the host's game's to keep.
+    uint32_t team = 0;
+    if (read32(chr + 0x74, &team) && (team == 8 || team == 9)) return;
     uint32_t handle = 0;
     if (!read32(chr + 0x78, &handle) || static_cast<int>(handle) < 0 || chr_by_net_handle(handle) != chr) return;
     if (!g_lead_self) g_lead_self = steam::self();

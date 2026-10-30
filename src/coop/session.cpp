@@ -9,6 +9,7 @@
 #include "log.h"
 #include "motion.h"
 #include "netrate.h"
+#include "players.h"
 #include "party.h"
 #include "rules.h"
 #include "spectate.h"
@@ -5435,6 +5436,8 @@ uint32_t chr_of_bar(uint32_t rec) {
     uint32_t mm = 0, gm = game::game_man(), party = 0, handle = 0xFFFFFFFF;
     if (!read32(0x013786D0, &mm) || !mm || rec < mm + 0x8F4) return 0;  // MenuMan
     const uint32_t slot = (rec - (mm + 0x8F4)) / 0x20;
+    // With more players the bars are fed from every other player's character (players.cpp), not party entry `slot`.
+    if (players::bars_fed()) return slot < 7 ? players::bar_chr(static_cast<int>(slot)) : 0;
     if (slot > 3 || !gm || !read32(gm + game::kGmParty, &party) || party < 0x10000 ||
         !read32(party + 0x18 + slot * 0x14, &handle)) {
         return 0;
@@ -5489,6 +5492,16 @@ const wchar_t* plate_text(const PeerInfo& p, int mine, uint32_t chr) {
 // its slot (`rec`, the caller's ebp): the slot's character, matched to its player as the world rules match them.
 const wchar_t* __stdcall nameplate_for(const wchar_t* shown, uint32_t rec) {
     if (g_role == Role::None) return nullptr;
+    // Which of the HUD's seven bars draw (for sessions of more than four: players.cpp feeds all seven).
+    static uint32_t drawn = 0;
+    uint32_t mm = 0;
+    if (read32(0x013786D0, &mm) && mm && rec >= mm + 0x8F4 && rec < mm + 0x8F4 + 7 * 0x20) {
+        const uint32_t bit = 1u << ((rec - (mm + 0x8F4)) / 0x20);
+        if (!(drawn & bit)) {
+            drawn |= bit;
+            LOG_INFO("[coop] Floating health bar %u draws (bars seen so far: %02X)", (rec - (mm + 0x8F4)) / 0x20, drawn);
+        }
+    }
     wchar_t name[24] = {};
     const bool named = read_shown_name(shown, name, 24) && wcslen(name) <= 16;
     auto member_is = [&](uint64_t id) {

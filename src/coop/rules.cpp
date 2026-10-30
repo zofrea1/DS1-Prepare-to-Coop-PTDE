@@ -3666,7 +3666,12 @@ int apply_world_globals(const uint8_t* data, size_t size, std::string* changes) 
 // guest rested at the Undead Burg bridge bonfire, the host's game at Firelink won the Hellkite (the event
 // "Set Network Update Authority" gives both games 4095), and the guest's dragon followed the host's copy, which
 // had landed with no floor loaded so far from the host and fell through the bridge (2026-10-13). A game whose
-// player is beyond the 64 m of the distance term does not bid while another player stands nearer the enemy.
+// player is beyond the 64 m of the distance term bids the least (1) while another player stands nearer the enemy:
+// the nearer player's game wins whenever it bids at all. Until 1.4.0 it did not bid then, which left an enemy with
+// no game when the nearer player's game had no bid of its own for it: the Hellkite that flies over the Undead Burg's
+// first bridge (1010302) waits out of sight, 83 to 102 m from a player in Firelink Shrine and 93 m from one on the
+// bridge; with the Firelink player a metre nearer, the bridge player's game gave up its bid, Firelink's had none (the
+// dragon was not active there), and nobody flew it (2026-10-29).
 constexpr uint32_t kNetPrioritySite = 0x00E40C26;
 constexpr uint32_t kNetPriority = 0x00E6D250;
 constexpr float kBidReach = 64.0f;
@@ -3749,11 +3754,11 @@ uint32_t net_priority(uint32_t chr) {
         if (theirs < mine) {
             static std::set<uint32_t> logged;
             if (logged.size() < 30 && logged.insert(chr).second) {
-                LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): no bid from here (we are %.0f m away, a player in map "
-                         "%08X is %.0f m away)",
+                LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): the lowest bid from here (we are %.0f m away, a player "
+                         "in map %08X is %.0f m away)",
                          chr, at.x, at.y, at.z, mine, p.map, theirs);
             }
-            return 0;
+            return 1;
         }
     }
     return bid;
@@ -4355,7 +4360,18 @@ void __fastcall follow_wait_update(uint32_t wait, uint32_t, float dt, uint32_t e
                          w.anim, w.entity, seconds() - w.started);
             }
         }
-        return;
+        // On a copy another game moves the game's own check can call it over at once, as it does in the game that
+        // moves it (0xE6CEC0, above): the event then went on at the start of the move, and the Hellkite's flight
+        // over the Undead Burg's bridge (11010790) switched its dragon off again in this game while the other game
+        // flew it (no log line at all, 2026-10-29). Such a wait, too, ends on that game's word or the time limit.
+        // Another player's character is theirs to end (below).
+        if (!(chr && elsewhere && g_world_events && seamless_rules() && !is_remote_player(chr))) return;
+        *ptr<uint8_t>(wait + 8) &= 0xFE;
+        if (!w.held && ++lines <= 60) {
+            LOG_INFO("[coop] Event %d: animation %d on %d called over here, but another game moves it: held for its "
+                     "word", w.event, w.anim, w.entity);
+        }
+        w.held = true;
     }
     if (!elsewhere || !g_world_events) return;
     const double waited = seconds() - w.started;

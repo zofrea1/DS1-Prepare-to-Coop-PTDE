@@ -1,7 +1,7 @@
 # More than four players (MaxPlayers)
 
-Status in 1.4.0: **experimental, off by default** (`MaxPlayers = 4`). Stage 1 is built and checked offline against the
-game's own code; it has not run with five or more players yet.
+Status in 1.4.0: **experimental, off by default** (`MaxPlayers = 4`). Stages 1 and 2 are built and checked offline
+against the game's own code; they have not run with five or more players yet.
 
 ## Is eight harder than six?
 
@@ -31,21 +31,29 @@ and needs eight copies of the game to test.
 Everything is checked against the bytes it replaces before anything is written; a build of the game that differs
 anywhere keeps four. The member limit is written last.
 
-## Not widened yet (stage 2)
+## Stage 2: the floating health bars
 
-- **The party list** (`PartyMemberInfo`, `[GameMan+0xBEC]`): four entries of 0x14 inline from +0x18, with its own
-  fields right after them (+0x74 NPC count, +0x78, +0x7C scripted summon, +0xAC). Its add (`0xEA2510`) looks for a
-  free entry and refuses when there is none, so a fifth player simply has none: **no floating health bar** over them,
-  none of the game's party bookkeeping (white/black/total counts stop at four, the summon effect and the "phantom
-  died" states). The mod's own code (deaths, spectating, scaling, travel) does not use it. Widening it means moving
-  either the entries or the fields after them and every access to them (`0xEA18A0`..`0xEA3390`, the bar filler
-  `0x1012C30`, party.cpp, summons.cpp).
-- **The floating health bars** (`MenuMan+0x8F4 + 0x20 * slot`, four records inline, one widget each): need more
-  records and widgets, fed from the party list.
-- **A per-slot table at `SessMan+0x1B4`** (packet type 4 values, three dwords): `0xD280E0` keeps `cmp eax, 2`, so the
-  values of players past the fourth are dropped rather than written past it. What the game uses them for is not known.
-- NPC summons take party entries too: with four players or more present they have none (no floating bar), as with
-  four players and an NPC in 1.3.0.
+The HUD already has **seven** floating health bars: their records (`MenuMan+0x8F4 + 0x20 * slot`) and the widget
+(`0xFA89C0`) and its filler (`0x1012C30`) all count to seven. What held them to four is the filler's source: bar
+`slot` showed party entry `slot` while `slot` was below the party's count, and the party list (`PartyMemberInfo`,
+`[GameMan+0xBEC]`, 0x8C bytes, four entries of 0x14 inline from +0x18 with its own fields right after) holds four,
+entry 0 our own character, which draws nothing. With more players the filler's two reads of the party (its count at
+`0x1012C47`, the entry's handle at `0x1012CDA`) take ours instead: the party's members but us, in the party's order,
+then every other player's character the party has no entry for (the player set, under the handle the game made it
+with), seven at most. The nameplate text (OverheadPlayerDisplay) follows the same list. The log says which bars draw
+("Floating health bar N draws").
+
+## Not widened
+
+- **The party list itself.** Its add (`0xEA2510`) looks for a free entry and refuses when there is none, so a fifth
+  player has no entry: none of the game's party bookkeeping (its white/black/total counts stop at four; the summon
+  effect and "phantom died" states, which the mod's own death and spectating rules replace for co-op players). Moving
+  its entries means about thirty accesses inside its methods and nine outside, and twenty-two outside read the field
+  after them (+0x7C); not needed for anything a player sees.
+- **NPC summons** take party entries: with four players or more present they have none (no floating bar, and the
+  game's own end-of-fight dismissal may not run for them in every game), as with four players and an NPC in 1.3.0.
+- **A "recently met" list at `SessMan+0x1B4`** (three names, its own bound) and the values `0xD280E0` writes into it
+  per slot (`cmp eax, 2` kept): players past the fourth are not added. Harmless.
 
 ## Testing
 

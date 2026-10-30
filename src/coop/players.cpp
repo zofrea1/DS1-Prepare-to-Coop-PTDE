@@ -22,9 +22,14 @@
 //  * WorldChrMan's player characters live in a set of four (+0x24, made by 0xE63C90: 4 x 0x20); the others are
 //    put in a free entry (0xE63F10) when they are made (0xEE2B10 -> 0xE40970).
 // All of it is widened here before the game makes these objects (from DllMain), each patch checked against the
-// bytes it replaces; nothing changes at four. Not widened: the party list (PartyMemberInfo, four entries inline;
-// its add 0xEA2510 looks for a free entry and refuses when there is none, so a fifth player simply has no entry:
-// no floating health bar, no party state of the game's own) and the floating health bars (MenuMan+0x8F4, four).
+// bytes it replaces; nothing changes at four. Not widened: the party list (PartyMemberInfo [GameMan+0xBEC], 0x8C
+// bytes: four entries of 0x14 inline from +0x18, its own fields right after them; its add 0xEA2510 looks for a free
+// entry and refuses when there is none, so a fifth player simply has no entry and none of the game's own party
+// bookkeeping). The floating health bars do not need it: the HUD has seven of them (records MenuMan+0x8F4 + 0x20 *
+// slot, slot < 7 in the widget 0xFA89C0 and in the filler 0x1012C30), which the filler fed from party entry `slot`
+// while `slot` < the party's count (+0x10), entry 0, our own character, drawing nothing. With more players the
+// filler takes its characters from bar_list instead: the party's entries but ours, then every other player's
+// character the party has no entry for (WorldChrMan's player set), seven at most.
 
 namespace coop::players {
 
@@ -212,6 +217,128 @@ __declspec(naked) void count_summon_type() {
     }
 }
 
+// ---------------------------------------------------------------- the floating health bars
+constexpr int kBars = 7;
+constexpr uint32_t kGameManVar = 0x013784A0;
+constexpr uint32_t kWorldChrManVar = 0x0137D644;
+uint32_t g_bar_handles[kBars] = {};
+uint32_t g_bar_chrs[kBars] = {};
+int g_bar_count = 0;
+bool g_bars = false;
+
+// A character handle's character (0x10000000 | block << 14 | place): WorldChrMan+0x240 + block * 4, as 0xE3E340.
+uint32_t chr_of_handle(uint32_t wcm, uint32_t handle) {
+    uint32_t set = 0, n = 0, entries = 0, chr = 0;
+    const uint32_t block = (handle >> 14) & 0x3F, at = handle & 0x3FFF;
+    if (handle == 0xFFFFFFFF || !read32(wcm + 0x240 + block * 4, &set) || !set || !read32(set, &n) || at >= n ||
+        !read32(set + 4, &entries) || !entries || !read32(entries + at * 0x20, &chr)) {
+        return 0;
+    }
+    return chr;
+}
+
+void __stdcall bar_list() {
+    g_bar_count = 0;
+    uint32_t gm = 0, pmi = 0, wcm = 0, self = 0;
+    if (!read32(kGameManVar, &gm) || !gm || !read32(kWorldChrManVar, &wcm) || !wcm) return;
+    read32(wcm + 0x3C, &self);
+    auto add = [&](uint32_t handle, uint32_t chr) {
+        if (g_bar_count >= kBars || !chr || chr == self) return;
+        for (int i = 0; i < g_bar_count; ++i) {
+            if (g_bar_chrs[i] == chr) return;
+        }
+        g_bar_handles[g_bar_count] = handle;
+        g_bar_chrs[g_bar_count] = chr;
+        ++g_bar_count;
+    };
+    // The party's members (players and NPC phantoms), in the party's order.
+    if (read32(gm + 0xBEC, &pmi) && pmi) {
+        for (int i = 0; i < 4; ++i) {
+            uint32_t handle = 0xFFFFFFFF;
+            if (read32(pmi + 0x18 + i * 0x14, &handle)) add(handle, chr_of_handle(wcm, handle));
+        }
+    }
+    // The other players' characters with no party entry (WorldChrMan+0x24: {count, entries of 0x20}; 0 is ours),
+    // under the handle the game made them with (0xE63F10: the players' block from [WorldChrMan+0x10]+0xC).
+    uint32_t n = 0, entries = 0, field = 0, block = 0;
+    if (!read32(wcm + 0x24, &n) || !read32(wcm + 0x28, &entries) || !entries || n > 64 || !read32(wcm + 0x10, &field) ||
+        !field || !read32(field + 0xC, &block)) {
+        return;
+    }
+    for (uint32_t s = 1; s < n; ++s) {
+        uint32_t chr = 0;
+        if (!read32(entries + s * 0x20, &chr) || !chr) continue;
+        const uint32_t handle = 0x10000000 | (block & 0x3F) << 14 | s;
+        if (chr_of_handle(wcm, handle) == chr) add(handle, chr);
+    }
+}
+
+// 0x1012C47: `mov edx, [ecx+10h]` (the party's count) ; `xorps xmm0, xmm0`. Everything else is kept.
+__declspec(naked) void bars_begin() {
+    __asm {
+        pushfd
+        pushad
+        sub esp, 128
+        movdqu xmmword ptr [esp + 16], xmm1
+        movdqu xmmword ptr [esp + 32], xmm2
+        movdqu xmmword ptr [esp + 48], xmm3
+        movdqu xmmword ptr [esp + 64], xmm4
+        movdqu xmmword ptr [esp + 80], xmm5
+        movdqu xmmword ptr [esp + 96], xmm6
+        movdqu xmmword ptr [esp + 112], xmm7
+        call bar_list
+        movdqu xmm1, xmmword ptr [esp + 16]
+        movdqu xmm2, xmmword ptr [esp + 32]
+        movdqu xmm3, xmmword ptr [esp + 48]
+        movdqu xmm4, xmmword ptr [esp + 64]
+        movdqu xmm5, xmmword ptr [esp + 80]
+        movdqu xmm6, xmmword ptr [esp + 96]
+        movdqu xmm7, xmmword ptr [esp + 112]
+        add esp, 128
+        popad
+        popfd
+        xorps xmm0, xmm0
+        mov edx, dword ptr [g_bar_count]
+        ret
+    }
+}
+
+// 0x1012CDA..0x1012CE7: edx = the handle of bar esi (the game's: or edx, -1 ; cmp esi, [ecx+10h] ; jge ;
+// mov eax, [esp+28h] ; mov edx, [eax]). The flags and eax are not read after it.
+__declspec(naked) void bars_handle() {
+    __asm {
+        or edx, -1
+        cmp esi, dword ptr [g_bar_count]
+        jae done
+        cmp esi, 7
+        jae done
+        mov edx, dword ptr [g_bar_handles + esi * 4]
+    done:
+        ret
+    }
+}
+
+const uint8_t kBarsBegin[6] = {0x8B, 0x51, 0x10, 0x0F, 0x57, 0xC0};
+const uint8_t kBarsHandle[14] = {0x83, 0xCA, 0xFF, 0x3B, 0x71, 0x10, 0x7D, 0x06, 0x8B, 0x44, 0x24, 0x28, 0x8B, 0x10};
+
+bool install_bars() {
+    if (!bytes_match(0x01012C47, kBarsBegin, sizeof(kBarsBegin)) ||
+        !bytes_match(0x01012CDA, kBarsHandle, sizeof(kBarsHandle))) {
+        return false;
+    }
+    uint8_t code[14];
+    std::memset(code, 0x90, sizeof(code));
+    code[0] = 0xE8;
+    int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&bars_begin) - (0x01012C47 + 5));
+    std::memcpy(code + 1, &rel, 4);
+    if (!patch(0x01012C47, kBarsBegin, code, sizeof(kBarsBegin))) return false;
+    std::memset(code, 0x90, sizeof(code));
+    code[0] = 0xE8;
+    rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&bars_handle) - (0x01012CDA + 5));
+    std::memcpy(code + 1, &rel, 4);
+    return patch(0x01012CDA, kBarsHandle, code, sizeof(kBarsHandle));
+}
+
 const uint8_t kC5AF40[6] = {0x8B, 0x0D, 0x00, 0x87, 0x37, 0x01};  // mov ecx, [01378700h]
 const uint8_t kD59B7E[5] = {0xA1, 0x00, 0x87, 0x37, 0x01};        // mov eax, [01378700h]
 const uint8_t kD59BD1[2] = {0x84, 0xD2};                          // test dl, dl
@@ -360,10 +487,16 @@ bool install_early(int max_players) {
         return false;
     }
     g_ok = true;
+    g_bars = install_bars();
+    if (!g_bars) LOG_ERROR("[coop] More players: the floating health bars do not match this build (four at most)");
     return true;
 }
 
 int max_players() { return g_max; }
+
+bool bars_fed() { return g_bars; }
+
+uint32_t bar_chr(int slot) { return g_bars && slot >= 0 && slot < g_bar_count ? g_bar_chrs[slot] : 0; }
 
 void tick() {
     if (!g_ok || g_zeroed) return;
@@ -376,8 +509,9 @@ void tick() {
 
 void log_status() {
     if (g_max == 4) return;
-    LOG_INFO("[coop] More players: up to %d in a session (the game's records, slots and character set widened; "
-             "players past the fourth have no party entry or floating health bar)", g_max);
+    LOG_INFO("[coop] More players: up to %d in a session (the game's records, slots and character set widened; the "
+             "floating health bars %s; players past the party's four have no party entry)", g_max,
+             g_bars ? "show every other player, seven at most" : "stay with the party's four");
 }
 
 }  // namespace coop::players

@@ -27,9 +27,11 @@
 // entry and refuses when there is none, so a fifth player simply has no entry and none of the game's own party
 // bookkeeping). The floating health bars do not need it: the HUD has seven of them (records MenuMan+0x8F4 + 0x20 *
 // slot, slot < 7 in the widget 0xFA89C0 and in the filler 0x1012C30), which the filler fed from party entry `slot`
-// while `slot` < the party's count (+0x10), entry 0, our own character, drawing nothing. With more players the
-// filler takes its characters from bar_list instead: the party's entries but ours, then every other player's
-// character the party has no entry for (WorldChrMan's player set), seven at most.
+// while `slot` < the party's count (+0x10), entry 0, our own character, drawing nothing. The filler takes its
+// characters from bar_list instead (at four players too: an NPC phantom in one of the party's entries left the
+// fourth player without a bar): every other player's character first (WorldChrMan's player set), then the party's
+// entries but ours (its NPC phantoms), seven at most. An NPC never keeps a bar from a player; it gets one back as
+// soon as a player leaves.
 
 namespace coop::players {
 
@@ -251,25 +253,26 @@ void __stdcall bar_list() {
         g_bar_chrs[g_bar_count] = chr;
         ++g_bar_count;
     };
-    // The party's members (players and NPC phantoms), in the party's order.
+    // The other players first, every one of them (WorldChrMan+0x24: {count, entries of 0x20}; 0 is ours), under the
+    // handle the game made them with (0xE63F10: the players' block from [WorldChrMan+0x10]+0xC): an NPC phantom
+    // never keeps a bar from a player, however early it was summoned.
+    uint32_t n = 0, entries = 0, field = 0, block = 0;
+    if (read32(wcm + 0x24, &n) && read32(wcm + 0x28, &entries) && entries && n <= 64 && read32(wcm + 0x10, &field) &&
+        field && read32(field + 0xC, &block)) {
+        for (uint32_t s = 1; s < n; ++s) {
+            uint32_t chr = 0;
+            if (!read32(entries + s * 0x20, &chr) || !chr) continue;
+            const uint32_t handle = 0x10000000 | (block & 0x3F) << 14 | s;
+            if (chr_of_handle(wcm, handle) == chr) add(handle, chr);
+        }
+    }
+    // Then the party's members in the party's order: its NPC phantoms take the bars left (and a player the set
+    // above missed gets one here).
     if (read32(gm + 0xBEC, &pmi) && pmi) {
         for (int i = 0; i < 4; ++i) {
             uint32_t handle = 0xFFFFFFFF;
             if (read32(pmi + 0x18 + i * 0x14, &handle)) add(handle, chr_of_handle(wcm, handle));
         }
-    }
-    // The other players' characters with no party entry (WorldChrMan+0x24: {count, entries of 0x20}; 0 is ours),
-    // under the handle the game made them with (0xE63F10: the players' block from [WorldChrMan+0x10]+0xC).
-    uint32_t n = 0, entries = 0, field = 0, block = 0;
-    if (!read32(wcm + 0x24, &n) || !read32(wcm + 0x28, &entries) || !entries || n > 64 || !read32(wcm + 0x10, &field) ||
-        !field || !read32(field + 0xC, &block)) {
-        return;
-    }
-    for (uint32_t s = 1; s < n; ++s) {
-        uint32_t chr = 0;
-        if (!read32(entries + s * 0x20, &chr) || !chr) continue;
-        const uint32_t handle = 0x10000000 | (block & 0x3F) << 14 | s;
-        if (chr_of_handle(wcm, handle) == chr) add(handle, chr);
     }
 }
 
@@ -476,7 +479,13 @@ int install_all() {
 bool install_early(int max_players) {
     g_max = max_players < 4 ? 4 : max_players > kMaxPlayers ? kMaxPlayers : max_players;
     g_remote = g_max - 1;
-    if (g_max == 4) return true;
+    if (g_max == 4) {
+        // The bars alone: with an NPC phantom in one of the party's four entries, the game's own filler left the
+        // fourth player without one.
+        g_bars = install_bars();
+        if (!g_bars) LOG_ERROR("[coop] The floating health bars do not match this build (the party's alone)");
+        return true;
+    }
     const int failed = install_all();
     if (failed != 0) {
         // The member limit goes last, so a session still holds four (the parts already widened have room to spare).

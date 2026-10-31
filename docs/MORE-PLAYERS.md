@@ -37,11 +37,14 @@ The HUD already has **seven** floating health bars: their records (`MenuMan+0x8F
 (`0xFA89C0`) and its filler (`0x1012C30`) all count to seven. What held them to four is the filler's source: bar
 `slot` showed party entry `slot` while `slot` was below the party's count, and the party list (`PartyMemberInfo`,
 `[GameMan+0xBEC]`, 0x8C bytes, four entries of 0x14 inline from +0x18 with its own fields right after) holds four,
-entry 0 our own character, which draws nothing. With more players the filler's two reads of the party (its count at
-`0x1012C47`, the entry's handle at `0x1012CDA`) take ours instead: the party's members but us, in the party's order,
-then every other player's character the party has no entry for (the player set, under the handle the game made it
-with), seven at most. The nameplate text (OverheadPlayerDisplay) follows the same list. The log says which bars draw
-("Floating health bar N draws").
+entry 0 our own character, which draws nothing. The filler's two reads of the party (its count at `0x1012C47`, the
+entry's handle at `0x1012CDA`) take ours instead, at four players too: every other player's character first (the
+player set, under the handle the game made it with), then the party's members but us in the party's order, which
+adds its NPC phantoms, seven at most. A player never goes without a bar for an NPC: with three players and Solaire,
+the game's own filler gave Solaire a party entry's bar and a fourth player none; with eight players and Solaire,
+the eighth had none. An NPC gets a bar when one is left after every player, and gets it back when a player leaves.
+The nameplate text (OverheadPlayerDisplay) follows the same list. The log says which bars draw ("Floating health
+bar N draws").
 
 ## Not widened
 
@@ -50,8 +53,9 @@ with), seven at most. The nameplate text (OverheadPlayerDisplay) follows the sam
   effect and "phantom died" states, which the mod's own death and spectating rules replace for co-op players). Moving
   its entries means about thirty accesses inside its methods and nine outside, and twenty-two outside read the field
   after them (+0x7C); not needed for anything a player sees.
-- **NPC summons** take party entries: with four players or more present they have none (no floating bar, and the
-  game's own end-of-fight dismissal may not run for them in every game), as with four players and an NPC in 1.3.0.
+- **NPC summons** take party entries: one summoned while four players or more are present has none (no floating
+  bar, and the game's own end-of-fight dismissal may not run for it in every game), as with four players and an NPC
+  in 1.3.0. One summoned earlier keeps its entry, and its bar while one is left after every player.
 - **A "recently met" list at `SessMan+0x1B4`** (three names, its own bound) and the values `0xD280E0` writes into it
   per slot (`cmp eax, 2` kept): players past the fourth are not added. Harmless.
 

@@ -1214,10 +1214,11 @@ std::vector<summons::Phantom> guests_npcs() {
 std::vector<uint8_t> g_npc_sent;
 double g_npc_sent_at = 0;
 
-void host_npc_tick() {
-    static double polled = 0;
-    if (now() - polled < 0.5 || !game::in_game() || game::loading() || !game::own_world()) return;
-    polled = now();
+// Our list as it stands (ours, the guests' summons among them once our party holds them, then those it does not
+// hold yet), sent when it changed or every 3 s while there are any; `at_once`: sent now whatever it is (a team
+// wipe's dismissal, just before our load: we send nothing while loading, and the others would rebuild the
+// phantoms from the list they hold).
+void publish_npc_list(bool at_once) {
     NpcPhantomsMsg m{};
     fill_header(&m, kNpcPhantoms);
     // Ours, the guests' summons among them once our party holds them; then those it does not hold yet.
@@ -1237,13 +1238,13 @@ void host_npc_tick() {
     const auto* bytes = reinterpret_cast<const uint8_t*>(&m);
     const std::vector<uint8_t> now_bytes(bytes, bytes + sizeof(m));
     const bool changed = now_bytes != g_npc_sent;
-    if (!changed && (m.count == 0 || now() - g_npc_sent_at < 3.0)) return;
+    if (!at_once && !changed && (m.count == 0 || now() - g_npc_sent_at < 3.0)) return;
     if (changed) {
         static std::string logged = "none";
         std::string ids;
         for (int i = 0; i < m.count; ++i) ids += (ids.empty() ? "" : " ") + std::to_string(m.p[i].entity);
         if (ids.empty()) ids = "none";
-        if (ids != logged) LOG_INFO("[coop] Our NPC phantoms: %s", ids.c_str());
+        if (ids != logged) LOG_INFO("[coop] Our NPC phantoms: %s%s", ids.c_str(), at_once ? " (sent at once)" : "");
         logged = ids;
     }
     g_npc_sent = now_bytes;
@@ -1251,6 +1252,13 @@ void host_npc_tick() {
     for (uint64_t id : g_admitted) {
         if (!is_lost(id)) steam::send(id, &m, sizeof(m), true);
     }
+}
+
+void host_npc_tick() {
+    static double polled = 0;
+    if (now() - polled < 0.5 || !game::in_game() || game::loading() || !game::own_world()) return;
+    polled = now();
+    publish_npc_list(false);
 }
 
 std::vector<summons::Phantom> npc_list(const uint8_t* data, uint32_t size) {
@@ -5470,8 +5478,13 @@ void note_respawn_went(bool kept) {
     if (g_role == Role::None || g_invade || !g_lobby || g_respawn == kRespawnWent) return;
     if (g_role == Role::Guest && g_step != Step::InWorld) return;
     // A reload that starts the world over (a team wipe; the host alone) sends every NPC phantom home, before the
-    // load, the game's own way: every other game gets packet 49. Any other death's reload keeps them summoned.
-    if (g_role == Role::Host && !kept) summons::dismiss_all("Team wipe");
+    // load, the game's own way: every other game gets packet 49, and our emptied list goes out at once (we send
+    // none while loading; one the others still held would bring the phantoms back there, also onto a fresh copy
+    // after their own reload). Any other death's reload keeps them summoned.
+    if (g_role == Role::Host && !kept) {
+        summons::dismiss_all("Team wipe");
+        publish_npc_list(true);
+    }
     g_respawn_kept = kept;
     respawn_signal(kRespawnWent);
 }

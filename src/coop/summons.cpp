@@ -109,6 +109,12 @@ std::vector<Phantom> g_reported;
 // report, which lags behind, does not take them in again meanwhile, and our list leaves them out.
 std::vector<std::pair<Phantom, double>> g_ended;
 constexpr double kEndedHold = 10.0;
+// A visitor: the host's NPC phantoms its game sent home (packet 49: its Black Separation Crystal, a team wipe), as
+// the host's list named them, since when. The list we hold can still name them (the host's next one follows the
+// packet, on another channel, and none comes while the host loads): they are not summoned in again from it, here or
+// onto a fresh copy after our own reload, until a list of the host's leaves them out (it decides then) or 30 s.
+std::vector<std::pair<Phantom, double>> g_dismissed;
+constexpr double kDismissedHold = 30.0;
 // Our own world: characters of our NPC phantoms summoned in again (after our load, or their block's), since when:
 // one still disabled 8 s on (its map's load event disables it; the summon-in animation takes a few) is enabled.
 std::map<uint32_t, double> g_own_shown_at;
@@ -432,7 +438,45 @@ __declspec(naked) void hk_recv_make() {
     }
 }
 
+bool same_npc(const Phantom& a, const Phantom& b) {
+    return a.entity >= 0 ? a.entity == b.entity : a.handle == b.handle;
+}
+
+bool dismissed(const Phantom& ph) {
+    for (const auto& d : g_dismissed) {
+        if ((same_npc(d.first, ph) || d.first.handle == ph.handle) && now() - d.second < kDismissedHold) return true;
+    }
+    return false;
+}
+
+// A visitor got packet 49 (an NPC left the host's party) for the host's `host_handle`. Only one the list we hold
+// still names needs keeping home (a list that came first and left it out already does).
+void note_dismissed(uint32_t host_handle) {
+    const int32_t entity = entity_of(host_handle);  // the same handle while our game has its block
+    const Phantom* named = nullptr;
+    for (const Phantom& l : g_host) {
+        if (l.handle == host_handle || (entity >= 0 && l.entity == entity)) {
+            named = &l;
+            break;
+        }
+    }
+    if (!named) return;
+    const Phantom ph = *named;
+    for (auto& d : g_dismissed) {
+        if (same_npc(d.first, ph)) {
+            d.second = now();
+            return;
+        }
+    }
+    g_dismissed.emplace_back(ph, now());
+    if (++g_lines <= 40) {
+        LOG_INFO("[coop] The host sent NPC phantom %d (%08X) home: it is not summoned in again from an older list",
+                 ph.entity, host_handle);
+    }
+}
+
 uint32_t __cdecl our_state_handle(uint32_t host_handle) {
+    if (g_visitor) note_dismissed(host_handle);
     const uint32_t h = our_handle(host_handle);
     return h && chr_by_handle(h) ? h : 0;
 }
@@ -459,10 +503,6 @@ __declspec(naked) void hk_recv_state() {
 bool own_kept(uint32_t handle) {
     const auto it = g_own.find(handle);
     return it != g_own.end() && it->second.away && !chr_by_handle(handle);
-}
-
-bool same_npc(const Phantom& a, const Phantom& b) {
-    return a.entity >= 0 ? a.entity == b.entity : a.handle == b.handle;
 }
 
 // Host: the summon of this NPC ended in our game lately.
@@ -800,6 +840,7 @@ void dismiss_all(const char* why) {
         }
     }
     for (const auto& o : g_own) note_ended(o.second.ph);
+    for (const Phantom& ph : g_reported) note_ended(ph);  // a guest's summon our party never held ends too
     g_own.clear();
     g_own_shown_at.clear();
     if (sent || blanked) {
@@ -863,6 +904,14 @@ void note_host_list(const std::vector<Phantom>& list) {
         for (int32_t e : after) ids += (ids.empty() ? "" : " ") + std::to_string(e);
         LOG_INFO("[coop] The host's NPC phantoms: %s", ids.empty() ? "none" : ids.c_str());
     }
+    // A phantom the host sent home stays home until a list of the host's leaves it out (that list keeps it home
+    // from then on, and a later one that names it again is a new summon).
+    for (auto it = g_dismissed.begin(); it != g_dismissed.end();) {
+        const bool named = std::any_of(list.begin(), list.end(), [&](const Phantom& ph) {
+            return same_npc(it->first, ph) || it->first.handle == ph.handle;
+        });
+        it = !named || now() - it->second >= kDismissedHold ? g_dismissed.erase(it) : std::next(it);
+    }
     g_host = list;
     g_heard = true;
 }
@@ -914,6 +963,7 @@ void tick(bool visitor) {
         g_mine.clear();
         g_mine_listed.clear();
         g_mine_ended.clear();
+        g_dismissed.clear();
         own_world_sweep();
         adopt_tick();
         return;
@@ -935,6 +985,7 @@ void tick(bool visitor) {
     for (const Phantom& ph : g_host) {
         listed.insert(ph.entity);
         listed_handles.insert(ph.handle);
+        if (dismissed(ph)) continue;  // the host sent it home after this list: packet 49 took our copy out
         const uint32_t chr = ph.entity >= 0 ? chr_by_entity(ph.entity) : chr_by_handle(ph.handle);
         uint32_t h = 0;
         if (!chr || !read32(chr + 4, &h) || h == 0xFFFFFFFF || mine_ended(h)) continue;

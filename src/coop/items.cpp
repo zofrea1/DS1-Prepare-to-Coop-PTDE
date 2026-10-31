@@ -91,9 +91,9 @@ const Def kDefs[kCount] = {
     {-98, 81, 2002, L"Chaos Eye Orb", L"Invade a co-operative session",
      L"A small eye orb, red with heat and spite.\n\nUse it to invade, as an evil spirit, a\n"
      L"co-operative session that welcomes invaders."},
-    {-97, 0, 2132, L"Abyssal Eye Orb", L"Disband a co-operative session",
-     L"A small black eye orb whose gaze never wavers.\n\nA guest uses it to return home. A host uses it to\n"
-     L"disband the session."},
+    {-97, 0, 2132, L"Abyssal Eye Orb", L"Leave or disband a co-operative session",
+     L"A small black eye orb whose gaze never wavers.\n\nA guest or an invader uses it to return home. A host\n"
+     L"uses it to disband the session."},
     {-96, 0, 2007, L"Ominous Tome", L"Change the world rules",
      L"Loose pages of faded writing that describe a rite to\nlay bare one's true nature before one's allies.\n\n"
      L"The host changes the rules of the world with each use."},

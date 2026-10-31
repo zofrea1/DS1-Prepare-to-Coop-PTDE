@@ -5469,6 +5469,9 @@ bool fallen_at_respawn() {
 void note_respawn_went(bool kept) {
     if (g_role == Role::None || g_invade || !g_lobby || g_respawn == kRespawnWent) return;
     if (g_role == Role::Guest && g_step != Step::InWorld) return;
+    // A reload that starts the world over (a team wipe; the host alone) sends every NPC phantom home, before the
+    // load, the game's own way: every other game gets packet 49. Any other death's reload keeps them summoned.
+    if (g_role == Role::Host && !kept) summons::dismiss_all("Team wipe");
     g_respawn_kept = kept;
     respawn_signal(kRespawnWent);
 }

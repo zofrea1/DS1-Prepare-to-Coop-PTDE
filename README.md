@@ -51,7 +51,7 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 | Blessed Eye Orb | Host a session. Players with your password can join at any time, wherever you are. |
 | Crystal Eye Orb | Join the session of a player with your password. You arrive at the host's last bonfire, in your own body. |
 | Chaos Eye Orb | Invade a session that allows invaders, as an evil spirit. Defeat every co-op player for a Humanity each; fall, and each of them earns one. |
-| Abyssal Eye Orb | A guest returns home; the host disbands the session. |
+| Abyssal Eye Orb | A guest or an invader returns home; the host disbands the session. |
 | Ominous Tome | Host: change the world rules (allies cannot harm each other, allies can harm each other, the host against the guests). |
 | Dried Fingers | Host: taunt invaders into your world: an invader looking for a world is 50% more likely to pick yours. |
 | Cursed Pendant | Curse your own world (pure black World Tendency), alone or as host: black phantoms appear in every area that has them and stay until you use the pendant again, and the NPC invaders (Kirk, Leeroy, Mildred, Jeremiah) come even while you are hollow, whatever your covenant. The curse lasts through sessions; it is not saved, so after restarting the game use the pendant again. |

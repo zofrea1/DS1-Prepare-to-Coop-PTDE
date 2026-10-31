@@ -42,6 +42,10 @@ constexpr uint32_t kSetDisabled = 0x00E69A40;  // edi = character, stdcall(disab
 // check: only called with a character in this world.
 constexpr uint32_t kPartyLeave = 0x00EA2A10;
 constexpr uint32_t kPartyRecount = 0x00EA1A70;  // edx = party: the counts +4..+0x10 from the entries
+// 0xEA2E90: eax = handle, edi = party, stdcall(notice variant): the host's Black Separation Crystal menu's "send
+// home" (0xC3FCF0). For an NPC entry: the "returned home" notice, 0xEA2A10, then packet 49 {handle, 0} to the
+// session, whose receivers (0xEA2DD0, kRecvState here) take the NPC out of their parties the same way.
+constexpr uint32_t kSendHome = 0x00EA2E90;
 // PartyMemberInfo ([GameMan+0xBEC]): four entries of 0x14 bytes from +0x18 {handle (-1 none), type (1 player,
 // 2 NPC), state, f1, f2}; +0x10 and +0x14 count the party (the probe's "party a/b").
 constexpr uint32_t kEntries = 0x18, kEntrySize = 0x14;
@@ -87,9 +91,9 @@ bool g_heard = false;                      // a list came from the host (a 1.2.0
 // A co-op guest's own summons: the NPC phantoms our game summoned from a sign (kSignAdd). A summon is the world's,
 // whoever made it: the host's game takes it into its party as one of its own (by packet 48, or by our word,
 // kNpcSummons, once that NPC is in its world), and from then on it goes by the host's list like any of the host's
-// summons. It stays through our loads and our leaving, and ends as the host's own do (its death, the host's load).
-// Until the host's list names it, it is kept here as ours (a host before 1.4.0 that did not have the NPC loaded at
-// the summon never names it), and a load of ours ends it.
+// summons. It stays through anyone's loads and leaving, and ends as the host's own do (its death, a team wipe, the
+// host's Black Separation Crystal). Until the host's list names it, it is kept here as ours (a host before 1.4.0
+// that did not have the NPC loaded at the summon never names it), and a load of ours ends it.
 std::map<uint32_t, Phantom> g_mine;       // handle -> what it is
 std::set<uint32_t> g_mine_listed;         // those the host's list has named: the host's list decides from then on
 std::map<uint32_t, double> g_mine_ended;  // handle -> when it left us (our load, our party): not made again at once
@@ -101,16 +105,21 @@ constexpr double kMineEndedHold = 3.0;
 // our party once its NPC is in our world, and own_refresh then has it as ours; until then our list names it as
 // reported, so the other games keep their copies.
 std::vector<Phantom> g_reported;
-// Host: the NPCs whose summon ended in our game (our load, its death, it left the party), since when: a guest's
+// Host: the NPCs whose summon ended in our game (its death, a dismissal, a team wipe), since when: a guest's
 // report, which lags behind, does not take them in again meanwhile, and our list leaves them out.
 std::vector<std::pair<Phantom, double>> g_ended;
 constexpr double kEndedHold = 10.0;
+// Our own world: characters of our NPC phantoms summoned in again (after our load, or their block's), since when:
+// one still disabled 8 s on (its map's load event disables it; the summon-in animation takes a few) is enabled.
+std::map<uint32_t, double> g_own_shown_at;
 // Our own world: the NPC phantoms of our party as we last saw them loaded. Solaire follows his summoner anywhere in
 // a session (no walls keep phantoms in an area, and the party is not reset at a map-block change), so his own map
 // block can unload under him while he is still summoned: his character is gone until the block streams back, and
 // comes back as a fresh, unsummoned copy. The summon goes on through that: it is still announced to the others,
-// still counts and stays through the session's end, and the fresh copy becomes the phantom again. A real load (a
-// death, a rest, travel) forgets all of this, so it ends the summon as the game's own party reset would.
+// still counts and stays through the session's end, and the fresh copy is summoned in again. Our own loads (a
+// death, a rest, travel) are the same in a session, where the party is kept through them (rules.cpp,
+// allow_party_reset): the host is not special, and only the NPC's death, a team wipe (dismiss_all) or the host's
+// Black Separation Crystal end a summon. Outside a session the game's own party reset at a load ends it.
 struct Own {
     Phantom ph;
     uint32_t chr = 0;
@@ -312,6 +321,21 @@ __declspec(naked) void hk_recv_add() {
         popad
         mov eax, kPartyAdd
         jmp eax
+    }
+}
+
+void send_home(uint32_t p, uint32_t handle) {
+    __try {
+        __asm {
+            push edi
+            mov edi, p
+            push 0
+            mov eax, handle
+            mov edx, kSendHome
+            call edx
+            pop edi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
@@ -582,12 +606,20 @@ void adopt_tick() {
 void own_refresh() {
     const uint32_t me = game::player();
     if (game::loading() || !me || me != g_own_player) {
-        if (!g_own.empty()) LOG_INFO("[coop] A load: our NPC phantoms' summons are over (%u)", unsigned(g_own.size()));
-        for (const auto& o : g_own) note_ended(o.second.ph);
-        // The hold counts from the load's end: we send no list while loading, so the summoner's game, and its
-        // report of the summon, only learn of the end afterwards.
+        // Our load makes every character anew: each summon waits for its fresh copy, as after its block's unload.
+        // An entry the game's own party reset took (outside a session) ends it below.
+        int waiting = 0;
+        for (auto& o : g_own) {
+            if (!o.second.away) ++waiting;
+            o.second.away = true;
+            o.second.back_at = 0;
+            o.second.chr = 0;
+        }
+        if (waiting) LOG_INFO("[coop] A load: our %d NPC phantom(s) stay summoned (summoned in again here)", waiting);
+        g_own_shown_at.clear();
+        // The hold counts from the load's end: we send no list while loading, so a summoner's game, and its report
+        // of a summon that ended, only learn of the end afterwards.
         for (auto& e : g_ended) e.second = now();
-        g_own.clear();
         g_own_player = me;
         return;
     }
@@ -618,6 +650,15 @@ void own_refresh() {
             o.ph.f2 = static_cast<int32_t>(f2);
             o.chr = chr;
             o.away = false;
+            const auto shown = g_own_shown_at.find(chr);
+            if (shown != g_own_shown_at.end() && now() - shown->second >= 8.0) {
+                if (chr_disabled(chr)) {
+                    set_enabled(chr);
+                    LOG_INFO("[coop] Our NPC phantom %d (character %08X) was still disabled 8 s after it was summoned "
+                             "in again: enabled", entity, chr);
+                }
+                g_own_shown_at.erase(shown);
+            }
             continue;
         }
         if (it == g_own.end()) continue;  // not one we knew as our phantom: own_world_sweep decides
@@ -638,12 +679,18 @@ void own_refresh() {
             continue;
         }
         if (make_phantom(h, it->second.ph.kind)) {
+            // Summoned in as a visitor's game does it: the kept entry is in state 3, which never shows a fresh copy,
+            // and the NPC's map's load event disabled it (m10_01 11015100 disables 6540 in a host's game).
+            blank_entry(p, i);
+            recount(p);
+            const bool added = party_add(p, h, chr_type(chr), static_cast<int32_t>(f1), static_cast<int32_t>(f2));
+            g_own_shown_at[chr] = now();
             it->second.chr = chr;
             it->second.away = false;
             it->second.back_at = 0;
             revived = true;
-            LOG_INFO("[coop] Our NPC phantom %d: its map block is back and its new character %08X is the phantom again",
-                     it->second.ph.entity, chr);
+            LOG_INFO("[coop] Our NPC phantom %d: its new character %08X is the phantom again, summoned in%s",
+                     it->second.ph.entity, chr, added ? "" : "; the party has no room, so the summon is over");
         } else if (it->second.back_at == 0) {
             it->second.back_at = now();
         } else if (now() - it->second.back_at > 10.0) {
@@ -729,6 +776,69 @@ std::vector<Phantom> guest_summons_pending() {
         out.push_back(ph);
     }
     return out;
+}
+
+void dismiss_all(const char* why) {
+    const uint32_t p = party();
+    if (!p || !game::own_world()) return;
+    int sent = 0, blanked = 0;
+    for (int i = 0; i < kEntryCount; ++i) {
+        uint32_t h = 0, type = 0;
+        if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF ||
+            !read32(p + kEntries + i * kEntrySize + 4, &type) || type != kTypeNpc) {
+            continue;
+        }
+        const uint32_t chr = chr_by_handle(h);
+        const int32_t t = chr_type(chr);
+        if (chr && (t == 1 || t == 2)) {
+            send_home(p, h);  // the game's own: the notice, the party leave, packet 49 to every other game
+            ++sent;
+        } else {
+            blank_entry(p, i);  // its map is not loaded here: nothing to send home in this game
+            recount(p);
+            ++blanked;
+        }
+    }
+    for (const auto& o : g_own) note_ended(o.second.ph);
+    g_own.clear();
+    g_own_shown_at.clear();
+    if (sent || blanked) {
+        LOG_INFO("[coop] %s: every NPC phantom goes home (%d sent home, %d not loaded here)", why, sent, blanked);
+    }
+}
+
+bool white_summoned() {
+    for (const auto& o : g_own) {
+        if (o.second.ph.kind == 1) return true;
+    }
+    const uint32_t p = party();
+    for (int i = 0; p && i < kEntryCount; ++i) {
+        uint32_t h = 0, type = 0;
+        if (read32(p + kEntries + i * kEntrySize, &h) && h != 0xFFFFFFFF &&
+            read32(p + kEntries + i * kEntrySize + 4, &type) && type == kTypeNpc && chr_type(chr_by_handle(h)) == 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool npc_summoned(int32_t entity) {
+    if (entity < 0) return false;
+    for (const auto& o : g_own) {
+        if (o.second.ph.entity == entity) return true;
+    }
+    for (const auto& m : g_mine) {
+        if (m.second.entity == entity) return true;
+    }
+    if (g_visitor) {
+        for (const Phantom& ph : g_host) {
+            if (ph.entity == entity) return true;
+        }
+    }
+    const uint32_t chr = chr_by_entity(entity);
+    const int32_t t = chr_type(chr);
+    uint32_t h = 0;
+    return chr && (t == 1 || t == 2) && read32(chr + 4, &h) && entry_of(party(), h) >= 0;
 }
 
 int count() {

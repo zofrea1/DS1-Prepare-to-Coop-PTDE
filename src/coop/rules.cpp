@@ -10,6 +10,7 @@
 #include "netrate.h"
 #include "session.h"
 #include "steam.h"
+#include "summons.h"
 #include "text.h"
 #include "world.h"
 
@@ -2504,16 +2505,24 @@ bool npc_sign(uint32_t sign) {
 }
 
 void log_sign(const char* what, uint32_t sign) {
-    static std::set<uint32_t> told;
+    static std::set<std::pair<uint32_t, const char*>> told;
     uint32_t entity = 0;
     read32(sign + 0x88, &entity);
-    if (told.size() < 40 && told.insert(entity).second) LOG_INFO("[coop] NPC sign of %d: %s", entity, what);
+    if (told.size() < 40 && told.insert({entity, what}).second) LOG_INFO("[coop] NPC sign of %d: %s", entity, what);
 }
 
 // The game's session and world test, true when it refuses the sign.
 bool __cdecl sign_session_refused(uint32_t sign) {
     uint32_t sess = 0, state = 0, gm = 0, pmi = 0, special = 0xFFFFFFFF;
     uint8_t own = 1;
+    // A summon outlives the loads in a session (summons.cpp), and the NPC's map's load event places his sign again
+    // whenever he stands at home in the host's eyes (m10_01 11015100): no sign for an NPC who is summoned now.
+    uint32_t entity = 0xFFFFFFFF;
+    if (seamless_rules() && npc_sign(sign) && read32(sign + 0x88, &entity) &&
+        summons::npc_summoned(static_cast<int32_t>(entity))) {
+        log_sign("not placed: that NPC is summoned in this world already", sign);
+        return true;
+    }
     if (!read32(kSessManVar, &sess) || !sess) return false;
     read32(sess + 0x90, &state);
     if ((gm = game::game_man()) != 0) {
@@ -3116,7 +3125,11 @@ bool install_cut_warp() {
 // Lua event system) or opens the host's "send phantoms home" menu (0xE51371, 0xC2B4D0: MenuMan+0xBC = 1 when
 // white phantoms are present, else 5). Neither fits a seamless session: guests keep their own body (the menu finds
 // no phantom) and the Lua leave is skipped by the session guard, which left a box on screen. In a seamless
-// session the crystal is the session's own leave instead: a guest goes home, the host closes their world.
+// session the crystal is the session's own leave instead: a guest or an invader goes home, the host closes their
+// world. But with a white NPC phantom summoned (whoever summoned it) the host's crystal is the game's own menu
+// again: it lists the loaded white phantoms of the party (0xC3F0B0: up to two, character type 1, so never a co-op
+// guest), and "send home" is 0xEA2E90 (the notice, the party leave, packet 49 to every other game). A guest's
+// crystal never manages them. Outside a session (the Lautrec invasion in Anor Londo too) the crystal is the game's.
 constexpr uint32_t kSepGuestSite = 0x00E5136A;
 constexpr uint32_t kSepGuestOrig = 0x00D78290;  // eax = Lua event system: calls OnLeaveMagic
 constexpr uint32_t kSepHostSite = 0x00E51371;
@@ -3127,6 +3140,10 @@ bool __cdecl separation_handled(bool host) {
     if (!seamless_rules() || !g_separation_fn) return false;
     if (host ? !g_state.host : !g_state.guest) return false;
     if (host && g_state.invader_present) return false;  // the game's own rules while an invader is here
+    if (host && summons::white_summoned()) {
+        LOG_INFO("[coop] Black Separation Crystal: the game's own phantom menu (an NPC phantom is summoned)");
+        return false;
+    }
     LOG_INFO("[coop] Black Separation Crystal: %s", host ? "the host closes the world" : "a guest goes home");
     g_separation_fn(host);
     return true;

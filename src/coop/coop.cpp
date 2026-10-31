@@ -141,8 +141,8 @@ int can_use(int32_t id) {
         case items::kInvade:
         case items::kParchment:
             return !in_session && area_allows(id) ? 1 : 0;
-        case items::kLeave:
-            return in_session && !invader_present ? 1 : 0;
+        case items::kLeave:  // an invader goes home with it too; the others not while an invader is in the world
+            return in_session && (invader || !invader_present) ? 1 : 0;
         case items::kRules:
         case items::kTaunt:
             return host && area_allows(id) ? 1 : 0;

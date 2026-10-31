@@ -778,13 +778,14 @@ bosses have all been dead for 10 s is taken down.
 A boss's entry event gives it the forced network authority (`Set Network Update Authority`, 4095) in the host's game
 only: the line follows "SKIP IF Multiplayer State Client" (the Taurus Demon's 11015383; also the Hellkites, the
 Moonlight Butterfly, the Sanctuary Guardian, Artorias, Manus, Pinwheel and a few more). So in the game's co-op the
-host's game moves those bosses the whole fight. With guests running the world's events every game gave them 4095, the
-bids differed only by nearness and the Taurus Demon changed hands mid-fight; since 1.4.0 a guest's game bids without
-the forced authority, as the game's guest does (`rules::host_authority_only`). For the other bosses (the Asylum
-Demon, the Bell Gargoyles and most) the game's own bids decide by nearness alone, the game's co-op too: the session
-host hands enemies out every 3 s and nothing in the bid (`0xE6D250`) favours the game that moves one already, so a
-boss can change hands between two players fighting it. An attack keeps its boss in the game that began it
-until it ends (above).
+host's game, the only one running the events that drive those bosses, moves them the whole fight. With guests running
+the world's events, every game whose player entered the fight gives the boss 4095 itself, and among those games the
+bids decide by nearness, as for every other boss: the game's own bid (`0xE6D250`) has nothing that favours the game
+that moves an enemy already, and the session host hands enemies out every 3 s, so a boss can change hands between
+two players fighting it. Kept so: bidding without the forced authority in a guest's game (tried for 1.4.0) gave such
+a boss to the host's game whenever the host was in the fight, however far back, and took it from a guest fighting
+alone when the host walked in. An attack keeps its boss in the game that began it until it ends (above); the one
+change of hands in the 2026-10-29 Taurus fight came two seconds after its last move ended.
 
 A boss with no one to fight while its fight goes on: after the host fell to the gargoyles, the guest's game took the
 second one, which walked back toward its perch and fought only once the guest hit it. A boss this game moves that has

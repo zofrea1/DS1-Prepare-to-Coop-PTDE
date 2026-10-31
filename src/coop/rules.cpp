@@ -3722,37 +3722,23 @@ const char* mover(uint32_t chr);
 // A boss's entry event gives it the forced authority (Set Network Update Authority, 2004[28], Forced = 4095) in the
 // host's game only: "SKIP IF Multiplayer State Client" skips that line in a guest's (the Taurus Demon's 11015383, and
 // the Hellkites, Moonlight Butterfly, Sanctuary Guardian, Artorias, Manus, Pinwheel and others), so in the game's co-op
-// the host's game moves those bosses the whole fight, its bid 4095 above any guest's. With guests running the world's
-// events (hk_multiplay_test answers "host" in every game) every game gave them 4095, the bids differed only by
-// nearness, and the Taurus Demon changed hands between the host's and the guest's games mid-fight (2026-10-29, 19:54):
-// each change starts the AI of the game that takes it, which breaks off the move under way. A guest's game bids as the
-// game's guest does, without the forced authority; the rules below (a host who fell, sleeps or is far) still apply.
-constexpr uint32_t kForcedAuthority = 4095;
-
-uint32_t host_authority_only(uint32_t chr, uint32_t bid) {
-    uint32_t authority = 0;
-    if (game::own_world() || !read32(chr + 0x204, &authority) || authority < kForcedAuthority || bid < authority) {
-        return bid;
-    }
-    static std::set<uint32_t> logged;
-    if (logged.size() < 30 && logged.insert(chr).second) {
-        LOG_INFO("[coop] Enemy %08X: its forced authority (%u) counts in the host's game only, as in the game's co-op; "
-                 "our bid %u -> %u", chr, authority, bid, bid - authority);
-    }
-    return bid - authority;
-}
-
+// the host's game moves those bosses the whole fight. There the host's game was the only one running the events that
+// drive them; with guests running the world's events (hk_multiplay_test answers "host" in every game) each game whose
+// player entered the fight gives the boss 4095 itself, and those games bid by nearness, as for every other boss. That
+// is kept: the bids stay as every player's game makes them. A guest's game bidding without it (tried in 1.4.0) gave
+// the boss to the host's game whenever the host was in the fight, however far back, and took it back from a guest
+// fighting alone when the host walked in. The one change of hands in the 2026-10-29 Taurus fight (19:54:28) came two
+// seconds after its last move ended (the attack lock), so it broke nothing off.
 uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
-    const uint32_t game_bid = reinterpret_cast<Fn>(kNetPriority)(chr);
+    const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
     uint32_t handle = 0;
     if (seamless_rules() && read32(chr + 0x78, &handle)) {
         const int lead = lead_mode(handle);
         if (lead >= 0) return lead == 1 ? kBidCap : 0;
     }
-    if (!game_bid || !seamless_rules() || g_peer_spots.empty()) return game_bid;
+    if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
     if (const int hold = attack_hold(chr)) return hold == 1 ? kBidCap : 0;
-    const uint32_t bid = host_authority_only(chr, game_bid);
     game::Vec3 at{}, me{};
     if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return bid;
     if (world::local_dead()) {

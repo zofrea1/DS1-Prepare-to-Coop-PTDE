@@ -131,7 +131,6 @@ const Site kSites[] = {
     {0x00EA24F6, 3, {0x89, 0x7E, 0x68}, {0x89, 0x7E, 0xDC}},  // mov dword ptr [esi + 0x68], edi
     {0x00EA24F9, 3, {0x89, 0x7E, 0x6C}, {0x89, 0x7E, 0xE0}},  // mov dword ptr [esi + 0x6c], edi
     {0x00EA24FC, 3, {0x89, 0x7E, 0x70}, {0x89, 0x7E, 0xE4}},  // mov dword ptr [esi + 0x70], edi
-    {0x00EA252A, 6, {0x3B, 0x8A, 0x8C, 0x00, 0x00, 0x00}, {0x83, 0xF9, 0x08, 0x90, 0x90, 0x90}},  // cmp ecx, [edx + 0x8c]
     {0x00EA2554, 3, {0x83, 0xFA, 0x04}, {0x83, 0xFA, 0x08}},  // cmp edx, 4
     {0x00EA2569, 3, {0x83, 0xFB, 0x04}, {0x83, 0xFB, 0x08}},  // cmp ebx, 4
     {0x00EA2740, 3, {0x8B, 0x4F, 0x7C}, {0x8B, 0x4F, 0xF0}},  // mov ecx, dword ptr [edi + 0x7c]
@@ -241,10 +240,13 @@ void __cdecl blank_all(uint32_t p) {
 }
 
 // The touch summon (0xDB3590, also every NPC invasion's black sign: it is summoned as it is placed) refuses a sign
-// once the party's +0x14 (the session's members plus the NPC summons) reaches the session's member limit
-// (SessMan+0x8C: 4, or MaxPlayers). That limit is the players'; an NPC does not take a player's place, and what an
-// NPC needs is an entry: an NPC's sign (+0x88 = its entity) is held to the entries instead. A player's sign keeps
-// the game's test. At 0xDB35B4: cmp eax, [ecx+0x8C] (eax = +0x14, ecx = SessMan, esi = the sign); jge follows.
+// once the party's +0x14 reaches the session's member limit (SessMan+0x8C: 4, or MaxPlayers). +0x14 is the session's
+// members (at least 1) plus the NPC handles' count (+0x74) plus a scripted summon (0xEA18A0). That limit is the
+// players'; an NPC does not take a player's place. What an NPC needs is an entry and one of the three NPC handles
+// (0xEA1770 stores its handle right after this test, and stores nothing once the three are taken; the summon's add
+// at 0xDB3E2F ignores a refusal): an NPC's sign (+0x88 = its entity) is refused when the eight entries (+0x10) or
+// the three handles are full. A player's sign keeps the game's test. At 0xDB35B4: cmp eax, [ecx+0x8C] (eax = +0x14,
+// ecx = SessMan, ebp = the party list, esi = the sign); the jge at 0xDB35BA refuses.
 constexpr uint32_t kTouchGate = 0x00DB35B4;
 const uint8_t kTouchGateOld[6] = {0x3B, 0x81, 0x8C, 0x00, 0x00, 0x00};
 
@@ -252,10 +254,45 @@ __declspec(naked) void hk_touch_gate() {
     __asm {
         cmp dword ptr [esi + 0x88], 0
         jl player
-        cmp eax, kWide
+        cmp dword ptr [ebp + 10h], 8      // the entries in use (kWide)
+        jge done
+        cmp dword ptr [ebp - 18h], 3      // the NPC handles' count (+0x74, moved: field(0x74))
+    done:
         ret
     player:
         cmp eax, dword ptr [ecx + 0x8C]
+        ret
+    }
+}
+
+// The add (0xEA2510) refused a member once the party's +0x10 reached the session's member limit (0xEA252A: cmp
+// ecx, [edx+0x8C], then the jge that returns al = 0): now the eight entries, and for an NPC (its fourth argument 2)
+// also the three NPC handles, unless its handle is one of them already (the touch summon stores it before the
+// summon's add: a third NPC's own handle is the third). eax (al = 0) is kept; ecx (+0x10) and edx are overwritten
+// after; ebp is the add's frame (+0xC the handle, +0x14 the type), edi the party list.
+constexpr uint32_t kAddRoom = 0x00EA252A;
+const uint8_t kAddRoomOld[6] = {0x3B, 0x8A, 0x8C, 0x00, 0x00, 0x00};
+
+__declspec(naked) void hk_add_room() {
+    __asm {
+        cmp ecx, 8                        // kWide
+        jge done                          // full: refused
+        cmp dword ptr [ebp + 14h], 2
+        jne room
+        cmp dword ptr [edi - 18h], 3      // the NPC handles' count (field(0x74))
+        jl room
+        mov edx, dword ptr [ebp + 0Ch]
+        cmp dword ptr [edi - 24h], edx    // the three handles (field(0x68), 0x6C, 0x70)
+        je room
+        cmp dword ptr [edi - 20h], edx
+        je room
+        cmp dword ptr [edi - 1Ch], edx
+        je room
+        cmp ecx, ecx                      // equal: the jge refuses
+        ret
+    room:
+        cmp ecx, 8                        // below eight here: the jge goes on
+    done:
         ret
     }
 }
@@ -284,7 +321,8 @@ bool install() {
     if (!bytes_match(kAllocSite, call, 1) || !bytes_match(kFreeLookupSite, kFreeLookup, sizeof(kFreeLookup)) ||
         !bytes_match(kFreeCallSite, kFreeCall, sizeof(kFreeCall)) ||
         !bytes_match(kBlankAll, kBlankAllHead, sizeof(kBlankAllHead)) ||
-        !bytes_match(kTouchGate, kTouchGateOld, sizeof(kTouchGateOld))) {
+        !bytes_match(kTouchGate, kTouchGateOld, sizeof(kTouchGateOld)) ||
+        !bytes_match(kAddRoom, kAddRoomOld, sizeof(kAddRoomOld))) {
         ++bad;
     }
     if (bad) {
@@ -314,6 +352,9 @@ bool install() {
     std::memcpy(code + 1, &rel, 4);
     code[5] = 0x90;
     patch(kTouchGate, kTouchGateOld, code, 6);
+    rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_add_room) - (kAddRoom + 5));
+    std::memcpy(code + 1, &rel, 4);
+    patch(kAddRoom, kAddRoomOld, code, 6);
     g_widened = true;
     LOG_INFO("[coop] Party list: %d members (%u sites)", kWide, static_cast<unsigned>(sizeof(kSites) / sizeof(kSites[0])));
     return true;

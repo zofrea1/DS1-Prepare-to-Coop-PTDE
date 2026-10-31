@@ -23,11 +23,12 @@
 //  * WorldChrMan's player characters live in a set of four (+0x24, made by 0xE63C90: 4 x 0x20); the others are
 //    put in a free entry (0xE63F10) when they are made (0xEE2B10 -> 0xE40970).
 // All of it is widened here before the game makes these objects (from DllMain), each patch checked against the
-// bytes it replaces; nothing changes at four. Not widened: the party list (PartyMemberInfo [GameMan+0xBEC], 0x8C
-// bytes: four entries of 0x14 inline from +0x18, its own fields right after them; its add 0xEA2510 looks for a free
-// entry and refuses when there is none, so a fifth player simply has no entry and none of the game's own party
-// bookkeeping). The floating health bars do not need it: the HUD has seven of them (records MenuMan+0x8F4 + 0x20 *
-// slot, slot < 7 in the widget 0xFA89C0 and in the filler 0x1012C30), which the filler fed from party entry `slot`
+// bytes it replaces; nothing changes at four. The party list (PartyMemberInfo [GameMan+0xBEC]) is widened apart,
+// at any player count, to eight entries (partylist.cpp); only when that does not fit this build does it keep the
+// game's four, and then a fifth player simply has no entry and none of the game's own party bookkeeping (its add
+// 0xEA2510 refuses when no entry is free). The floating health bars do not need it: the HUD has seven of them
+// (records MenuMan+0x8F4 + 0x20 * slot, slot < 7 in the widget 0xFA89C0 and in the filler 0x1012C30), which the
+// filler fed from party entry `slot`
 // while `slot` < the party's count (+0x10), entry 0, our own character, drawing nothing. The filler takes its
 // characters from bar_list instead (at four players too: an NPC phantom in one of the party's entries left the
 // fourth player without a bar): every other player's character first (WorldChrMan's player set), then the party's
@@ -40,6 +41,8 @@ namespace {
 
 int g_max = 4;      // players in a session
 int g_remote = 3;   // the others (g_max - 1)
+// The party list's scripted-summon slot (the game's +0x7C; -0x10 once partylist.cpp moved the list's fields).
+int32_t g_party_slot = 0x7C;
 bool g_ok = false;  // every patch in place
 bool g_zeroed = false;
 // The inline bytes GameDataMan+0x84 + slot, moved here for every slot.
@@ -187,7 +190,8 @@ __declspec(naked) void count_summon_type() {
         je self
         mov ecx, dword ptr ds:[013784A0h]
         mov ecx, dword ptr [ecx + 0BECh]
-        cmp dword ptr [ecx + 7Ch], edi
+        mov ebx, dword ptr [g_party_slot]
+        cmp dword ptr [ecx + ebx], edi
         je others
     self:
         mov ecx, dword ptr [edx + 8]
@@ -480,6 +484,7 @@ int install_all() {
 bool install_early(int max_players) {
     // The party list first, at any player count: with four players and an NPC phantom the fourth had no entry.
     partylist::install();
+    g_party_slot = partylist::field(0x7C);
     g_max = max_players < 4 ? 4 : max_players > kMaxPlayers ? kMaxPlayers : max_players;
     g_remote = g_max - 1;
     if (g_max == 4) {
@@ -522,8 +527,9 @@ void tick() {
 void log_status() {
     if (g_max == 4) return;
     LOG_INFO("[coop] More players: up to %d in a session (the game's records, slots and character set widened; the "
-             "floating health bars %s; players past the party's four have no party entry)", g_max,
-             g_bars ? "show every other player, seven at most" : "stay with the party's four");
+             "floating health bars %s; %s)", g_max,
+             g_bars ? "show every other player, seven at most" : "stay with the party's four",
+             partylist::widened() ? "the party list holds eight" : "players past the party's four have no party entry");
 }
 
 }  // namespace coop::players

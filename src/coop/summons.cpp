@@ -396,9 +396,30 @@ void recount(uint32_t p) {
     }
 }
 
-// The entry goes as 0xEA1900 empties one: handle -1, type 1, state 0, -1, -1.
+// The party's three NPC handles (+0x68 .. +0x70) and their count (+0x74), which the touch summon and the add go
+// by: an NPC's handle leaves them as the game's own leave takes it out (0xEA1720), or it stays there for good
+// (the party is kept through loads in a session, so the reset that would drop it does not run) and three stale
+// handles refuse every NPC's sign (partylist.cpp).
+void drop_npc_handle(uint32_t p, uint32_t handle) {
+    int n = 0;
+    for (int off = 0x68; off <= 0x70; off += 4) {
+        int32_t& h = *ptr<int32_t>(p + partylist::field(off));
+        if (h == -1) continue;
+        if (static_cast<uint32_t>(h) == handle) {
+            h = -1;
+        } else {
+            ++n;
+        }
+    }
+    *ptr<int32_t>(p + partylist::field(0x74)) = n;
+}
+
+// The entry goes as 0xEA1900 empties one: handle -1, type 1, state 0, -1, -1 (an NPC's handle out of the NPCs').
 void blank_entry(uint32_t p, int i) {
     const uint32_t e = p + kEntries + i * kEntrySize;
+    if (*ptr<int32_t>(e + 4) == static_cast<int32_t>(kTypeNpc) && *ptr<int32_t>(e) != -1) {
+        drop_npc_handle(p, *ptr<uint32_t>(e));
+    }
     *ptr<int32_t>(e) = -1;
     *ptr<int32_t>(e + 4) = 1;
     *ptr<int32_t>(e + 8) = 0;

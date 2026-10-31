@@ -69,10 +69,16 @@ members").
   after the first) in the constructor's vector, the add, the leave, the reset, the update, the recount, the resend
   to a joiner, the dismissal and packet 49's receiver (`0xEA16F0` .. `0xEA2FD0`). The fields: 61 accesses in the
   party's code and the vtable destructor, 21 tests of +0x7C elsewhere (three of them under the mod's loot hooks,
-  which read the moved slot), one `add eax, 0x68`. 105 sites in all, with the allocation's size. The blank of the
-  whole list (`0xEA1900`, written out for four entries) is replaced. The add's room test compares with the eight
-  entries instead of the session's member limit, and so does the touch summon (`0xDB3590`, also every NPC invasion)
-  for an NPC's sign: an NPC does not take a player's place, it needs an entry. A player's sign keeps the game's test.
+  which read the moved slot), one `add eax, 0x68`. 104 sites in all, with the allocation's size. The blank of the
+  whole list (`0xEA1900`, written out for four entries) is replaced. The add's room test (`0xEA252A`) compares with
+  the eight entries instead of the session's member limit, and so does the touch summon (`0xDB3590`, also every NPC
+  invasion) for an NPC's sign: an NPC does not take a player's place, it needs an entry. An NPC also needs one of
+  the list's three NPC handles: the touch summon stores its handle right after the test (`0xEA1770`, which stores
+  nothing once the three are taken, and the summon's add at `0xDB3E2F` ignores a refusal), so an NPC's sign is
+  refused when the eight entries or the three handles are full, and the add refuses an NPC whose handle is not one
+  of the three when they are. A player's sign keeps the game's test (`SessMan+0x8C`). The mod's own blank of an
+  entry takes an NPC's handle out of the three as the game's leave does (`0xEA1720`): the party is kept through
+  loads in a session, so the reset that drops them does not run, and stale handles would refuse every NPC.
 - **How it was found.** A sweep of the party's code (`0xEA1600` .. `0xEA3400`, every displacement 0x68 .. 0x8B and
   every bound 3/4, each checked by hand: the same displacements on characters, vtables and other managers are left
   alone) and of the 76 reads of GameMan+0xBEC elsewhere (only the counts, entries bounded by +0x10, and +0x7C; one

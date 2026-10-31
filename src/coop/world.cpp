@@ -320,7 +320,7 @@ bool apply(uint32_t chr, int id) {
 
 uint32_t find_effect(uint32_t chr, int id, uint32_t* ctrl_out) {
     uint32_t ctrl = 0, node = 0;
-    if (!chr || !read32(chr + 0x1E0, &ctrl) || !ctrl || !read32(ctrl + 4, &node)) return 0;
+    if (!chr || !read32(chr + 0x1E0, &ctrl) || ctrl < 0x10000 || !read32(ctrl + 4, &node)) return 0;
     for (int guard = 0; node && guard < 512; ++guard) {
         uint32_t nid = 0;
         if (!read32(node + 0x28, &nid)) return 0;
@@ -1712,9 +1712,15 @@ void tick() {
     } else {
         g_no_session_since = 0;
     }
+    // The first frames after a load can still list the old map's freed enemies (their effect lists faulted when
+    // read, 2026-10-31, at the reload after a lost boss fight and at a respawn): the scaling, which adds and takes
+    // effects, waits a little after every load.
+    static double loaded_at = 0;
     if (!game::loading()) {
-        scale_tick();
+        if (loaded_at == 0) loaded_at = now();
+        if (now() - loaded_at >= 2.0) scale_tick();
     } else {
+        loaded_at = 0;
         // A load frees every enemy, and the next ones may get the same addresses: what we knew goes with them.
         g_scaled.clear();
         g_fill_hp.clear();

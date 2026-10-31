@@ -1,7 +1,7 @@
 # More than four players (MaxPlayers)
 
-Status in 1.4.0: **experimental, off by default** (`MaxPlayers = 4`). Stages 1 and 2 are built and checked offline
-against the game's own code; they have not run with five or more players yet.
+Status in 1.4.0: **experimental, off by default** (`MaxPlayers = 4`). Stages 1 and 2 are built and checked against
+the game's own code, and ran with five players on 2026-10-31 (below: what that test found).
 
 ## Is eight harder than six?
 
@@ -95,6 +95,41 @@ members").
 
 - **A "recently met" list at `SessMan+0x1B4`** (three names, its own bound) and the values `0xD280E0` writes into it
   per slot (`cmp eax, 2` kept): players past the fourth are not added. Harmless.
+
+## The five-player test (2026-10-31)
+
+Five games (four PCs and a Steam Deck under Proton, the Deck the fifth to join) played the Undead Asylum, the Asylum
+Demon with two players in its fight, the crow to Firelink Shrine and two invasions of the full party. Joining,
+the widened records, slots and party list, the bars, the cutscene follow and the invasions held. What went wrong,
+none of it in the widened parts:
+
+- **Characters paired with the wrong players** (`session.cpp`, update_remote_players). A lost boss fight's reload
+  brought all five back at one bonfire, and each game matched the others' characters to their players by the
+  positions they report: three games got some wrong. The session member records, which the game pairs with its
+  characters itself, were compared with character names only, while they hold Steam names. The records now come
+  first; a position match is refused while two players stand within 3 m of each other.
+- **What followed from it.** When 6700k fell, three games took the dying character for a living player's and rebuilt
+  it while 6700k still lay dead (`party.cpp` rebuilds a character whose player is back on their feet). The host then
+  had no character for 6700k and sent its game no more enemy lists (0xE57850 sends a member's list only while the
+  member has a character), so 6700k's game kept the Asylum Demon for five minutes while three other games took it in
+  turn; the Deck's copy took both games' updates and jumped between two places and two attacks every frame. The
+  others froze the demon in its last attack for 22 s first: an attack another game moves held every bid for 20 s,
+  updates or not. Two fallen players later spectated a character that bore the last standing player's name but was
+  another fallen player's, and saw "Waiting for the fight to be decided".
+- **Guards added** (`rules.cpp`): a guest's game whose last list from the host is more than 5 s old gives up an enemy
+  of its list as soon as another game sends that enemy's position (hook at `0xE57C3F` for the list, the receiver's
+  mark on the entry for the position); another game's attack holds an enemy only while that game's updates for it
+  come (1 s).
+- **Living players dying on the Deck alone.** Three times in its first three minutes the Deck ran a living player's
+  death on its copy: an update from that player said health 0 (NetworkManipulator `0xE1F9E4`, the sample's +0x14),
+  the next said 594, and the copy stayed dead, unseen, its party entry "dying". No other game saw it, and the cause is
+  not known yet. Such an update is now held back while the player's own game says they live (1.5 s at most), and
+  logged with its bytes.
+- **DynamicSmoothing** (`netrate.cpp`) counted the receiving game's own frame stalls and frame steps as jitter; the
+  Deck's smoothing values jumped about on the health bars. Gaps across a long frame of ours are left out, deviations
+  within half a frame are not counted, and the smoothing falls back 2.5 times faster.
+- Not from the widening: the invader's "other world" was a stranger's session with the same password; the Dried
+  Fingers' 1.5 weight gave the party's world 60 % of each search (2 of 7 picks: about a 1 in 10 run).
 
 ## Testing
 

@@ -4268,6 +4268,7 @@ bool attack_action(int id) { return id >= 3000 && id < 5000; }
 // jumping slam in a row (3008 twice, 12.6 s; attacks there ran 0.6 to 6.9 s, three 3005s in a row 12 s). An enemy
 // whose AI is off attacks nothing.
 constexpr double kAttackHold = 20.0;
+constexpr double kAttackQuiet = 1.0;  // another game's attack holds while its updates for the copy come this often
 struct AttackHold {
     int action = 0;
     double since = 0;
@@ -4302,7 +4303,15 @@ int attack_hold(uint32_t chr) {
         }
         return 0;
     }
-    return moved_here(chr) ? 1 : 2;
+    if (moved_here(chr)) return 1;
+    // Another game's attack holds the enemy only while that game is heard from. A copy that gets no more updates
+    // stands in the last attack it was sent, and every game whose copy stood so bid nothing for 20 s: after 6700k's
+    // character was taken out of three games (2026-10-31), the Asylum Demon stood in its attack 3012 there for 22 s
+    // while 6700k's game, which no longer reached them, fought on with it, until the hold ran out and another game
+    // took it as well.
+    uint32_t net_ai = 0;
+    if (read32(chr + 0x414, &net_ai) && net_ai && netrate::since_update(net_ai) > kAttackQuiet) return 0;
+    return 2;
 }
 
 std::string anim_probe(uint32_t chr) { return "animation " + std::to_string(action_of(chr)); }
@@ -4365,7 +4374,14 @@ void boss_copy_tick() {
             continue;
         }
         netrate::CopyStats st;
-        if (!netrate::copy_stats(net_ai, &st) || st.updates == 0) continue;
+        if (!netrate::copy_stats(net_ai, &st)) continue;
+        // The counts are since they were last read: the first reading after a while (the boss woke, or another game
+        // moved it again) held them all ("7140 updates in the last second", 2026-10-31) and is dropped.
+        static std::map<uint32_t, double> read_at;  // the copy's manipulator -> when its counts were last read
+        double& r = read_at[net_ai];
+        const bool recent = t - r <= 2.0;
+        r = t;
+        if (!recent || st.updates == 0) continue;
         double& q = quiet[chr];
         if (st.jumps == 0 && t - q < 10.0) continue;
         if (st.jumps == 0) q = t;
@@ -4374,6 +4390,185 @@ void boss_copy_tick() {
                  "ms, gap %d ms), speed %.1f m/s, animation %d", e, st.updates, st.jumps, st.smoothing_ms,
                  st.jitter_ms, st.gap_ms, st.speed, action_of(chr));
     }
+}
+
+// ---------------------------------------------------------------- enemies the session host no longer hands us
+// A guest's game moves the enemies of the last list the session host sent it (0xE57850: packet 0x15 from the host,
+// taken at 0xE57C3F, where 0xE553F0 clears the own table, WorldChrMan+0x2B4, and the listed handles are set). The
+// host sends each member's game its list every 3 s, but only for a member whose character is in the host's world
+// (0xE3D930 finds none, and that member's bids go unread). A game the host stops listing keeps its last list for good:
+// on 2026-10-31 6700k's game moved the Asylum Demon for five minutes after the host took 6700k's character out (a
+// wrong match, update_remote_players), while the host gave the demon to three other games in turn, and the deck, whose
+// copy took both games' updates, saw it jump between two places and two attacks every frame. A game whose last list
+// is more than kListStale old gives up an enemy of its list as soon as another game sends that enemy's position: the
+// receiver (0xE556F0) marks the entry (bit 0 of its flags byte, which only the network's copy takes, 0xE55360), and
+// the other game has been handed it since. An enemy no other game moves stays ours (the host may be loading).
+constexpr uint32_t kListTakenSite = 0x00E57C3F;
+constexpr uint32_t kOwnTableReset = 0x00E553F0;
+constexpr double kListStale = 5.0;
+uint32_t g_own_table_reset = kOwnTableReset;
+double g_list_at = 0;  // when our last list came (seconds())
+
+void __cdecl note_list_taken() { g_list_at = seconds(); }
+
+__declspec(naked) void hk_list_taken() {
+    __asm {
+        pushad
+        call note_list_taken
+        popad
+        jmp dword ptr [g_own_table_reset]
+    }
+}
+
+uint32_t chr_by_net_handle(uint32_t handle);
+
+// Our enemies (own table entry >= 0, and this game moves the character: an event animation's lead can say otherwise)
+// with another game's position on them since the last look: the mark is cleared while our list is fresh, the enemy
+// given up while it is stale. Returns how many were given up, the first one's net handle in `first`. A page is a map
+// block's: +4 its characters ({count, entries of 0x20}), +8 its count, +0xC the own table (shorts), +0x1C the flags.
+int scan_own_enemies(uint32_t table, bool stale, uint32_t* first) {
+    int dropped = 0;
+    __try {
+        const uint32_t pages = *ptr<uint32_t>(table + 4);
+        for (uint32_t i = 0; i < pages && i < 0x20; ++i) {
+            const uint32_t page = *ptr<uint32_t>(table + 8 + i * 4);
+            if (!page) continue;
+            const uint32_t n = *ptr<uint32_t>(page + 8), own = *ptr<uint32_t>(page + 0xC);
+            const uint32_t flags = *ptr<uint32_t>(page + 0x1C), chrs = *ptr<uint32_t>(page + 4);
+            if (!own || !flags || !chrs || n > 0x800) continue;
+            const uint32_t chr_count = *ptr<uint32_t>(chrs), chr_entries = *ptr<uint32_t>(chrs + 4);
+            for (uint32_t k = 0; k < n; ++k) {
+                int16_t* o = ptr<int16_t>(own + k * 2);
+                uint8_t* f = ptr<uint8_t>(flags + k);
+                if (*o < 0 || !(*f & 1) || k >= chr_count || !chr_entries) continue;
+                const uint32_t chr = *ptr<uint32_t>(chr_entries + k * 0x20);
+                if (!chr || !moved_here(chr)) continue;
+                if (!stale) {
+                    *f &= 0xFE;
+                    continue;
+                }
+                *o = -1;  // the network's from now on: the position waiting in the entry is taken at once
+                if (!dropped++ && first) *first = i << 11 | k;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return dropped;
+}
+
+void stale_list_tick() {
+    static double last = 0;
+    const double t = seconds();
+    if (t - last < 0.25) return;
+    last = t;
+    uint32_t wcm = 0, table = 0;
+    if (!seamless_rules() || game::loading() || game::session_state() != 6 ||
+        !read32(game::kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x2B4, &table) || !table) {
+        g_list_at = t;  // the wait starts again in the next world or session
+        return;
+    }
+    uint32_t first = 0;
+    const double age = t - g_list_at;
+    const int dropped = scan_own_enemies(table, age > kListStale, &first);
+    static int lines = 0;
+    if (dropped && ++lines <= 30) {
+        const uint32_t chr = chr_by_net_handle(first);
+        const int boss = gauge_boss_of(chr);
+        LOG_INFO("[coop] The session host has handed us no enemies for %.0f s, and another game moves %d of ours "
+                 "(first %08X%s%s): they follow that game now", age, dropped, first, boss ? ", boss " : "",
+                 boss ? std::to_string(boss).c_str() : "");
+    }
+}
+
+// ---------------------------------------------------------------- another player's update with no health
+// Another player's character takes its health from each of their updates (NetworkManipulator 0xE1F950: the sample's
+// word +0x14, SetHP 0xE688E0). One that brings it from above 0 to 0 runs the character's death here (0x1FF bit 5,
+// 0xE80790), and its party list entry goes to dying (0xEA2FD0: state 3 -> 4). The next update's health does not undo
+// that: the character stays dead in this game, unseen, while its player plays on. On 2026-10-31 the deck saw it
+// happen to three living players in its first three minutes of a five-player session (their health 594 again half a
+// second later, their entries left dying); no other game did, and where those updates came from is not known yet.
+// Every player's game says when they fall (kDied, then its status): an update with no health for a player whose game
+// says they live is held back, their health kept, for kZeroHpHold at most (an old game, or its word lost), and logged
+// with the update's bytes. A player matched to no character, and an invader's game, keep the game's own way.
+constexpr uint32_t kRemoteHpTest = 0x00E1F9E9;  // test ebx,ebx ; jle 0xE1FA19 ; cmp dword [esp+14h],0 ; jg 0xE1FA19
+constexpr uint32_t kRemoteHpKept = 0x00E1FA19;
+constexpr uint32_t kRemoteHpDeath = 0x00E1F9F4;
+constexpr double kZeroHpHold = 1.5;
+uint32_t g_remote_hp_kept = kRemoteHpKept;
+uint32_t g_remote_hp_death = kRemoteHpDeath;
+
+// esi = the character, edi = its NetworkManipulator, `old_hp` its health before this update. True: the death goes.
+bool __stdcall remote_hp_zero(uint32_t chr, uint32_t manip, int old_hp) {
+    if (!seamless_rules()) return true;
+    std::string name;
+    if (session::remote_player_down(chr, &name) != 0) return true;
+    struct Hold {
+        double first = 0;
+        double last = -100;
+        bool told = false;
+    };
+    static std::map<uint32_t, Hold> holds;
+    const double t = seconds();
+    Hold& h = holds[chr];
+    if (t - h.last > 1.0) h = Hold{t, t, false};
+    h.last = t;
+    static int lines = 0;
+    if (t - h.first > kZeroHpHold) {
+        if (++lines <= 40) {
+            LOG_INFO("[coop] %s's character %08X: updates with no health for %.1f s, and their game has not said they "
+                     "fell: the death goes ahead", name.c_str(), chr, kZeroHpHold);
+        }
+        return true;
+    }
+    if (!h.told) {
+        h.told = true;
+        if (++lines <= 40) {
+            char bytes[3 * 0x28 + 1] = "";
+            uint32_t sample = 0;
+            if (read32(manip + 0x254, &sample) && sample) {
+                for (uint32_t i = 0; i < 0x28; ++i) {
+                    uint8_t b = 0;
+                    if (!read8(sample + i, &b)) break;
+                    std::snprintf(bytes + i * 3, 4, "%02X ", b);
+                }
+            }
+            LOG_INFO("[coop] %s's character %08X: an update with no health while their game says they live: held "
+                     "back, their health %d kept (the update: %s)", name.c_str(), chr, old_hp, bytes);
+        }
+    }
+    return false;
+}
+
+// At the test: ebx = the health before the update, [esp+14h] the update's. Held back, the health goes back to ebx and
+// the code goes on as for an update with health.
+__declspec(naked) void hk_remote_hp() {
+    __asm {
+        test ebx, ebx
+        jle kept
+        cmp dword ptr [esp + 14h], 0
+        jg kept
+        pushad
+        push ebx
+        push edi
+        push esi
+        call remote_hp_zero
+        test al, al
+        popad
+        jnz death
+        mov dword ptr [esi + 2D4h], ebx
+    kept:
+        jmp dword ptr [g_remote_hp_kept]
+    death:
+        jmp dword ptr [g_remote_hp_death]
+    }
+}
+
+bool install_remote_hp() {
+    static const uint8_t k[11] = {0x85, 0xDB, 0x7E, 0x2C, 0x83, 0x7C, 0x24, 0x14, 0x00, 0x7F, 0x25};
+    uint8_t code[11] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_remote_hp) - (kRemoteHpTest + 5));
+    std::memcpy(code + 1, &rel, 4);
+    return patch(kRemoteHpTest, k, code, sizeof(code));
 }
 
 void boss_target_tick() {
@@ -5231,6 +5426,9 @@ int install() {
     }
     failed += install_one("enemies moved by a game whose player is near",
                           redirect_call(kNetPrioritySite, kNetPriority, reinterpret_cast<void*>(&hk_net_priority)));
+    failed += install_one("enemies the session host no longer hands us",
+                          redirect_call(kListTakenSite, kOwnTableReset, reinterpret_cast<void*>(&hk_list_taken)));
+    failed += install_one("a living player's update with no health", install_remote_hp());
     failed += install_one("event animations moved by the game that began them", install_own_test());
     failed += install_one("Black Separation Crystal (guest)",
                           redirect_call(kSepGuestSite, kSepGuestOrig, reinterpret_cast<void*>(&hk_separation_guest)));
@@ -5462,6 +5660,7 @@ void tick() {
     boss_handover_tick();
     boss_target_tick();
     boss_copy_tick();
+    stale_list_tick();
     anim_timeline_tick();
     party_team_tick();
     anim_watch_tick();

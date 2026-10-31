@@ -47,6 +47,8 @@ struct CopyStats {
     float speed = 0;
 };
 bool copy_stats(uint32_t manip, CopyStats* out);
+// Seconds since a copy's network manipulator last took an update, -1 when it has taken none we know of.
+double since_update(uint32_t manip);
 // Every frame on the game thread: send `rate` updates a second (kVanilla .. kMax), and receive as that rate wants.
 void tick(int rate);
 

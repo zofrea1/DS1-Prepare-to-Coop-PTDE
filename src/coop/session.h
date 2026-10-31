@@ -106,6 +106,9 @@ bool guest();
 bool active();       // any role, including searching and joining
 bool idle();         // no role at all (the session items may start one)
 bool invader();      // we invade
+// Another player's character here: 1 when that player's game has said they fell (their death message or status),
+// 0 when it says they live, -1 when the character is not matched to a player. `name` gets the player's name.
+int remote_player_down(uint32_t chr, std::string* name = nullptr);
 // The updates a second our game sends (netrate.h): the host's NetworkTickRate in its session (for a guest or an
 // invader, as the host's state says, once in the host's world; a host of 1.2.0 or older says nothing, which leaves the
 // game's own rate).

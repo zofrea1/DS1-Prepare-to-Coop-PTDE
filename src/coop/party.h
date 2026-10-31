@@ -16,9 +16,9 @@
 namespace coop::party {
 
 struct Remote {
-    int slot = -1;          // the member's slot in the remote player data (0..2)
+    int slot = -1;          // the member's slot in the remote player data (0 .. MaxPlayers - 2)
     uint32_t chr = 0;       // their PlayerIns in our world (0 = none)
-    std::wstring name;      // their character name
+    std::wstring name;      // the name in their record: their Steam name, cut to 16 characters
     bool data_ready = false;
 };
 

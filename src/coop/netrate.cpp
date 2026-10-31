@@ -117,13 +117,28 @@ bool g_receiving = false;  // above the game's own rate: the patches below are i
 // smoothing goes up fast (kRiseRate) and down slowly (kFallRate), within [kDynMin, kMaxSmoothing]: a burst of late
 // updates raises it for a few seconds, a steady link brings it down to 16 ms. A player's smoothing is shown on
 // their floating health bar (OverheadPlayerDisplay 5).
+// The gaps are measured in our own frames, when the game takes the updates, so two things in them are ours and not the
+// network's: the frame they fall on (an update a little late or early moves to the frame before or after: up to a
+// frame either way), and a long frame (a stall while effects or a map block load): every copy's next update comes that
+// much late at once. Until 1.4.0's five-player test (2026-10-31) both counted as jitter, and the Steam Deck (60 to 90
+// frames a second, stalls as players came into the Asylum Demon's fight and its effects loaded) showed every player's
+// smoothing jumping about on their health bars on a network with a low ping. Now a deviation within half of our frame
+// is not counted, and the gaps that cover a long frame of ours (kHitchMin and kHitchRatio times our usual frame) are
+// left out. The smoothing also comes back down faster after a burst (kFallRate, 0.01 until then: 18 s from 200 ms).
 constexpr double kDynMin = 0.016;
 constexpr double kJitterGain = 2.5;
 constexpr double kJitterFloor = 0.004;
 constexpr double kRiseRate = 0.08;  // seconds of smoothing a second
-constexpr double kFallRate = 0.01;
+constexpr double kFallRate = 0.025;
 constexpr double kOutlier = 0.25;   // a gap this far off the mean counts as only this far
+constexpr double kHitchMin = 0.04;
+constexpr double kHitchRatio = 2.5;
 bool g_dynamic = true;
+double g_frame_clock = 0;  // clock_now() at our last tick (once a frame)
+double g_frame_dt = 0;     // the frame before it
+double g_mean_frame = 0;   // our usual frame, long ones left out
+
+bool long_frame(double frame) { return g_mean_frame > 0 && frame > kHitchMin && frame > kHitchRatio * g_mean_frame; }
 
 // The enemies' jump test (snap_enemy) allows for how far behind a copy is on purpose: it covers each update in gap +
 // smoothing, so the copy of an enemy moving at v is about v x that behind. The test's 4.8 m (16 m/s over the game's
@@ -186,14 +201,20 @@ Track* note_update(uint32_t manip, double gap, double slack, bool enemy) {
     if (!t) return nullptr;
     t->enemy = enemy;
     const double g = gap > 0 && gap < 2.0 ? gap : 0.0;
-    if (g > 0) {
+    // The frame this update was taken in: the one our last tick ended, or the time since it, whichever is longer (the
+    // tick and the game's character updates come in some order within a frame).
+    const double since_tick = g_frame_clock > 0 ? g_clock - g_frame_clock : 0.0;
+    const double frame = since_tick > g_frame_dt ? since_tick : g_frame_dt;
+    if (g > 0 && !long_frame(frame)) {
         if (t->mean <= 0) {
             t->mean = g;
         } else {
             double d = g - t->mean;
             if (d > kOutlier) d = kOutlier;
             if (d < -kOutlier) d = -kOutlier;
-            t->jitter += (std::fabs(d) - t->jitter) / 16.0;
+            double late = std::fabs(d) - 0.5 * frame;
+            if (late < 0) late = 0;
+            t->jitter += (late - t->jitter) / 16.0;
             t->mean += d / 16.0;
         }
     }
@@ -550,7 +571,21 @@ bool copy_stats(uint32_t manip, CopyStats* out) {
     return true;
 }
 
+double since_update(uint32_t manip) {
+    const Track* t = manip ? track(manip, false) : nullptr;
+    if (!t || t->last <= 0) return -1;
+    return clock_now() - t->last;
+}
+
 void tick(int rate) {
+    // Our frames, for the jitter estimate (note_update): the length of the last one and a mean of the usual ones.
+    const double c = clock_now();
+    const double dt = g_frame_clock > 0 ? c - g_frame_clock : 0.0;
+    g_frame_clock = c;
+    g_frame_dt = dt > 0 && dt < 1.0 ? dt : 0.0;
+    if (g_frame_dt > 0 && !long_frame(g_frame_dt)) {
+        g_mean_frame = g_mean_frame > 0 ? g_mean_frame + (g_frame_dt - g_mean_frame) / 32.0 : g_frame_dt;
+    }
     if (rate < kVanilla) rate = kVanilla;
     if (rate > kMax) rate = kMax;
     // The enemies' round, every frame: the table is made again with each map load.

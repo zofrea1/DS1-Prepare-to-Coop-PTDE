@@ -4296,9 +4296,27 @@ const PeerInfo* peer_by_member_name(const std::wstring& name) {
     return nullptr;
 }
 
+// The one player a session member record's name (a Steam name, cut to 16 characters) can be; null when none or more
+// than one player has that name.
+const PeerInfo* peer_by_member_record(const std::wstring& name) {
+    if (name.empty()) return nullptr;
+    const PeerInfo* found = nullptr;
+    for (const auto& p : g_peers) {
+        if (now() - p.last_seen > 10.0) continue;
+        const std::wstring steam_name = text::widen(p.name);
+        if (!(name == steam_name || (name.size() >= 16 && steam_name.compare(0, name.size(), name) == 0))) continue;
+        if (found) return nullptr;
+        found = &p;
+    }
+    return found;
+}
+
+// party::tick asks with a member record's character and name, which the game pairs itself (update_remote_players):
+// the record's name goes first.
 party::PeerState peer_state(uint32_t chr, const std::wstring& name) {
     party::PeerState s;
-    const PeerInfo* p = chr ? peer_by_chr(chr) : nullptr;
+    const PeerInfo* p = peer_by_member_record(name);
+    if (!p && chr) p = peer_by_chr(chr);
     if (!p) p = peer_by_char_name(name);
     if (!p) p = peer_by_member_name(name);
     if (!p) return s;
@@ -4334,9 +4352,19 @@ void update_remote_players() {
         rules::set_remote_players(out);
         return;
     }
-    // Every other player's character in our world (WorldChrMan's player slots), then who it belongs to: by
-    // character name (session member data), else by position (each player reports theirs every second), else by
-    // elimination (one character and one player left).
+    // Every other player's character in our world (WorldChrMan's player slots), then who it belongs to. First the
+    // game's own pairing: a session member's record (its slot's player data, which holds the member's Steam name,
+    // cut to 16 characters) and the character the game made for that member (party::remotes: 0xE3D930, by the
+    // member id on the character). Then, for a character no record names: a match made earlier, the record's name
+    // as a character name, the position each player reports every second, and elimination (one character and one
+    // player left). Until 1.4.0 the records were compared with character names only, and a match made earlier went
+    // first, so after a load every character was matched by position, and five players who came back at one bonfire
+    // were paired up wrongly in three of the five games (2026-10-31, after a reload for a lost boss fight). The host's
+    // character for 6700k carried spambrion's name: when 6700k fell, the host's game took the dead character for a
+    // living spambrion's, rebuilt it while 6700k still lay dead and spectated, and with no character for 6700k the
+    // host handed 6700k's game no more enemies, so it kept the Asylum Demon it moved while three other games took it
+    // in turn. Two players who fell later followed a character named for the last one standing that was another
+    // fallen player's: "waiting for the fight to be decided" with no one to watch.
     struct Match {
         uint32_t chr;
         const PeerInfo* peer;
@@ -4345,9 +4373,26 @@ void update_remote_players() {
     std::vector<Match> chrs;
     for (uint32_t chr : game::remote_player_chrs()) chrs.push_back({chr, nullptr, "none"});
     const std::vector<party::Remote> members = party::remotes();
+    auto taken = [&](const PeerInfo* p) {
+        for (const auto& m : chrs) {
+            if (m.peer == p) return true;
+        }
+        return false;
+    };
+    for (auto& m : chrs) {
+        for (const auto& r : members) {
+            if (!r.chr || r.chr != m.chr) continue;
+            const PeerInfo* p = peer_by_member_record(r.name);
+            if (p && !taken(p)) {
+                m.peer = p;
+                m.how = "member";
+            }
+        }
+    }
     // A match made earlier stays (the position match is only good to a few metres and flip-flopped).
     for (auto& m : chrs) {
-        if (const PeerInfo* p = peer_by_chr(m.chr)) {
+        if (m.peer) continue;
+        if (const PeerInfo* p = peer_by_chr(m.chr); p && !taken(p)) {
             m.peer = p;
             m.how = "kept";
         }
@@ -4356,33 +4401,34 @@ void update_remote_players() {
         if (m.peer) continue;
         for (const auto& r : members) {
             if (r.chr != m.chr) continue;
-            if (const PeerInfo* p = peer_by_char_name(r.name)) {
+            if (const PeerInfo* p = peer_by_char_name(r.name); p && !taken(p)) {
                 m.peer = p;
                 m.how = "name";
             }
         }
     }
-    auto taken = [&](const PeerInfo* p) {
-        for (const auto& m : chrs) {
-            if (m.peer == p) return true;
-        }
-        return false;
-    };
     for (auto& m : chrs) {
         if (m.peer) continue;
         game::Vec3 pos{};
         if (!game::chr_position(m.chr, &pos)) continue;
         const PeerInfo* best = nullptr;
         float best_d = 12.0f * 12.0f;  // a second's run, and some
+        float next_d = 3.4e38f;        // the second nearest player
         for (const auto& p : g_peers) {
             if (now() - p.last_seen > 5.0 || taken(&p)) continue;
             const float dx = pos.x - p.pos[0], dy = pos.y - p.pos[1], dz = pos.z - p.pos[2];
             const float d = dx * dx + dy * dy + dz * dz;
             if (d < best_d) {
+                next_d = best_d;
                 best_d = d;
                 best = &p;
+            } else if (d < next_d) {
+                next_d = d;
             }
         }
+        // Two players a few metres apart (a bonfire after a load) cannot be told apart by the second-old positions:
+        // no match then, until one walks off or another way finds it.
+        if (best && std::sqrt(next_d) - std::sqrt(best_d) < 3.0f) best = nullptr;
         if (best) {
             m.peer = best;
             m.how = "position";
@@ -5228,6 +5274,13 @@ bool idle() { return g_role == Role::None; }
 bool invader() { return g_role == Role::Guest && g_invade; }
 const std::vector<PeerInfo>& peers() { return g_peers; }
 
+int remote_player_down(uint32_t chr, std::string* name) {
+    const PeerInfo* p = chr && g_role != Role::None ? peer_by_chr(chr) : nullptr;
+    if (!p) return -1;
+    if (name) *name = p->name;
+    return p->dead ? 1 : 0;
+}
+
 void remember_rest_point() {
     if (!game::in_game() || !game::own_world()) return;
     RestPoint r;
@@ -5691,7 +5744,8 @@ int g_bar_answer = 0;
 
 // 0 the game's own answer, 1 shown, 2 hidden.
 int __stdcall bar_answer(uint32_t rec) {
-    if (g_role == Role::None) return 0;
+    // During a load a bar's character may already be freed (its effect list read faulted, 2026-10-31).
+    if (g_role == Role::None || game::loading()) return 0;
     const uint32_t chr = chr_of_bar(rec);
     if (!chr) return 0;
     const auto it = g_chr_peer.find(chr);

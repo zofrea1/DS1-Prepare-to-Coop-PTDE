@@ -2479,6 +2479,117 @@ void __fastcall hk_chr_type_test(uint8_t* cond, void* edx, float dt, uint8_t* ev
     }
 }
 
+// The summon signs' filter (SosSignMan, 0xDB1050: thiscall-like (man, sign, placing)), on every sign as it is placed
+// (2003[25] -> 0xD79880 -> 0xDB3F70 -> 0xDB3800) and as it is shown: a game in a session as a client (SessMan+0x90 ==
+// 6, or the scripted summon's party slot PMI+0x7C in use: 0xD2A430) or in another player's world (GameMan+0xB4F == 0)
+// gets none, and a player who is not human (chr+0x70 != 0) none but the hollow's own sign type 3. A co-op guest is
+// both, so the NPC signs its game places (Solaire's and the others', whose events run here as for the host) never
+// showed, and the NPC invasions' black signs never came: only the host could summon an NPC. For a co-op guest an NPC's
+// sign (+0x88 = the NPC's entity, -1 a player's own sign) is filtered as in the host's game; the scripted summon still
+// keeps them all away. Players' signs keep the game's rule (a guest's game cannot open a session of its own).
+// While the world is cursed (Cursed Pendant) an NPC invasion's black sign (type 1) is placed for a hollow player too,
+// as its event's "human" test passes for them then (hk_chr_type_test): until 1.4.0 the event placed it and this filter
+// threw it away, so the curse brought no NPC invader to a hollow player, host or guest.
+constexpr uint32_t kSignSession = 0x00DB10A0;   // cmp dword ptr [0x137D82C], 0 (7 bytes; the test runs to 0xDB10C8)
+constexpr uint32_t kSignSessionOk = 0x00DB10C8;
+constexpr uint32_t kSignChrType = 0x00DB10E0;   // cmp eax, 8 ; jne 0xDB116B (9 bytes; then cmp bl, 3 ; jne)
+constexpr uint32_t kSignChrTypeOk = 0x00DB10EE;
+constexpr uint32_t kSignRefused = 0x00DB116B;
+constexpr uint32_t kSessManVar = 0x0137D82C;
+constexpr uint8_t kBlackSign = 1;
+
+bool npc_sign(uint32_t sign) {
+    uint32_t entity = 0xFFFFFFFF;
+    return sign && read32(sign + 0x88, &entity) && static_cast<int32_t>(entity) >= 0;
+}
+
+void log_sign(const char* what, uint32_t sign) {
+    static std::set<uint32_t> told;
+    uint32_t entity = 0;
+    read32(sign + 0x88, &entity);
+    if (told.size() < 40 && told.insert(entity).second) LOG_INFO("[coop] NPC sign of %d: %s", entity, what);
+}
+
+// The game's session and world test, true when it refuses the sign.
+bool __cdecl sign_session_refused(uint32_t sign) {
+    uint32_t sess = 0, state = 0, gm = 0, pmi = 0, special = 0xFFFFFFFF;
+    uint8_t own = 1;
+    if (!read32(kSessManVar, &sess) || !sess) return false;
+    read32(sess + 0x90, &state);
+    if ((gm = game::game_man()) != 0) {
+        read8(gm + 0xB4F, &own);
+        if (read32(gm + game::kGmParty, &pmi) && pmi) read32(pmi + 0x7C, &special);
+    }
+    if (state != 6 && special == 0xFFFFFFFF && own) return false;
+    if (special != 0xFFFFFFFF || !npc_sign(sign) || !g_state.active || !g_state.guest || g_state.invader ||
+        !seamless_rules()) {
+        return true;
+    }
+    log_sign("placed for us, a co-op guest, as in the host's game", sign);
+    return false;
+}
+
+__declspec(naked) void hk_sign_session() {
+    __asm {
+        pushad
+        push ebp
+        call sign_session_refused
+        add esp, 4
+        test al, al
+        popad
+        jnz refused
+        push kSignSessionOk
+        ret
+    refused:
+        push kSignRefused
+        ret
+    }
+}
+
+bool __cdecl hollow_black_sign(uint32_t sign) {
+    if (!g_state.infection || !npc_sign(sign)) return false;
+    log_sign("an NPC invasion's sign for us although we are hollow: the world is cursed", sign);
+    return true;
+}
+
+// eax = our character's type (not 0), bl = the sign's type, ebp = the sign; ecx (WorldChrMan) is the game's.
+__declspec(naked) void hk_sign_chr_type() {
+    __asm {
+        cmp eax, 8
+        jne refused
+        cmp bl, 3
+        je ok
+        cmp bl, kBlackSign
+        jne refused
+        pushad
+        push ebp
+        call hollow_black_sign
+        add esp, 4
+        test al, al
+        popad
+        jz refused
+    ok:
+        push kSignChrTypeOk
+        ret
+    refused:
+        push kSignRefused
+        ret
+    }
+}
+
+bool install_sign_filter() {
+    static const uint8_t k1[7] = {0x83, 0x3D, 0x2C, 0xD8, 0x37, 0x01, 0x00};
+    static const uint8_t k2[9] = {0x83, 0xF8, 0x08, 0x0F, 0x85, 0x82, 0x00, 0x00, 0x00};
+    if (!bytes_match(kSignSession, k1, sizeof(k1)) || !bytes_match(kSignChrType, k2, sizeof(k2))) return false;
+    uint8_t c1[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
+    const int32_t r1 = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_sign_session) - (kSignSession + 5));
+    std::memcpy(c1 + 1, &r1, 4);
+    uint8_t c2[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};
+    const int32_t r2 = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_sign_chr_type) - (kSignChrType + 5));
+    std::memcpy(c2 + 1, &r2, 4);
+    return patch(kSignSession, k1, c1, sizeof(c1)) && patch(kSignChrType, k2, c2, sizeof(c2));
+}
+
 // A run of a map event that another player's game started reaches this game as an event sync (FrpgEmkEventIns
 // slot 4, 0xBC4000: thiscall(event, connection, type, data, size), ret 0x10). Types 1 and 2 move the event's
 // program counter (+0x20 points at it) past the condition that passed there, and set its player (+0x44 = 10001 +
@@ -5068,6 +5179,7 @@ int install() {
     failed += install_one("world tendency", swap_pointer(kTendencyVtable + 4, kTendencyTest, reinterpret_cast<void*>(&hk_tendency)));
     failed += install_one("NPC invasions in a cursed world",
                           swap_pointer(kChrTypeVtable + 4, kChrTypeTest, reinterpret_cast<void*>(&hk_chr_type_test)));
+    failed += install_one("NPC summon signs for co-op guests", install_sign_filter());
     {
         // push esi ; mov esi,ecx ; movzx ecx,byte [esi+18h]
         static const uint8_t k[7] = {0x56, 0x8B, 0xF1, 0x0F, 0xB6, 0x4E, 0x18};

@@ -67,6 +67,11 @@ constexpr uint32_t kUpdateNext = 0x00EA3340;   // add ebp,14h: the next entry
 // searches it). Until the 2026-10-24 test this read +0x74 as a pointer to the list: no NPC phantom was ever named,
 // the host's list went out empty, and a guest's copy of Solaire left its party 3 s after his summon.
 constexpr uint32_t kBlockCount = 0x70, kBlocks = 0x74, kEntityCount = 0x50, kEntityPairs = 0x54;
+// SosSignMan's summon of an NPC sign's phantom (0xDB3BF0, the pending summons): 0xE407F0, then 0xEA2510 here
+// (stdcall(party, chr+4, sign table +0xC = chr type, 2, f1, f2, table +8 = f3)), then packet 48 to the session.
+// The game summons so for whoever touched the sign (a black sign: when its time comes); a co-op guest's game too,
+// now that NPC signs are placed for co-op guests (rules.cpp, hk_sign_session).
+constexpr uint32_t kSignAdd = 0x00DB3E2F;
 
 bool g_visitor = false;
 std::map<uint32_t, int32_t> g_entity_of;   // our NPC party entries (handle) -> the entity they are
@@ -77,6 +82,19 @@ std::set<uint32_t> g_told_waiting;         // characters we said could not becom
 std::map<uint32_t, double> g_listed_since; // characters of the host's phantoms in our party, since when (show_late)
 std::set<uint32_t> g_shown;                // characters show_late enabled
 bool g_heard = false;                      // a list came from the host (a 1.2.0 host sends none)
+// A co-op guest's own summons: the NPC phantoms our game summoned from a sign (kSignAdd). The host is told
+// (kNpcSummons), sends them on with its own and makes its copy the phantom too, so every player has them as the
+// host's are had. A load of ours ends them (as the host's own loads end its summons); for a while after that the
+// host's list, which still names them, does not bring them back here.
+std::map<uint32_t, Phantom> g_mine;       // handle -> what it is
+std::map<uint32_t, double> g_mine_ended;  // handle -> when it ended here
+uint32_t g_mine_player = 0;               // our character when g_mine was last brought up to date
+constexpr double kEndedHold = 15.0;
+// Host: the co-op guests' own NPC phantoms, as the session has them now (set_foreign), and the ones that ended,
+// since when: our copies leave our party, and our own list does not take them for ours meanwhile.
+std::vector<Phantom> g_foreign;
+std::map<uint32_t, double> g_foreign_ended;
+constexpr double kForeignEndedHold = 30.0;
 // Our own world: the NPC phantoms of our party as we last saw them loaded. Solaire follows his summoner anywhere in
 // a session (no walls keep phantoms in an area, and the party is not reset at a map-block change), so his own map
 // block can unload under him while he is still summoned: his character is gone until the block streams back, and
@@ -409,6 +427,133 @@ bool own_kept(uint32_t handle) {
     return it != g_own.end() && it->second.away && !chr_by_handle(handle);
 }
 
+// Host: a party entry for a co-op guest's summon (now, or ended lately): not one of ours to list, keep or sweep.
+bool foreign(uint32_t handle) {
+    for (const Phantom& ph : g_foreign) {
+        if (ph.handle == handle) return true;
+    }
+    const auto it = g_foreign_ended.find(handle);
+    return it != g_foreign_ended.end() && now() - it->second < kForeignEndedHold;
+}
+
+// Our game summoned an NPC sign's phantom (kSignAdd). Kept as ours while we are a co-op guest.
+void __cdecl note_sign_summon(uint32_t handle, int32_t type, int32_t f1, int32_t f2) {
+    if (!g_visitor) return;
+    Phantom ph;
+    ph.entity = entity_of(handle);
+    ph.handle = handle;
+    ph.kind = type;
+    ph.f1 = f1;
+    ph.f2 = f2;
+    g_mine[handle] = ph;
+    g_mine_ended.erase(handle);
+    LOG_INFO("[coop] We summoned NPC %d (character %08X, type %d) as a co-op guest: the host is told", ph.entity,
+             handle, static_cast<int>(type));
+}
+
+// At kSignAdd: [esp] = return, [esp+4] party, +8 handle, +0xC chr type, +0x10 2, +0x14 f1, +0x18 f2, +0x1C f3.
+__declspec(naked) void hk_sign_add() {
+    __asm {
+        pushad
+        push dword ptr [esp + 0x38]  // f2
+        push dword ptr [esp + 0x38]  // f1
+        push dword ptr [esp + 0x34]  // chr type
+        push dword ptr [esp + 0x34]  // handle
+        call note_sign_summon
+        add esp, 16
+        popad
+        mov eax, kPartyAdd
+        jmp eax
+    }
+}
+
+// A co-op guest: our summons as the party has them. A load ends them all; one whose entry left the party is over
+// (dismissed, dead, gone home).
+void mine_refresh() {
+    const uint32_t me = game::player();
+    if (game::loading() || !me || me != g_mine_player) {
+        for (const auto& m : g_mine) g_mine_ended[m.first] = now();
+        if (!g_mine.empty()) {
+            LOG_INFO("[coop] A load: the NPC phantoms we summoned are gone (%u)", unsigned(g_mine.size()));
+        }
+        g_mine.clear();
+        g_mine_player = me;
+        return;
+    }
+    const uint32_t p = party();
+    for (auto it = g_mine.begin(); it != g_mine.end();) {
+        if (p && entry_of(p, it->first) >= 0) {
+            ++it;
+            continue;
+        }
+        LOG_INFO("[coop] NPC phantom %d we summoned has left our party", it->second.entity);
+        g_mine_ended[it->first] = now();
+        it = g_mine.erase(it);
+    }
+    for (auto it = g_mine_ended.begin(); it != g_mine_ended.end();) {
+        it = now() - it->second > kEndedHold ? g_mine_ended.erase(it) : std::next(it);
+    }
+}
+
+bool mine_ended(uint32_t handle) {
+    const auto it = g_mine_ended.find(handle);
+    return it != g_mine_ended.end() && now() - it->second < kEndedHold;
+}
+
+// Host: each co-op guest's summon becomes the phantom in our game too when the NPC is in our world (also after our
+// own loads), as a visitor's game does with ours; one whose summoner's game no longer has it leaves our party.
+void foreign_tick() {
+    static double last = 0;
+    if (now() - last < 0.5) return;
+    last = now();
+    const uint32_t p = party();
+    if (!p || game::loading() || !game::player() || !game::own_world()) return;
+    for (const Phantom& ph : g_foreign) {
+        const uint32_t chr = ph.entity >= 0 ? chr_by_entity(ph.entity) : chr_by_handle(ph.handle);
+        uint32_t h = 0;
+        if (!chr || !read32(chr + 4, &h) || h == 0xFFFFFFFF) continue;
+        const bool phantom = chr_type(chr) == ph.kind;
+        const int entry = entry_of(p, h);
+        if (phantom && entry >= 0) continue;
+        if (!phantom && !make_phantom(h, ph.kind)) {
+            if (g_told_waiting.insert(chr).second && ++g_lines <= 40) {
+                LOG_INFO("[coop] A guest's NPC phantom %d (character %08X) cannot become one here yet", ph.entity, h);
+            }
+            continue;
+        }
+        if (entry >= 0) {
+            blank_entry(p, entry);
+            recount(p);
+        }
+        const bool added = party_add(p, h, chr_type(chr), ph.f1, ph.f2);
+        if (++g_lines <= 40) {
+            LOG_INFO("[coop] A guest's NPC phantom %d is a phantom here too (character %08X, type %d, summoned in%s)",
+                     ph.entity, h, static_cast<int>(chr_type(chr)), added ? "" : "; our party has no room");
+        }
+    }
+    for (auto it = g_foreign_ended.begin(); it != g_foreign_ended.end();) {
+        if (now() - it->second > kForeignEndedHold) {
+            it = g_foreign_ended.erase(it);
+            continue;
+        }
+        const uint32_t h = it->first;
+        const int entry = entry_of(p, h);
+        if (entry >= 0) {
+            const uint32_t chr = chr_by_handle(h);
+            const int32_t t = chr_type(chr);
+            if (chr && (t == 1 || t == 2)) {
+                party_leave(p, h);  // the game's own departure of an NPC phantom
+            } else {
+                blank_entry(p, entry);
+                recount(p);
+            }
+            LOG_INFO("[coop] A guest's NPC phantom (character %08X) left our party: its summoner's game has it no more",
+                     h);
+        }
+        ++it;
+    }
+}
+
 // Brings g_own up to date (our own world, every frame and before each list we send).
 void own_refresh() {
     const uint32_t me = game::player();
@@ -428,7 +573,7 @@ void own_refresh() {
     for (int i = 0; i < kEntryCount; ++i) {
         const uint32_t e = p + kEntries + i * kEntrySize;
         uint32_t h = 0, type = 0, f1 = 0, f2 = 0;
-        if (!read32(e, &h) || h == 0xFFFFFFFF || !read32(e + 4, &type) || type != kTypeNpc) continue;
+        if (!read32(e, &h) || h == 0xFFFFFFFF || !read32(e + 4, &type) || type != kTypeNpc || foreign(h)) continue;
         present.insert(h);
         read32(e + 0xC, &f1);
         read32(e + 0x10, &f2);
@@ -517,9 +662,29 @@ std::vector<Phantom> ours() {
             continue;
         }
         const auto it = g_own.find(h);
-        if (it != g_own.end()) out.push_back(it->second.ph);
+        if (it != g_own.end() && !foreign(h)) out.push_back(it->second.ph);
     }
     return out;
+}
+
+std::vector<Phantom> mine() {
+    std::vector<Phantom> out;
+    if (!g_visitor) return out;
+    for (const auto& m : g_mine) out.push_back(m.second);
+    return out;
+}
+
+void set_foreign(const std::vector<Phantom>& list) {
+    for (const Phantom& was : g_foreign) {
+        bool still = false;
+        for (const Phantom& ph : list) still = still || ph.handle == was.handle;
+        if (!still) g_foreign_ended[was.handle] = now();
+    }
+    for (const Phantom& ph : list) {
+        g_foreign_ended.erase(ph.handle);
+        g_own.erase(ph.handle);  // taken for ours before the guest's word came (its packet 48 made it here)
+    }
+    g_foreign = list;
 }
 
 int count() {
@@ -571,7 +736,7 @@ void own_world_sweep() {
         }
         const uint32_t chr = chr_by_handle(h);
         const int32_t t = chr_type(chr);
-        if (!chr || t == 1 || t == 2) continue;
+        if (!chr || t == 1 || t == 2 || foreign(h)) continue;
         const auto known = g_own.find(h);
         if (known != g_own.end() && known->second.away) continue;  // back from an unload: own_refresh revives it
         blank_entry(p, i);
@@ -592,9 +757,13 @@ void tick(bool visitor) {
         g_shown.clear();
         g_entity_of.clear();
         g_heard = false;
+        g_mine.clear();
+        g_mine_ended.clear();
         own_world_sweep();
+        foreign_tick();
         return;
     }
+    mine_refresh();
     static double last = 0;
     if (now() - last < 0.5) return;
     last = now();
@@ -613,7 +782,7 @@ void tick(bool visitor) {
         listed_handles.insert(ph.handle);
         const uint32_t chr = ph.entity >= 0 ? chr_by_entity(ph.entity) : chr_by_handle(ph.handle);
         uint32_t h = 0;
-        if (!chr || !read32(chr + 4, &h) || h == 0xFFFFFFFF) continue;
+        if (!chr || !read32(chr + 4, &h) || h == 0xFFFFFFFF || mine_ended(h)) continue;
         const bool phantom = chr_type(chr) == ph.kind;
         const int entry = entry_of(p, h);
         if (phantom && entry >= 0) {
@@ -648,7 +817,9 @@ void tick(bool visitor) {
     for (int i = 0; i < kEntryCount; ++i) {
         const uint32_t e = p + kEntries + i * kEntrySize;
         uint32_t h = 0, type = 0;
-        if (!read32(e, &h) || h == 0xFFFFFFFF || !read32(e + 4, &type) || type != kTypeNpc) continue;
+        if (!read32(e, &h) || h == 0xFFFFFFFF || !read32(e + 4, &type) || type != kTypeNpc || g_mine.count(h)) {
+            continue;
+        }
         const uint32_t chr = chr_by_handle(h);
         const auto known = g_entity_of.find(h);
         const int32_t entity = chr ? entity_of(h) : known != g_entity_of.end() ? known->second : -1;
@@ -689,7 +860,7 @@ bool settle_party(uint32_t p) {
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF) continue;
         read32(p + kEntries + i * kEntrySize + 4, &type);
         const int32_t t = chr_type(chr_by_handle(h));
-        if (type == kTypeNpc && (t == 1 || t == 2 || own_kept(h))) kept = true;
+        if (type == kTypeNpc && !foreign(h) && (t == 1 || t == 2 || own_kept(h))) kept = true;
     }
     if (!kept) return false;
     int npcs = 0;
@@ -699,6 +870,7 @@ bool settle_party(uint32_t p) {
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF) continue;
         read32(p + kEntries + i * kEntrySize + 4, &type);
         const int32_t t = chr_type(chr_by_handle(h));
+        if (type == kTypeNpc && foreign(h)) continue;  // a guest's summon: foreign_tick takes it out as the game does
         if (type == kTypeNpc && (t == 1 || t == 2 || own_kept(h))) {
             ++npcs;
             continue;
@@ -733,7 +905,9 @@ void solo_party(uint32_t p) {
     bool changed = false;
     for (int i = 0; i < kEntryCount; ++i) {
         uint32_t h = 0;
-        if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF || (local && h == local)) continue;
+        if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF || (local && h == local) || foreign(h)) {
+            continue;
+        }
         blank_entry(p, i);
         changed = true;
     }
@@ -743,7 +917,8 @@ void solo_party(uint32_t p) {
 bool install() {
     const bool make = redirect_call(kRecvMake, kMakePhantom, reinterpret_cast<void*>(&hk_recv_make)) &&
                       redirect_call(kRecvAdd, kPartyAdd, reinterpret_cast<void*>(&hk_recv_add));
-    const bool state = redirect_call(kRecvState, kPartyState, reinterpret_cast<void*>(&hk_recv_state));
+    const bool state = redirect_call(kRecvState, kPartyState, reinterpret_cast<void*>(&hk_recv_state)) &&
+                       redirect_call(kSignAdd, kPartyAdd, reinterpret_cast<void*>(&hk_sign_add));
     static const uint8_t k[7] = {0x8B, 0x45, 0x00, 0x48, 0x83, 0xF8, 0x05};
     uint8_t code[7] = {0xE8, 0, 0, 0, 0, 0x90, 0x90};
     const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_update_state) - (kUpdateState + 5));

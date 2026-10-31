@@ -102,6 +102,8 @@ enum MsgType : uint8_t {
     kNpcTalk = 33,       // 1.3.0, anyone -> all (through the host): an NPC says a line in my game, or stops (talk.cpp)
     kEventLead = 34,     // 1.4.0, anyone -> all (through the host): my game moves this character through an event's
                          // animation until it ends (EventLeadMsg; rules.cpp, lead_event_anim)
+    kNpcSummons = 35,    // 1.4.0, co-op guest -> host: the NPC phantoms my own game summoned (NpcPhantomsMsg); the
+                         // host sends them on with its own (kNpcPhantoms) and makes its copies the phantoms too
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -499,6 +501,8 @@ std::vector<PeerInfo> g_peers;
 // Host: the players it let in (a Welcome with kOk). Steam passes on packets from anyone in the lobby, so the host
 // takes world changes only from these. Kept apart from g_peers, which also holds players not let in.
 std::vector<uint64_t> g_admitted;
+// Host: each co-op guest's own NPC phantoms (their kNpcSummons), until they leave.
+std::map<uint64_t, std::vector<summons::Phantom>> g_guest_npcs;
 // Host: InvasionCooldown. The invaders that arrived in our world (kArrived) until they leave it; the end of an
 // invasion, whichever way the invader goes (set_admitted), closes the world to invaders until g_invade_open_at. It
 // outlives the session: a host who closes the world and opens it again is still on cooldown.
@@ -978,6 +982,7 @@ void invasion_over(uint64_t id) {
 // Every way a player leaves the session ends here (their leave, Bye, drop, a refused knock).
 void set_admitted(uint64_t id, bool on) {
     g_admitted.erase(std::remove(g_admitted.begin(), g_admitted.end(), id), g_admitted.end());
+    g_guest_npcs.erase(id);
     if (on) {
         g_admitted.push_back(id);
     } else {
@@ -1187,6 +1192,24 @@ void share_dead_lists() {
 }
 
 // ---------------------------------------------------------------- NPC phantoms (summons.cpp)
+// The co-op guests' summons that are not ours too, one per NPC.
+std::vector<summons::Phantom> guests_npcs(const std::vector<summons::Phantom>& ours) {
+    std::vector<summons::Phantom> out;
+    auto same = [](const summons::Phantom& a, const summons::Phantom& b) {
+        return a.entity >= 0 ? a.entity == b.entity : a.handle == b.handle;
+    };
+    for (uint64_t id : g_admitted) {
+        const auto it = g_guest_npcs.find(id);
+        if (it == g_guest_npcs.end() || peer_is_invader(id)) continue;
+        for (const summons::Phantom& ph : it->second) {
+            const bool known = std::any_of(ours.begin(), ours.end(), [&](const auto& o) { return same(o, ph); }) ||
+                               std::any_of(out.begin(), out.end(), [&](const auto& o) { return same(o, ph); });
+            if (!known) out.push_back(ph);
+        }
+    }
+    return out;
+}
+
 // Host: the NPC phantoms in our party go to every admitted player (co-op guests and invaders) when they change and
 // every 3 s while there are any; an empty list once when the last has gone.
 std::vector<uint8_t> g_npc_sent;
@@ -1198,7 +1221,11 @@ void host_npc_tick() {
     polled = now();
     NpcPhantomsMsg m{};
     fill_header(&m, kNpcPhantoms);
-    for (const summons::Phantom& ph : summons::ours()) {
+    std::vector<summons::Phantom> list = summons::ours();
+    const std::vector<summons::Phantom> theirs = guests_npcs(list);
+    summons::set_foreign(theirs);
+    list.insert(list.end(), theirs.begin(), theirs.end());
+    for (const summons::Phantom& ph : list) {
         if (m.count >= kNpcPhantomsMax) break;
         auto& e = m.p[m.count++];
         e.entity = ph.entity;
@@ -1226,7 +1253,7 @@ void host_npc_tick() {
     }
 }
 
-void on_npc_phantoms(const uint8_t* data, uint32_t size) {
+std::vector<summons::Phantom> npc_list(const uint8_t* data, uint32_t size) {
     NpcPhantomsMsg m{};
     std::memcpy(&m, data, std::min<size_t>(size, sizeof(m)));
     std::vector<summons::Phantom> list;
@@ -1239,8 +1266,46 @@ void on_npc_phantoms(const uint8_t* data, uint32_t size) {
         ph.f2 = m.p[i].f2;
         list.push_back(ph);
     }
-    summons::note_host_list(list);
+    return list;
 }
+
+void on_npc_phantoms(const uint8_t* data, uint32_t size) { summons::note_host_list(npc_list(data, size)); }
+
+// A co-op guest: the NPC phantoms our own game summoned (a sign touched in our game, a black sign's invader) go to
+// the host when they change and every 3 s while there are any; an empty list once when the last has gone. A host
+// before 1.4.0 ignores them: only our game then has them.
+std::vector<uint8_t> g_mine_sent;
+double g_mine_sent_at = 0;
+
+void guest_npc_tick() {
+    static double polled = 0;
+    if (now() - polled < 0.5 || !g_host) return;
+    polled = now();
+    NpcPhantomsMsg m{};
+    fill_header(&m, kNpcSummons);
+    for (const summons::Phantom& ph : summons::mine()) {
+        if (m.count >= kNpcPhantomsMax) break;
+        auto& e = m.p[m.count++];
+        e.entity = ph.entity;
+        e.handle = ph.handle;
+        e.kind = ph.kind;
+        e.f1 = ph.f1;
+        e.f2 = ph.f2;
+    }
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&m);
+    const std::vector<uint8_t> now_bytes(bytes, bytes + sizeof(m));
+    const bool changed = now_bytes != g_mine_sent;
+    if (!changed && (m.count == 0 || now() - g_mine_sent_at < 3.0)) return;
+    if (changed && (m.count > 0 || !g_mine_sent.empty())) {
+        std::string ids;
+        for (int i = 0; i < m.count; ++i) ids += (ids.empty() ? "" : " ") + std::to_string(m.p[i].entity);
+        LOG_INFO("[coop] The NPC phantoms we summoned, for the host: %s", ids.empty() ? "none" : ids.c_str());
+    }
+    g_mine_sent = now_bytes;
+    g_mine_sent_at = now();
+    send_to(g_host, m);
+}
+
 
 // ---------------------------------------------------------------- a team wipe reloads every game at once
 // After a team wipe every game reloads its world, and the boss and the enemies start over as in single player, but
@@ -3632,6 +3697,11 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             on_npc_phantoms(data, size);
             break;
         }
+        case kNpcSummons: {
+            if (g_role != Role::Host || peer_is_invader(from) || size < sizeof(Header) + 1) return;
+            g_guest_npcs[from] = npc_list(data, size);
+            break;
+        }
         case kRest: {
             Simple m{};
             if (g_role == Role::None || !as(&m)) return;
@@ -4759,6 +4829,11 @@ void tick() {
     party::tick(g_step == Step::Hosting || g_step == Step::InWorld, &peer_state);
     // NPC phantoms of the host's party: ours turned into the same phantoms (also after our own loads).
     summons::tick(g_role == Role::Guest && g_step == Step::InWorld);
+    if (g_role == Role::Guest && !g_invade && g_step == Step::InWorld) guest_npc_tick();
+    if (g_role != Role::Host) {
+        g_guest_npcs.clear();
+        summons::set_foreign({});
+    }
     if (g_step == Step::Hosting || g_step == Step::InWorld) cutscene_tick();
     update_remote_players();
     {

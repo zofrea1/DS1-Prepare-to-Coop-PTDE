@@ -103,7 +103,8 @@ enum MsgType : uint8_t {
     kEventLead = 34,     // 1.4.0, anyone -> all (through the host): my game moves this character through an event's
                          // animation until it ends (EventLeadMsg; rules.cpp, lead_event_anim)
     kNpcSummons = 35,    // 1.4.0, co-op guest -> host: the NPC phantoms my own game summoned (NpcPhantomsMsg); the
-                         // host sends them on with its own (kNpcPhantoms) and makes its copies the phantoms too
+                         // host takes each into its party as its own (the world's) once that NPC is in its world, and
+                         // names them in its list (kNpcPhantoms) meanwhile
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -1192,8 +1193,7 @@ void share_dead_lists() {
 }
 
 // ---------------------------------------------------------------- NPC phantoms (summons.cpp)
-// The co-op guests' summons as their games reported them, one per NPC. Not checked against our party: a guest's
-// summon can be in it already (summons::set_foreign decides which are ours).
+// The co-op guests' summons as their games reported them, one per NPC (summons.cpp takes each into our party).
 std::vector<summons::Phantom> guests_npcs() {
     std::vector<summons::Phantom> out;
     auto same = [](const summons::Phantom& a, const summons::Phantom& b) {
@@ -1220,10 +1220,11 @@ void host_npc_tick() {
     polled = now();
     NpcPhantomsMsg m{};
     fill_header(&m, kNpcPhantoms);
-    // The guests' summons first: ours() brings our own list up to date from the party, which may hold them.
-    const std::vector<summons::Phantom> theirs = summons::set_foreign(guests_npcs());
+    // Ours, the guests' summons among them once our party holds them; then those it does not hold yet.
+    summons::set_guest_summons(guests_npcs());
     std::vector<summons::Phantom> list = summons::ours();
-    list.insert(list.end(), theirs.begin(), theirs.end());
+    const std::vector<summons::Phantom> pending = summons::guest_summons_pending();
+    list.insert(list.end(), pending.begin(), pending.end());
     for (const summons::Phantom& ph : list) {
         if (m.count >= kNpcPhantomsMax) break;
         auto& e = m.p[m.count++];
@@ -1272,7 +1273,7 @@ void on_npc_phantoms(const uint8_t* data, uint32_t size) { summons::note_host_li
 
 // A co-op guest: the NPC phantoms our own game summoned (a sign touched in our game, a black sign's invader) go to
 // the host when they change and every 3 s while there are any; an empty list once when the last has gone. A host
-// before 1.4.0 ignores them: only our game then has them.
+// before 1.4.0 ignores them: it has a summon of ours only if its game had that NPC loaded when our packet 48 came.
 std::vector<uint8_t> g_mine_sent;
 double g_mine_sent_at = 0;
 
@@ -3699,7 +3700,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         case kNpcSummons: {
             if (g_role != Role::Host || peer_is_invader(from) || size < sizeof(Header) + 1) return;
             g_guest_npcs[from] = npc_list(data, size);
-            summons::set_foreign(guests_npcs());  // at once: this frame's own_refresh passes them over
+            summons::set_guest_summons(guests_npcs());
             break;
         }
         case kRest: {
@@ -4832,7 +4833,7 @@ void tick() {
     if (g_role == Role::Guest && !g_invade && g_step == Step::InWorld) guest_npc_tick();
     if (g_role != Role::Host) {
         g_guest_npcs.clear();
-        summons::set_foreign({});
+        summons::set_guest_summons({});
     }
     if (g_step == Step::Hosting || g_step == Step::InWorld) cutscene_tick();
     update_remote_players();

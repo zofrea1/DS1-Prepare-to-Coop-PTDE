@@ -27,7 +27,7 @@ struct Config {
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul
     // level, ping and the smoothing their character is drawn with.
     int overhead_display = 5;
-    int max_players = 4;  // MaxPlayers: PTDE's own 4, or up to kMaxSessionPlayers with players.cpp's patches
+    int max_players = 4;  // MaxPlayers (2 .. kMaxSessionPlayers), no more than the game holds (players.cpp)
     int net_rate = 6;     // NetworkTickRate: the session's updates a second (netrate.h), sent to the others
     // Hidden test keys: pretend to speak another protocol / be another version (0 / empty: the real ones).
     int test_protocol = 0;

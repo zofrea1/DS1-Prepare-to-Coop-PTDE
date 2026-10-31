@@ -5,6 +5,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "players.h"
 #include "rules.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -30,7 +31,10 @@ struct GaitEntry {
     uint32_t manipulator;
     int32_t gait;  // -1 none
 };
-GaitEntry g_gaits[4] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}};
+// One for each other player (players::kMaxPlayers - 1); gait_stub's loop counts to the same.
+constexpr int kGaitEntries = players::kMaxPlayers - 1;
+static_assert(kGaitEntries == 7, "gait_stub compares with 7");
+GaitEntry g_gaits[kGaitEntries] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}};
 alignas(4) float g_sprint_speed = 4.5f;  // Remastered's fallback threshold (PTDE 6.0)
 
 __declspec(naked) void gait_stub() {
@@ -51,7 +55,7 @@ __declspec(naked) void gait_stub() {
         jmp gait_done
     skip:
         inc esi
-        cmp esi, 4
+        cmp esi, 7
         jb next_entry
     gait_done:
         pop esi
@@ -276,7 +280,7 @@ void set_remote_gait(uint32_t chr, Gait gait) {
     uint32_t vt = 0;
     if (!m || !read32(m, &vt) || vt != kNetworkManipulatorVtable) return;
     int free_slot = -1;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kGaitEntries; ++i) {
         if (g_gaits[i].manipulator == m) {
             g_gaits[i].gait = gait;
             return;

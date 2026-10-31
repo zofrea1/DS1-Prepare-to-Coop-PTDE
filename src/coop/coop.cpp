@@ -382,7 +382,7 @@ void coop_install(const CoopConfig& config) {
     }
     LOG_INFO("[coop] Prepare to Co-op: on (Steam app %d, password %s, invaders %s, max %d players)", g_cfg.app_id,
              g_cfg.password[0] ? "set" : "EMPTY", g_cfg.allow_invaders ? "allowed" : "off",
-             coop::players::max_players());
+             std::min(std::max(2, g_cfg.max_players), coop::players::max_players()));
     coop::players::log_status();
     LOG_INFO("[coop] %s", g_save_report.c_str());
     if (!g_steam_hooked) {
@@ -442,7 +442,10 @@ void coop_install(const CoopConfig& config) {
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
-    cfg.max_players = coop::players::max_players();
+    // MaxPlayers is the session's limit (2 .. 8); the game's structures hold at least four, and more only when the
+    // patches went in (players::max_players()), so a session never admits more than they hold.
+    cfg.max_players = std::min(std::max(2, std::min(coop::players::kMaxPlayers, g_cfg.max_players)),
+                               coop::players::max_players());
     const int scaling[6] = {g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture,
                             g_cfg.boss_health,  g_cfg.boss_damage,  g_cfg.boss_posture};
     std::copy(std::begin(scaling), std::end(scaling), cfg.scaling);

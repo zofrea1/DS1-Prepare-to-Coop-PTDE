@@ -178,8 +178,11 @@ std::vector<Node> slot_nodes() {
     return out;
 }
 
-double g_queued_at[3] = {-100, -100, -100};
-int g_deferred[3] = {};  // a missing character waits: 1 for its player to be in the world, 2 to be up (logged once)
+// Per player slot: the other players, players::kMaxPlayers - 1 of them (remote_slots() in use).
+constexpr int kSlots = players::kMaxPlayers - 1;
+static_assert(kSlots == 7, "g_queued_at's initializer");
+double g_queued_at[kSlots] = {-100, -100, -100, -100, -100, -100, -100};
+int g_deferred[kSlots] = {};  // a missing character waits: 1 for its player to be in the world, 2 to be up (logged once)
 bool g_was_loading = true;
 double g_loaded_at = 0;
 double g_last_check = 0;
@@ -189,8 +192,8 @@ double g_last_check = 0;
 // more deaths of the host unrebuilt, invisible but for its health bar, until a team wipe reloaded the guest's world.
 // The record is dropped once the slot is seen empty, or after kRemoveLinger s.
 constexpr double kRemoveLinger = 5.0;
-uint32_t g_removed[3] = {};
-double g_removed_at[3] = {};
+uint32_t g_removed[kSlots] = {};
+double g_removed_at[kSlots] = {};
 // What each player slot's character was made with: a death since then leaves it stale. The host died in the
 // Undead Asylum and came back in Firelink Shrine, where the guest already was; the guest's character of the host
 // had its health back from the network at once and was never rebuilt, so only its health bar showed (2026-10-13
@@ -237,7 +240,7 @@ bool party_reads_character(uint32_t chr) {
     }
     return false;
 }
-Made g_made[players::kMaxPlayers - 1];
+Made g_made[kSlots];
 
 }  // namespace
 

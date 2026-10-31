@@ -35,9 +35,11 @@ void note_host_list(const std::vector<Phantom>& list);
 // A co-op guest: the NPC phantoms our own game summoned (a sign touched here, a black sign's invader), for the host
 // (kNpcSummons). Empty unless we are a visitor.
 std::vector<Phantom> mine();
-// Host: the co-op guests' own NPC phantoms, as the session has them now. Each becomes the phantom in our game too
-// when the NPC is in our world, goes out with our list, and leaves our party when its summoner's game has it no more.
-void set_foreign(const std::vector<Phantom>& list);
+// Host: the co-op guests' own NPC phantoms, as their games reported them (kNpcSummons). Called before ours() looks
+// at the party, so a guest's summon in our party is never taken for one of ours. Each becomes the phantom in our
+// game too when the NPC is in our world and leaves our party when its summoner's game has it no more. Returns the
+// ones taken as the guests' (an NPC our own game summoned stays ours), with our game's handles, for our list.
+std::vector<Phantom> set_foreign(const std::vector<Phantom>& list);
 // Per frame, game thread. `visitor`: we are a co-op guest or an invader in the host's world.
 void tick(bool visitor);
 // The session is over (settle): every party entry goes but our NPC phantoms (and our own entry), as when the

@@ -1192,8 +1192,9 @@ void share_dead_lists() {
 }
 
 // ---------------------------------------------------------------- NPC phantoms (summons.cpp)
-// The co-op guests' summons that are not ours too, one per NPC.
-std::vector<summons::Phantom> guests_npcs(const std::vector<summons::Phantom>& ours) {
+// The co-op guests' summons as their games reported them, one per NPC. Not checked against our party: a guest's
+// summon can be in it already (summons::set_foreign decides which are ours).
+std::vector<summons::Phantom> guests_npcs() {
     std::vector<summons::Phantom> out;
     auto same = [](const summons::Phantom& a, const summons::Phantom& b) {
         return a.entity >= 0 ? a.entity == b.entity : a.handle == b.handle;
@@ -1202,9 +1203,7 @@ std::vector<summons::Phantom> guests_npcs(const std::vector<summons::Phantom>& o
         const auto it = g_guest_npcs.find(id);
         if (it == g_guest_npcs.end() || peer_is_invader(id)) continue;
         for (const summons::Phantom& ph : it->second) {
-            const bool known = std::any_of(ours.begin(), ours.end(), [&](const auto& o) { return same(o, ph); }) ||
-                               std::any_of(out.begin(), out.end(), [&](const auto& o) { return same(o, ph); });
-            if (!known) out.push_back(ph);
+            if (std::none_of(out.begin(), out.end(), [&](const auto& o) { return same(o, ph); })) out.push_back(ph);
         }
     }
     return out;
@@ -1221,9 +1220,9 @@ void host_npc_tick() {
     polled = now();
     NpcPhantomsMsg m{};
     fill_header(&m, kNpcPhantoms);
+    // The guests' summons first: ours() brings our own list up to date from the party, which may hold them.
+    const std::vector<summons::Phantom> theirs = summons::set_foreign(guests_npcs());
     std::vector<summons::Phantom> list = summons::ours();
-    const std::vector<summons::Phantom> theirs = guests_npcs(list);
-    summons::set_foreign(theirs);
     list.insert(list.end(), theirs.begin(), theirs.end());
     for (const summons::Phantom& ph : list) {
         if (m.count >= kNpcPhantomsMax) break;
@@ -3700,6 +3699,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         case kNpcSummons: {
             if (g_role != Role::Host || peer_is_invader(from) || size < sizeof(Header) + 1) return;
             g_guest_npcs[from] = npc_list(data, size);
+            summons::set_foreign(guests_npcs());  // at once: this frame's own_refresh passes them over
             break;
         }
         case kRest: {

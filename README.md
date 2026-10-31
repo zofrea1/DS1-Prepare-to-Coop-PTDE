@@ -15,7 +15,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 ## What's new in 1.3.0
 
-- **NPC summons** (Solaire and the other white signs), by the host or any guest in human form, appear for every player, and **NPC voice lines** are heard, with their subtitles, by everyone near the NPC.
+- **NPC summons** (Solaire and the other white signs) appear for every player, and **NPC voice lines** are heard, with their subtitles, by everyone near the NPC.
 - **One-time drops and boss rewards reach every player**: a Black Knight's, a lizard's, a boss's, also for a player whose game was loading, far away or down.
 - **Guests can use the Homeward Bone, the Darksign and the Homeward miracle**; the bone costs everyone a bone and works in a boss fight, the Darksign costs everyone's souls and humanity and works anytime.
 - **Up to ten times the network updates** (`NetworkTickRate`, `NetworkSmoothing`): other players and enemies are drawn much closer to where they are.

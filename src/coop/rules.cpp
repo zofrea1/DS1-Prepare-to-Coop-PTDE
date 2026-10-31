@@ -8,6 +8,7 @@
 #include "log.h"
 #include "motion.h"
 #include "netrate.h"
+#include "partylist.h"
 #include "session.h"
 #include "steam.h"
 #include "summons.h"
@@ -1097,10 +1098,16 @@ __declspec(naked) void h_state6_edi() {
     }
 }
 
-// al = (PartyMemberInfo+0x7C != -1) && strict; eax = PartyMemberInfo on entry
+// al = (PartyMemberInfo+0x7C != -1) && strict; eax = PartyMemberInfo on entry. The slot's offset is the party
+// list's (partylist.cpp moves it to -0x10).
+int32_t g_party_slot = 0x7C;
+
 __declspec(naked) void h_party_summoned() {
     __asm {
-        cmp dword ptr [eax + 0x7C], -1
+        push ecx
+        mov ecx, dword ptr [g_party_slot]
+        cmp dword ptr [eax + ecx], -1
+        pop ecx
         setne al
         and al, byte ptr [g_strict]
         ret
@@ -1220,10 +1227,13 @@ int install_items() {
 }
 
 int install_loot() {
+    g_party_slot = partylist::field(0x7C);
     static const uint8_t kCmpEcx[7] = {0x83, 0xB9, 0x90, 0x00, 0x00, 0x00, 0x06};  // cmp dword [ecx+90h],6
     static const uint8_t kCmpEdx[7] = {0x83, 0xBA, 0x90, 0x00, 0x00, 0x00, 0x06};  // cmp dword [edx+90h],6
-    static const uint8_t kParty[7] = {0x83, 0x78, 0x7C, 0xFF, 0x0F, 0x95, 0xC0};   // cmp [eax+7Ch],-1 ; setne al
-    static const uint8_t kPartyEsi[6] = {0x39, 0x70, 0x7C, 0x0F, 0x95, 0xC0};      // cmp [eax+7Ch],esi ; setne al
+    // The slot's displacement byte is the party list's (0x7C, or 0xF0 = -0x10 once partylist.cpp moved it).
+    const uint8_t slot = static_cast<uint8_t>(g_party_slot & 0xFF);
+    const uint8_t kParty[7] = {0x83, 0x78, slot, 0xFF, 0x0F, 0x95, 0xC0};   // cmp [eax+7Ch],-1 ; setne al
+    const uint8_t kPartyEsi[6] = {0x39, 0x70, slot, 0x0F, 0x95, 0xC0};      // cmp [eax+7Ch],esi ; setne al
     int ok = 0;
     ok += patch_call(0x00DC8101, kCmpEcx, 7, reinterpret_cast<void*>(&h_state6_ecx));
     ok += patch_call(0x00DC810B, kParty, 7, reinterpret_cast<void*>(&h_party_summoned));
@@ -2527,7 +2537,7 @@ bool __cdecl sign_session_refused(uint32_t sign) {
     read32(sess + 0x90, &state);
     if ((gm = game::game_man()) != 0) {
         read8(gm + 0xB4F, &own);
-        if (read32(gm + game::kGmParty, &pmi) && pmi) read32(pmi + 0x7C, &special);
+        if (read32(gm + game::kGmParty, &pmi) && pmi) read32(pmi + partylist::field(0x7C), &special);
     }
     if (state != 6 && special == 0xFFFFFFFF && own) return false;
     if (special != 0xFFFFFFFF || !npc_sign(sign) || !g_state.active || !g_state.guest || g_state.invader ||
@@ -4154,7 +4164,7 @@ void party_team_tick() {
     if (!g_state.active || game::loading() || !gm || !read32(gm + game::kGmParty, &party) || party < 0x10000) return;
     std::string line;
     bool npc = false;
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < static_cast<uint32_t>(partylist::entries()); ++i) {
         uint32_t handle = 0xFFFFFFFF, type = 0, chr_type = 0, team = 0;
         if (!read32(party + 0x18 + i * 0x14, &handle) || handle == 0xFFFFFFFF) continue;
         read32(party + 0x18 + i * 0x14 + 4, &type);

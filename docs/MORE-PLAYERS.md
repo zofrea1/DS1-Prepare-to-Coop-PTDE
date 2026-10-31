@@ -46,16 +46,47 @@ the eighth had none. An NPC gets a bar when one is left after every player, and 
 The nameplate text (OverheadPlayerDisplay) follows the same list. The log says which bars draw ("Floating health
 bar N draws").
 
+## The party list: eight members (partylist.cpp)
+
+The party list (`PartyMemberInfo`, `[GameMan+0xBEC]`) holds every member of the world in the game's own way: each
+player and each NPC summon has an entry {character handle, type 0 own / 1 player / 2 NPC, state, f1, f2}, and the
+game's summon handling runs on it (the summon-in animation and its flag, the NPC's death and departure, the "send
+phantoms home" menu, the white/black/intruder counts the sign limit reads). It had four entries: with four players
+and an NPC, or more players, the last to come had none, and an NPC summoned into a full list none of that handling
+(an ally only its summoner's game could see). It has eight now, at any `MaxPlayers` (installed from DllMain with the
+rest, before the game makes GameMan; all or nothing, checked against the game's bytes; the log says "Party list: 8
+members").
+
+- **Layout.** 0x8C bytes: a vtable, five counts (+4 .. +0x14), the four entries (+0x18 .. +0x67), and the list's own
+  fields after them: the NPC summons' three handles (+0x68 .. +0x70) and their count (+0x74), the scripted summon
+  (+0x78 .. +0x84; +0x7C is the slot every "is client" test reads) and a debug menu (+0x88). Eight entries need
+  +0x18 .. +0xB7, so those fields move before the list instead: the block (`0xEBB55B`) is 0xDC bytes, the list's
+  pointer 0x24 into it, and each field is at its old offset - 0x8C (-0x24 .. -0x04). Every access to one of them is
+  the same instruction with its displacement changed, an 8-bit displacement staying 8-bit, so nothing is moved or
+  trampolined. GameMan's destructor gets the block back for the heap (`0xEBA598`, `0xEBA5B2`).
+- **What changed.** The entries are reached by index or by a pointer stepped 0x14 at a time, so only their bounds
+  change: 19 bounds (4 to 8, the compactions after a leave or a reset 3 to 7, and the leave's count of slots
+  after the first) in the constructor's vector, the add, the leave, the reset, the update, the recount, the resend
+  to a joiner, the dismissal and packet 49's receiver (`0xEA16F0` .. `0xEA2FD0`). The fields: 61 accesses in the
+  party's code and the vtable destructor, 21 tests of +0x7C elsewhere (three of them under the mod's loot hooks,
+  which read the moved slot), one `add eax, 0x68`. 105 sites in all, with the allocation's size. The blank of the
+  whole list (`0xEA1900`, written out for four entries) is replaced. The add's room test compares with the eight
+  entries instead of the session's member limit, and so does the touch summon (`0xDB3590`, also every NPC invasion)
+  for an NPC's sign: an NPC does not take a player's place, it needs an entry. A player's sign keeps the game's test.
+- **How it was found.** A sweep of the party's code (`0xEA1600` .. `0xEA3400`, every displacement 0x68 .. 0x8B and
+  every bound 3/4, each checked by hand: the same displacements on characters, vtables and other managers are left
+  alone) and of the 76 reads of GameMan+0xBEC elsewhere (only the counts, entries bounded by +0x10, and +0x7C; one
+  getter `0xEB87B0` and three dead helpers have no callers). The mod's own reads follow `partylist::entries()` and
+  `field()`.
+- **Left at four.** The debug menu's per-member items and one debug menu callback (`0xDB2080`, three bytes per
+  member) that retail never draws. The NPC summons' own list stays three: the game's phantom limit.
+- **With eight players and an NPC.** Eight entries hold eight; an NPC summon's sign is refused then (no entry is
+  left). A player who joins a world of seven players and an NPC has no entry, as a fifth player had before: the
+  bars come from the players' characters anyway, and the mod's own death and spectating rules replace the party's
+  for co-op players.
+
 ## Not widened
 
-- **The party list itself.** Its add (`0xEA2510`) looks for a free entry and refuses when there is none, so a fifth
-  player has no entry: none of the game's party bookkeeping (its white/black/total counts stop at four; the summon
-  effect and "phantom died" states, which the mod's own death and spectating rules replace for co-op players). Moving
-  its entries means about thirty accesses inside its methods and nine outside, and twenty-two outside read the field
-  after them (+0x7C); not needed for anything a player sees.
-- **NPC summons** take party entries: one summoned while four players or more are present has none (no floating
-  bar, and the game's own end-of-fight dismissal may not run for it in every game), as with four players and an NPC
-  in 1.3.0. One summoned earlier keeps its entry, and its bar while one is left after every player.
 - **A "recently met" list at `SessMan+0x1B4`** (three names, its own bound) and the values `0xD280E0` writes into it
   per slot (`cmp eax, 2` kept): players past the fourth are not added. Harmless.
 

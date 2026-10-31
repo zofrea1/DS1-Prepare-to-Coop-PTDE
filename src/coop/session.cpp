@@ -11,6 +11,7 @@
 #include "netrate.h"
 #include "players.h"
 #include "party.h"
+#include "partylist.h"
 #include "rules.h"
 #include "spectate.h"
 #include "steam.h"
@@ -1737,11 +1738,11 @@ void settle_party_counts() {
     uint32_t n10 = 0, n14 = 0, slot = 0;
     read32(party + 0x10, &n10);
     read32(party + 0x14, &n14);
-    read32(party + 0x7C, &slot);
+    read32(party + partylist::field(0x7C), &slot);
     if (static_cast<int>(n10) <= 1 && static_cast<int>(n14) <= 1 && static_cast<int>(slot) == -1) return;
     if (static_cast<int>(n10) > 1) *ptr<int>(party + 0x10) = 1;
     if (static_cast<int>(n14) > 1) *ptr<int>(party + 0x14) = 1;
-    if (static_cast<int>(slot) != -1) *ptr<int>(party + 0x7C) = -1;
+    if (static_cast<int>(slot) != -1) *ptr<int>(party + partylist::field(0x7C)) = -1;
     LOG_INFO("[coop] Party counts settled after the session (were %d/%d, slot %d)", static_cast<int>(n10),
              static_cast<int>(n14), static_cast<int>(slot));
 }
@@ -1800,7 +1801,7 @@ void log_party_entries(uint32_t party) {
     static int lines = 0;
     std::string s;
     char one[48];
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         const uint32_t e = party + 0x18 + i * 0x14;
         const uint32_t h = peek32(e);
         if (h == 0xFFFFFFFF) continue;
@@ -1835,7 +1836,7 @@ void probe_state(bool force) {
     const uint32_t party = gm ? peek32(gm + game::kGmParty) : 0;
     if (party > 0x10000) {
         put(" party %d/%d slot %d", static_cast<int>(peek32(party + 0x10)), static_cast<int>(peek32(party + 0x14)),
-            static_cast<int>(peek32(party + 0x7C)));
+            static_cast<int>(peek32(party + partylist::field(0x7C))));
         log_party_entries(party);
     }
     put(" hasparty %d remote %d", raw_has_party() ? 1 : 0, static_cast<int>(game::remote_player_chrs().size()));

@@ -3,6 +3,7 @@
 #include "party.h"
 
 #include "game.h"
+#include "partylist.h"
 #include "hook.h"
 #include "log.h"
 #include "players.h"
@@ -210,7 +211,7 @@ struct Made {
     bool seen_dead = false;
 };
 
-// PartyMemberInfo ([GameMan+0xBEC]) keeps four members from +0x18, 0x14 bytes each: +0 character handle (-1 none),
+// PartyMemberInfo ([GameMan+0xBEC]) keeps its members (eight: partylist.cpp) from +0x18, 0x14 bytes each: +0 character handle (-1 none),
 // +4 kind, +8 state. Its update (0xEA2FD0) reads the member's character with no null check in states 1, 3 (alive
 // in the world) and 4 (dying); 2, 5 (dead), 6 and 7 do not, or check. Only the character goes in a rebuild (see
 // remove_character), so a member in state 1, 3 or 4 must keep it: the host took out a living guest's character
@@ -232,7 +233,7 @@ uint32_t chr_of_handle(uint32_t handle) {
 bool party_reads_character(uint32_t chr) {
     uint32_t gm = 0, pmi = 0;
     if (!read32(game::kGameManVar, &gm) || !gm || !read32(gm + kGmParty, &pmi) || !pmi) return true;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t handle = 0, state = 0;
         if (!read32(pmi + 0x18 + i * 0x14, &handle) || !read32(pmi + 0x20 + i * 0x14, &state)) return true;
         if (handle == 0xFFFFFFFF || chr_of_handle(handle) != chr) continue;

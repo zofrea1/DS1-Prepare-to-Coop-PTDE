@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "hook.h"
+#include "partylist.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -46,10 +47,10 @@ constexpr uint32_t kPartyRecount = 0x00EA1A70;  // edx = party: the counts +4..+
 // home" (0xC3FCF0). For an NPC entry: the "returned home" notice, 0xEA2A10, then packet 49 {handle, 0} to the
 // session, whose receivers (0xEA2DD0, kRecvState here) take the NPC out of their parties the same way.
 constexpr uint32_t kSendHome = 0x00EA2E90;
-// PartyMemberInfo ([GameMan+0xBEC]): four entries of 0x14 bytes from +0x18 {handle (-1 none), type (1 player,
-// 2 NPC), state, f1, f2}; +0x10 and +0x14 count the party (the probe's "party a/b").
+// PartyMemberInfo ([GameMan+0xBEC]): entries of 0x14 bytes from +0x18 {handle (-1 none), type (1 player, 2 NPC),
+// state, f1, f2}, eight of them (partylist.cpp; the game's four if that does not fit this build); +0x10 and +0x14
+// count the party (the probe's "party a/b").
 constexpr uint32_t kEntries = 0x18, kEntrySize = 0x14;
-constexpr int kEntryCount = 4;
 constexpr uint32_t kTypeNpc = 2;
 // The packet loop (0xEE2F8B, the in-game step): packet 48 = {handle, f1, f2, chr type, f3} -> 0xE407F0 at kRecvMake,
 // then 0xEA2510 with the character it returned (read without a check: the crash). Packet 49 = {handle, value} ->
@@ -206,7 +207,7 @@ int32_t entity_of(uint32_t handle) {
 }
 
 int entry_of(uint32_t p, uint32_t handle) {
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t h = 0;
         if (read32(p + kEntries + i * kEntrySize, &h) && h == handle) return i;
     }
@@ -357,8 +358,29 @@ void party_leave(uint32_t p, uint32_t handle) {
     }
 }
 
+// The members are kept together from entry 0, as the game's own leave (0xEA2A10) and reset (0xEA1CB0) keep them:
+// the game's readers outside the party's own code go only as far as the count (+0x10), so an entry behind a hole
+// left by blank_entry was not seen (the Black Separation Crystal's menu, 0xC3F0B0, the HUD, the sign lookups).
+void compact(uint32_t p) {
+    int to = 0;
+    for (int i = 0; i < partylist::entries(); ++i) {
+        const uint32_t from = p + kEntries + i * kEntrySize;
+        if (*ptr<int32_t>(from) == -1) continue;
+        if (i != to) {
+            std::memcpy(ptr<uint8_t>(p + kEntries + to * kEntrySize), ptr<uint8_t>(from), kEntrySize);
+            *ptr<int32_t>(from) = -1;
+            *ptr<int32_t>(from + 4) = 1;
+            *ptr<int32_t>(from + 8) = 0;
+            *ptr<int32_t>(from + 0xC) = -1;
+            *ptr<int32_t>(from + 0x10) = -1;
+        }
+        ++to;
+    }
+}
+
 void recount(uint32_t p) {
     __try {
+        compact(p);
         __asm {
             push ebx
             push esi
@@ -670,7 +692,7 @@ void own_refresh() {
     }
     std::set<uint32_t> present;
     bool revived = false;
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         const uint32_t e = p + kEntries + i * kEntrySize;
         uint32_t h = 0, type = 0, f1 = 0, f2 = 0;
         if (!read32(e, &h) || h == 0xFFFFFFFF || !read32(e + 4, &type) || type != kTypeNpc) continue;
@@ -787,7 +809,7 @@ std::vector<Phantom> ours() {
     own_refresh();
     const uint32_t p = party();
     if (!p || game::loading()) return out;
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t h = 0, type = 0;
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF ||
             !read32(p + kEntries + i * kEntrySize + 4, &type) || type != kTypeNpc) {
@@ -822,12 +844,18 @@ void dismiss_all(const char* why) {
     const uint32_t p = party();
     if (!p || !game::own_world()) return;
     int sent = 0, blanked = 0;
-    for (int i = 0; i < kEntryCount; ++i) {
+    // The NPC members first: the game's send home takes each out and moves the members behind it up.
+    std::vector<uint32_t> npcs;
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t h = 0, type = 0;
-        if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF ||
-            !read32(p + kEntries + i * kEntrySize + 4, &type) || type != kTypeNpc) {
-            continue;
+        if (read32(p + kEntries + i * kEntrySize, &h) && h != 0xFFFFFFFF &&
+            read32(p + kEntries + i * kEntrySize + 4, &type) && type == kTypeNpc) {
+            npcs.push_back(h);
         }
+    }
+    for (uint32_t h : npcs) {
+        const int i = entry_of(p, h);
+        if (i < 0) continue;
         const uint32_t chr = chr_by_handle(h);
         const int32_t t = chr_type(chr);
         if (chr && (t == 1 || t == 2)) {
@@ -853,7 +881,7 @@ bool white_summoned() {
         if (o.second.ph.kind == 1) return true;
     }
     const uint32_t p = party();
-    for (int i = 0; p && i < kEntryCount; ++i) {
+    for (int i = 0; p && i < partylist::entries(); ++i) {
         uint32_t h = 0, type = 0;
         if (read32(p + kEntries + i * kEntrySize, &h) && h != 0xFFFFFFFF &&
             read32(p + kEntries + i * kEntrySize + 4, &type) && type == kTypeNpc && chr_type(chr_by_handle(h)) == 1) {
@@ -885,7 +913,7 @@ bool npc_summoned(int32_t entity) {
 int count() {
     const uint32_t p = party();
     int n = 0;
-    for (int i = 0; p && i < kEntryCount; ++i) {
+    for (int i = 0; p && i < partylist::entries(); ++i) {
         uint32_t h = 0, type = 0;
         if (read32(p + kEntries + i * kEntrySize, &h) && h != 0xFFFFFFFF &&
             read32(p + kEntries + i * kEntrySize + 4, &type) && type == kTypeNpc) {
@@ -927,11 +955,11 @@ void own_world_sweep() {
     last = now();
     const uint32_t p = party();
     uint32_t special = 0;
-    if (!p || game::loading() || !game::player() || !game::own_world() || !read32(p + 0x7C, &special) ||
+    if (!p || game::loading() || !game::player() || !game::own_world() || !read32(p + partylist::field(0x7C), &special) ||
         special != 0xFFFFFFFF) {
         return;
     }
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t h = 0, type = 0;
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF ||
             !read32(p + kEntries + i * kEntrySize + 4, &type) || type != kTypeNpc) {
@@ -1024,7 +1052,7 @@ void tick(bool visitor) {
     }
     // Our NPC entries the host no longer lists (the NPC went home, died, or the host closed its world and the
     // NPC is gone there): after a moment they go here too, as the game's own departure does.
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         const uint32_t e = p + kEntries + i * kEntrySize;
         uint32_t h = 0, type = 0;
         if (!read32(e, &h) || h == 0xFFFFFFFF || !read32(e + 4, &type) || type != kTypeNpc ||
@@ -1066,7 +1094,7 @@ bool settle_party(uint32_t p) {
     const uint32_t me = game::player();
     if (me) read32(me + 4, &local);
     bool kept = false;
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t h = 0, type = 0;
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF) continue;
         read32(p + kEntries + i * kEntrySize + 4, &type);
@@ -1076,7 +1104,7 @@ bool settle_party(uint32_t p) {
     if (!kept) return false;
     int npcs = 0;
     bool changed = false;
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t h = 0, type = 0;
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF) continue;
         read32(p + kEntries + i * kEntrySize + 4, &type);
@@ -1113,7 +1141,7 @@ void solo_party(uint32_t p) {
     const uint32_t me = game::player();
     if (me) read32(me + 4, &local);
     bool changed = false;
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (int i = 0; i < partylist::entries(); ++i) {
         uint32_t h = 0;
         if (!read32(p + kEntries + i * kEntrySize, &h) || h == 0xFFFFFFFF || (local && h == local)) {
             continue;

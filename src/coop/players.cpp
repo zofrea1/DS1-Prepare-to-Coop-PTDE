@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "hook.h"
+#include "partylist.h"
 #include "log.h"
 
 #include <cstdint>
@@ -269,7 +270,7 @@ void __stdcall bar_list() {
     // Then the party's members in the party's order: its NPC phantoms take the bars left (and a player the set
     // above missed gets one here).
     if (read32(gm + 0xBEC, &pmi) && pmi) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < partylist::entries(); ++i) {
             uint32_t handle = 0xFFFFFFFF;
             if (read32(pmi + 0x18 + i * 0x14, &handle)) add(handle, chr_of_handle(wcm, handle));
         }
@@ -477,6 +478,8 @@ int install_all() {
 }  // namespace
 
 bool install_early(int max_players) {
+    // The party list first, at any player count: with four players and an NPC phantom the fourth had no entry.
+    partylist::install();
     g_max = max_players < 4 ? 4 : max_players > kMaxPlayers ? kMaxPlayers : max_players;
     g_remote = g_max - 1;
     if (g_max == 4) {

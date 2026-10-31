@@ -775,11 +775,24 @@ Demon's drop ended at once in the game that moved it, so its event took off SpEf
 the character the wait now ends only once the request is no longer that animation (up to 30 s). A gauge whose boss is dead is no fight (`world::boss_fight`, `rules::own_gauge_tick`), and one whose
 bosses have all been dead for 10 s is taken down.
 
-When a boss passes to this game (another game moved it: its player fell, or ours came nearer), its AI here had been
-idle and had no one to fight: after the host fell to the gargoyles, the guest's game took the second one, which walked
-back toward its perch and fought only once the guest hit it. A boss whose fight began here and that passes to this
-game while our player stands within 40 m is turned on our player with the event scripts' ForceChangeTarget
-(`0xD61E00`, stdcall(entity, 10000)), at most every 10 s per boss.
+A boss's entry event gives it the forced network authority (`Set Network Update Authority`, 4095) in the host's game
+only: the line follows "SKIP IF Multiplayer State Client" (the Taurus Demon's 11015383; also the Hellkites, the
+Moonlight Butterfly, the Sanctuary Guardian, Artorias, Manus, Pinwheel and a few more). So in the game's co-op the
+host's game moves those bosses the whole fight. With guests running the world's events every game gave them 4095, the
+bids differed only by nearness and the Taurus Demon changed hands mid-fight; since 1.4.0 a guest's game bids without
+the forced authority, as the game's guest does (`rules::host_authority_only`). For the other bosses (the Asylum
+Demon, the Bell Gargoyles and most) the game's own bids decide by nearness alone, the game's co-op too: the session
+host hands enemies out every 3 s and nothing in the bid (`0xE6D250`) favours the game that moves one already, so a
+boss can change hands between two players fighting it. An attack keeps its boss in the game that began it
+until it ends (above).
+
+A boss with no one to fight while its fight goes on: after the host fell to the gargoyles, the guest's game took the
+second one, which walked back toward its perch and fought only once the guest hit it. A boss this game moves that has
+had no target for 4 s (the AI's target, `0xCE3710`, the one the events' "Character Target State" test reads: none, or
+a character that fell or is gone) while its AI is on, no event animation plays on it and our player stands within
+40 m is turned on our player with the event scripts' ForceChangeTarget (`0xD61E00`, stdcall(entity, 10000)), at most
+every 15 s per boss. Until 1.4.0 every boss that passed to this game was turned so at once, at most every 10 s: bosses
+that changed hands often turned and jerked in fights with nothing wrong.
 
 The bonfires' state is a table beside the flag stores (`[[0x137E204]+0xB48]`, a list at +0x24; an entry holds the
 bonfire object at +4, two counts at +8 and +0xA, lit +0xC, state +0xD and the kindle level +0xE). A visit to another

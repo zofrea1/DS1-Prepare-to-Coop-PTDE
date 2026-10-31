@@ -3719,16 +3719,40 @@ int attack_hold(uint32_t chr);
 int lead_mode(uint32_t handle);
 const char* mover(uint32_t chr);
 
+// A boss's entry event gives it the forced authority (Set Network Update Authority, 2004[28], Forced = 4095) in the
+// host's game only: "SKIP IF Multiplayer State Client" skips that line in a guest's (the Taurus Demon's 11015383, and
+// the Hellkites, Moonlight Butterfly, Sanctuary Guardian, Artorias, Manus, Pinwheel and others), so in the game's co-op
+// the host's game moves those bosses the whole fight, its bid 4095 above any guest's. With guests running the world's
+// events (hk_multiplay_test answers "host" in every game) every game gave them 4095, the bids differed only by
+// nearness, and the Taurus Demon changed hands between the host's and the guest's games mid-fight (2026-10-29, 19:54):
+// each change starts the AI of the game that takes it, which breaks off the move under way. A guest's game bids as the
+// game's guest does, without the forced authority; the rules below (a host who fell, sleeps or is far) still apply.
+constexpr uint32_t kForcedAuthority = 4095;
+
+uint32_t host_authority_only(uint32_t chr, uint32_t bid) {
+    uint32_t authority = 0;
+    if (game::own_world() || !read32(chr + 0x204, &authority) || authority < kForcedAuthority || bid < authority) {
+        return bid;
+    }
+    static std::set<uint32_t> logged;
+    if (logged.size() < 30 && logged.insert(chr).second) {
+        LOG_INFO("[coop] Enemy %08X: its forced authority (%u) counts in the host's game only, as in the game's co-op; "
+                 "our bid %u -> %u", chr, authority, bid, bid - authority);
+    }
+    return bid - authority;
+}
+
 uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
-    const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
+    const uint32_t game_bid = reinterpret_cast<Fn>(kNetPriority)(chr);
     uint32_t handle = 0;
     if (seamless_rules() && read32(chr + 0x78, &handle)) {
         const int lead = lead_mode(handle);
         if (lead >= 0) return lead == 1 ? kBidCap : 0;
     }
-    if (!bid || !seamless_rules() || g_peer_spots.empty()) return bid;
+    if (!game_bid || !seamless_rules() || g_peer_spots.empty()) return game_bid;
     if (const int hold = attack_hold(chr)) return hold == 1 ? kBidCap : 0;
+    const uint32_t bid = host_authority_only(chr, game_bid);
     game::Vec3 at{}, me{};
     if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return bid;
     if (world::local_dead()) {
@@ -4050,21 +4074,41 @@ void gauge_boss_chrs(std::vector<uint32_t>* out) {
     }
 }
 
-// A boss whose game changed (the bids: the player whose game moved it fell, or another player came nearer) starts in
-// the game that takes it with no one to fight: its own AI there had been idle while the network moved it. After the
-// host fell to the Bell Gargoyles, the guest's game took the second gargoyle, which walked back toward its perch past
-// the guest and fought only once the guest hit it (2026-10-25, 11:38-11:40). When this game takes a boss whose fight
-// began here, while our player stands within 40 m of it, the boss is turned on us with the event scripts' own
-// ForceChangeTarget (0xD61E00: stdcall(entity, target), the target 10000 = the local player; ret 8). At most every
-// 10 s per boss, so bosses passed between two players' games do not keep changing targets.
+// A boss with no one to fight while its fight goes on. After the host fell to the Bell Gargoyles, the guest's game took
+// the second gargoyle, which walked back toward its perch past the guest and fought only once the guest hit it
+// (2026-10-25, 11:38-11:40). From 1.3.0 to 1.4.0 every boss this game took from another game was turned on our player
+// at once (at most every 10 s): bosses that changed hands every 3 to 9 s turned and jerked in fights that had nothing
+// wrong with them, onto our player instead of the target their AI had chosen. Now the AI keeps its own target. Only a
+// boss this game moves that has had no target for kNoTargetGrace is turned, while its AI is on, no event animation
+// plays on it and our player stands within kNoTargetReach of it: no target is the AI's target handle -1 (0xCE3710,
+// thiscall(chr), what the events' "Character Target State" test reads) or a character that is dead or gone. It is
+// turned on our player with the event scripts' ForceChangeTarget (0xD61E00: stdcall(entity, target), the target
+// 10000 = the local player; ret 8), at most once every kNoTargetRetry per boss.
 constexpr uint32_t kForceChangeTarget = 0x00D61E00;
-std::map<uint32_t, std::pair<int, double>> g_boss_moved_by;  // chr -> who moves it (1 us, 2 network), last turned
+constexpr uint32_t kTargetOf = 0x00CE3710;
+constexpr double kNoTargetGrace = 4.0;
+constexpr double kNoTargetRetry = 15.0;
+constexpr float kNoTargetReach = 40.0f;
+struct NoTarget {
+    double since = -1;  // when it was first seen with no target (-1: it has one)
+    double turned = -100;
+};
+std::map<uint32_t, NoTarget> g_no_target;  // chr -> its target watch
 
 bool force_change_target(int entity, int target) {
     __try {
         return reinterpret_cast<bool(__stdcall*)(int, int)>(kForceChangeTarget)(entity, target);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
+    }
+}
+
+// The AI's target, as a handle (-1 none, or the AI could not be read).
+uint32_t target_of(uint32_t chr) {
+    __try {
+        return reinterpret_cast<uint32_t(__fastcall*)(uint32_t)>(kTargetOf)(chr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xFFFFFFFF;
     }
 }
 
@@ -4208,7 +4252,7 @@ void boss_copy_tick() {
     }
 }
 
-void boss_handover_tick() {
+void boss_target_tick() {
     static double last = 0;
     const double t = seconds();
     if (t - last < 0.25) return;
@@ -4216,6 +4260,51 @@ void boss_handover_tick() {
     const uint32_t me = game::player();
     game::Vec3 mine{};
     if (!seamless_rules() || game::loading() || !me || world::local_dead() || !game::position(&mine, nullptr)) {
+        g_no_target.clear();
+        return;
+    }
+    for (int e : g_awake_bosses) {
+        const uint32_t chr = chr_by_entity(e);
+        if (!chr) continue;
+        NoTarget& w = g_no_target[chr];
+        game::Vec3 at{};
+        uint32_t request = 0;
+        uint32_t anim = 0xFFFFFFFF;
+        if (read32(chr + 0x10, &request) && request >= 0x10000) read32(request + 4, &anim);
+        if (!moved_here(chr) || chr_dead(chr) || ai_off_here(chr) || anim != 0xFFFFFFFF ||
+            !game::chr_position(chr, &at) || dist3(mine, at) > kNoTargetReach) {
+            w.since = -1;
+            continue;
+        }
+        const uint32_t target = target_of(chr);
+        const uint32_t target_chr = chr_of_handle(target);
+        if (target_chr && !chr_dead(target_chr)) {
+            w.since = -1;
+            continue;
+        }
+        if (w.since < 0) {
+            w.since = t;
+            continue;
+        }
+        if (t - w.since < kNoTargetGrace || t - w.turned < kNoTargetRetry) continue;
+        w.turned = t;
+        w.since = -1;
+        const bool turned = force_change_target(e, 10000);
+        LOG_INFO("[coop] Boss %d: no target for %.0f s here (%s) with our player %.0f m away: turned on our player%s; %s",
+                 e, kNoTargetGrace, target == 0xFFFFFFFF ? "none" : target_chr ? "it fell" : "gone",
+                 dist3(mine, at), turned ? "" : " (refused)", anim_probe(chr).c_str());
+    }
+}
+
+// Which game moves each boss, for the log: when another game takes one this game moved.
+std::map<uint32_t, int> g_boss_moved_by;  // chr -> who moves it (1 us, 2 network)
+
+void boss_handover_tick() {
+    static double last = 0;
+    const double t = seconds();
+    if (t - last < 0.25) return;
+    last = t;
+    if (!seamless_rules() || game::loading()) {
         g_boss_moved_by.clear();
         return;
     }
@@ -4226,23 +4315,18 @@ void boss_handover_tick() {
             continue;
         }
         const int by = current == own_ai ? 1 : current == net_ai ? 2 : 0;
-        auto& s = g_boss_moved_by[chr];
-        const int was = s.first;
-        s.first = by;
-        if (was == 1 && by == 2) {
-            static int lost = 0;
-            if (++lost <= 60) LOG_INFO("[coop] Boss %d: another game moves it now; %s", e, anim_probe(chr).c_str());
+        int& was = g_boss_moved_by[chr];
+        static int lines = 0;
+        if (was == 1 && by == 2 && ++lines <= 120) {
+            LOG_INFO("[coop] Boss %d: another game moves it now; %s", e, anim_probe(chr).c_str());
+        } else if (was == 2 && by == 1 && ++lines <= 120) {
+            const uint32_t target = target_of(chr);
+            LOG_INFO("[coop] Boss %d: this game moves it now (another game did); its target here: %s; %s", e,
+                     target == 0xFFFFFFFF ? "none" : chr_of_handle(target) == game::player() ? "our player"
+                                                                                           : "another character",
+                     anim_probe(chr).c_str());
         }
-        if (was != 2 || by != 1 || chr_dead(chr) || ai_off_here(chr) || !g_awake_bosses.count(e)) continue;
-        game::Vec3 at{};
-        if (!game::chr_position(chr, &at)) continue;
-        const float d = dist3(mine, at);
-        if (d > 40.0f || t - s.second < 10.0) continue;
-        s.second = t;
-        const std::string playing = anim_probe(chr);
-        const bool turned = force_change_target(e, 10000);
-        LOG_INFO("[coop] Boss %d: this game moves it now (another game did); turned on our player %.0f m away%s; %s", e,
-                 d, turned ? "" : " (refused)", playing.c_str());
+        was = by;
     }
 }
 
@@ -5251,6 +5335,7 @@ void tick() {
     track_boss_control();
     own_gauge_tick();
     boss_handover_tick();
+    boss_target_tick();
     boss_copy_tick();
     anim_timeline_tick();
     party_team_tick();

@@ -4422,13 +4422,14 @@ void update_remote_players() {
         if (!game::chr_position(m.chr, &pos)) continue;
         const PeerInfo* best = nullptr;
         float best_d = 12.0f * 12.0f;  // a second's run, and some
-        float next_d = 3.4e38f;        // the second nearest player
+        float next_d = 3.4e38f;        // the second nearest player (any distance)
         for (const auto& p : g_peers) {
             if (now() - p.last_seen > 5.0 || taken(&p)) continue;
             const float dx = pos.x - p.pos[0], dy = pos.y - p.pos[1], dz = pos.z - p.pos[2];
             const float d = dx * dx + dy * dy + dz * dz;
             if (d < best_d) {
-                next_d = best_d;
+                // Only a player takes second place: the 12 m radius is no one (it refused a lone player 9 to 12 m off).
+                if (best) next_d = best_d;
                 best_d = d;
                 best = &p;
             } else if (d < next_d) {

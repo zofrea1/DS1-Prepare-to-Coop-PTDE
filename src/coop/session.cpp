@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <random>
 
 namespace coop::session {
@@ -1024,10 +1025,12 @@ bool coop_member(const PeerInfo& p, const std::vector<party::Remote>& members) {
     return in_member_records(p, members);
 }
 
-// The game lists the player among the session's members (its records hold Steam names, cut to 16 characters).
+// The game lists the player among the session's members: by the member's Steam id, else by name (its records hold
+// Steam names, cut to 16 characters).
 bool in_member_records(const PeerInfo& p, const std::vector<party::Remote>& members) {
     const std::wstring steam_name = text::widen(p.name);
     for (const auto& m : members) {
+        if (m.steam_id && m.steam_id == p.id) return true;
         if (m.name.empty()) continue;
         if (m.name == p.char_name || m.name == steam_name) return true;
         if (m.name.size() >= 16 && steam_name.compare(0, m.name.size(), m.name) == 0) return true;
@@ -4293,6 +4296,16 @@ const PeerInfo* peer_by_chr(uint32_t chr) {
     return nullptr;
 }
 
+// The player with this Steam id (a session member's, party::Remote::steam_id), however long ago heard from: who an
+// id belongs to does not go stale. Null for 0 or an id none of our players has.
+const PeerInfo* peer_with_id(uint64_t id) {
+    if (!id) return nullptr;
+    for (const auto& p : g_peers) {
+        if (p.id == id) return &p;
+    }
+    return nullptr;
+}
+
 // A session member's record holds the Steam name, cut to 16 characters (see coop_member): a member whose character
 // is missing is known only by that.
 const PeerInfo* peer_by_member_name(const std::wstring& name) {
@@ -4320,11 +4333,12 @@ const PeerInfo* peer_by_member_record(const std::wstring& name) {
     return found;
 }
 
-// party::tick asks with a member record's character and name, which the game pairs itself (update_remote_players):
-// the record's name goes first.
-party::PeerState peer_state(uint32_t chr, const std::wstring& name) {
+// party::tick asks with a member record's character, name and Steam id, which the game pairs itself
+// (update_remote_players): a Steam id one of our players has is the answer; else the record's name and the rest.
+party::PeerState peer_state(uint32_t chr, const std::wstring& name, uint64_t steam_id) {
     party::PeerState s;
-    const PeerInfo* p = peer_by_member_record(name);
+    const PeerInfo* p = peer_with_id(steam_id);
+    if (!p) p = peer_by_member_record(name);
     if (!p && chr) p = peer_by_chr(chr);
     if (!p) p = peer_by_char_name(name);
     if (!p) p = peer_by_member_name(name);
@@ -4362,9 +4376,11 @@ void update_remote_players() {
         return;
     }
     // Every other player's character in our world (WorldChrMan's player slots), then who it belongs to. First the
-    // game's own pairing: a session member's record (its slot's player data, which holds the member's Steam name,
-    // cut to 16 characters) and the character the game made for that member (party::remotes: 0xE3D930, by the
-    // member id on the character). Then, for a character no record names: a match made earlier, the record's name
+    // game's own pairing: the character the game made for a session member (party::remotes: 0xE3D930, by the member
+    // id on the character) and that member's Steam id (the member id's SteamPlayerData, party.cpp), which is the id
+    // our messages come from: exact, whatever the names. Where the id cannot be read, the member's record (its slot's
+    // player data, which holds the member's Steam name, cut to 16 characters; a name two players share names no one).
+    // Then, for a character neither names: a match made earlier, the record's name
     // as a character name, the position each player reports every second, and elimination (one character and one
     // player left). Until 1.4.0 the records were compared with character names only, and a match made earlier went
     // first, so after a load every character was matched by position, and five players who came back at one bonfire
@@ -4378,21 +4394,40 @@ void update_remote_players() {
         uint32_t chr;
         const PeerInfo* peer;
         const char* how;
+        uint64_t id;  // the Steam id of the member the game made this character for, when one of our players has it
     };
     std::vector<Match> chrs;
-    for (uint32_t chr : game::remote_player_chrs()) chrs.push_back({chr, nullptr, "none"});
+    for (uint32_t chr : game::remote_player_chrs()) chrs.push_back({chr, nullptr, "none", 0});
     const std::vector<party::Remote> members = party::remotes();
+    // The ids the game gave its members that are our players' too. Those players are matched by them and nothing
+    // else: every guess below is only for a character with no such id, and only of a player whose id names no member.
+    // An id none of our players has (a game that holds another kind of id there) is no help, and the names go on.
+    std::set<uint64_t> claimed;
+    for (const auto& r : members) {
+        if (peer_with_id(r.steam_id)) claimed.insert(r.steam_id);
+    }
     auto taken = [&](const PeerInfo* p) {
         for (const auto& m : chrs) {
             if (m.peer == p) return true;
         }
         return false;
     };
+    auto open = [&](const Match& m, const PeerInfo* p) {
+        return p && !m.peer && !m.id && !claimed.count(p->id) && !taken(p);
+    };
+    for (auto& m : chrs) {
+        for (const auto& r : members) {
+            if (!r.chr || r.chr != m.chr || !claimed.count(r.steam_id)) continue;
+            m.id = r.steam_id;
+            m.peer = peer_with_id(r.steam_id);
+            m.how = "steam id";
+        }
+    }
     for (auto& m : chrs) {
         for (const auto& r : members) {
             if (!r.chr || r.chr != m.chr) continue;
             const PeerInfo* p = peer_by_member_record(r.name);
-            if (p && !taken(p)) {
+            if (open(m, p)) {
                 m.peer = p;
                 m.how = "member";
             }
@@ -4400,31 +4435,29 @@ void update_remote_players() {
     }
     // A match made earlier stays (the position match is only good to a few metres and flip-flopped).
     for (auto& m : chrs) {
-        if (m.peer) continue;
-        if (const PeerInfo* p = peer_by_chr(m.chr); p && !taken(p)) {
+        if (const PeerInfo* p = peer_by_chr(m.chr); open(m, p)) {
             m.peer = p;
             m.how = "kept";
         }
     }
     for (auto& m : chrs) {
-        if (m.peer) continue;
         for (const auto& r : members) {
             if (r.chr != m.chr) continue;
-            if (const PeerInfo* p = peer_by_char_name(r.name); p && !taken(p)) {
+            if (const PeerInfo* p = peer_by_char_name(r.name); open(m, p)) {
                 m.peer = p;
                 m.how = "name";
             }
         }
     }
     for (auto& m : chrs) {
-        if (m.peer) continue;
+        if (m.peer || m.id) continue;
         game::Vec3 pos{};
         if (!game::chr_position(m.chr, &pos)) continue;
         const PeerInfo* best = nullptr;
         float best_d = 12.0f * 12.0f;  // a second's run, and some
         float next_d = 3.4e38f;        // the second nearest player (any distance)
         for (const auto& p : g_peers) {
-            if (now() - p.last_seen > 5.0 || taken(&p)) continue;
+            if (now() - p.last_seen > 5.0 || !open(m, &p)) continue;
             const float dx = pos.x - p.pos[0], dy = pos.y - p.pos[1], dz = pos.z - p.pos[2];
             const float d = dx * dx + dy * dy + dz * dz;
             if (d < best_d) {
@@ -4449,13 +4482,13 @@ void update_remote_players() {
         Match* last_open = nullptr;
         const PeerInfo* last_peer = nullptr;
         for (auto& m : chrs) {
-            if (!m.peer) {
+            if (!m.peer && !m.id) {
                 ++open_chrs;
                 last_open = &m;
             }
         }
         for (const auto& p : g_peers) {
-            if (now() - p.last_seen <= 10.0 && !taken(&p)) {
+            if (now() - p.last_seen <= 10.0 && !taken(&p) && !claimed.count(p.id)) {
                 ++open_peers;
                 last_peer = &p;
             }
@@ -4504,6 +4537,9 @@ void update_remote_players() {
             char n8[64] = "";
             WideCharToMultiByte(CP_UTF8, 0, r.name.c_str(), -1, n8, sizeof(n8), nullptr, nullptr);
             names += std::string(" member[") + std::to_string(r.slot) + "]='" + n8 + "'";
+            // Whose Steam id the member's is (not the id itself: logs get shared).
+            const PeerInfo* by_id = peer_with_id(r.steam_id);
+            names += !r.steam_id ? " (no Steam id)" : by_id ? " (Steam id of " + by_id->name + ")" : " (Steam id of no one here)";
         }
         for (const auto& p : g_peers) {
             char n8[64] = "";

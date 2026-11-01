@@ -137,6 +137,41 @@ bool remove_character(uint32_t chr) {
     return true;
 }
 
+// A member id's player: +0 a DLNRD::SteamPlayerData (vtable 0x10FB604; the id's compare 0x6F8250 calls its slot 10,
+// IsEqual 0x716450, which compares the online ids at +0xC). Its Steam id (slot 15, 0x715EE0, under the lock at +0x10):
+// +0xC a DLNRD::SteamOnlineIDData (vtable 0x10FD7FC, "SteamID(0x%I64x) UserTag(%s)"), whose +0x28 is the 64-bit
+// Steam id (0x71F960, under the lock at +8). Read as the game reads it, without the locks: the id is set when the
+// member joins and never changes after. 0 when the objects are not what this build should hold.
+constexpr uint32_t kSteamPlayerDataVt = 0x010FB604;
+constexpr uint32_t kSteamOnlineIdVt = 0x010FD7FC;
+constexpr uint32_t kPlayerOnlineId = 0xC;
+constexpr uint32_t kOnlineIdSteamId = 0x28;
+
+uint64_t member_steam_id(uint32_t member) {
+    uint32_t pd = 0, vt = 0, oid = 0, lo = 0, hi = 0;
+    if (!read32(member, &pd) || !pd || !read32(pd, &vt)) return 0;
+    static bool told = false;
+    if (vt != kSteamPlayerDataVt) {
+        if (!told) {
+            told = true;
+            LOG_INFO("[coop] A session member's player is not a SteamPlayerData (vtable %08X): players are matched by "
+                     "name", vt);
+        }
+        return 0;
+    }
+    if (!read32(pd + kPlayerOnlineId, &oid) || !oid || !read32(oid, &vt)) return 0;
+    if (vt != kSteamOnlineIdVt) {
+        if (!told) {
+            told = true;
+            LOG_INFO("[coop] A session member's online id is not a SteamOnlineIDData (vtable %08X): players are "
+                     "matched by name", vt);
+        }
+        return 0;
+    }
+    if (!read32(oid + kOnlineIdSteamId, &lo) || !read32(oid + kOnlineIdSteamId + 4, &hi)) return 0;
+    return static_cast<uint64_t>(hi) << 32 | lo;
+}
+
 std::wstring read_name(uint32_t at) {
     std::wstring s;
     for (int i = 0; i < kNameChars; ++i) {
@@ -265,12 +300,13 @@ std::vector<Remote> remotes() {
         uint8_t st = 0;
         r.data_ready = read8(state + n.slot, &st) && st == 0x1F;
         r.chr = find_player(n.member);
+        r.steam_id = member_steam_id(n.member);
         out.push_back(r);
     }
     return out;
 }
 
-void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)) {
+void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name, uint64_t steam_id)) {
     const bool loading = game::loading() || !game::in_game();
     if (loading) {
         g_was_loading = true;
@@ -298,7 +334,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name)
             if (n.slot == r.slot) member = n.member;
         }
         if (!member) continue;
-        const PeerState ps = peer ? peer(r.chr, r.name) : PeerState{};
+        const PeerState ps = peer ? peer(r.chr, r.name, r.steam_id) : PeerState{};
         char name[64];
         WideCharToMultiByte(CP_UTF8, 0, r.name.c_str(), -1, name, sizeof(name), nullptr, nullptr);
         if (g_removed[r.slot] && (!r.chr || now() - g_removed_at[r.slot] >= kRemoveLinger)) g_removed[r.slot] = 0;

@@ -19,6 +19,7 @@ struct Remote {
     int slot = -1;          // the member's slot in the remote player data (0 .. MaxPlayers - 2)
     uint32_t chr = 0;       // their PlayerIns in our world (0 = none)
     std::wstring name;      // the name in their record: their Steam name, cut to 16 characters
+    uint64_t steam_id = 0;  // their Steam id, from the session's member id (0 not readable)
     bool data_ready = false;
 };
 
@@ -42,8 +43,8 @@ struct PeerState {
     bool settled = false;   // alive and out of event animations (the rise after a respawn included) for a moment
 };
 
-// Every frame on the game thread while a seamless session is established. `peer` answers for a character (and
-// its character name) which session player it belongs to.
-void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name));
+// Every frame on the game thread while a seamless session is established. `peer` answers for a member record (its
+// character, the name in it, its Steam id) which session player it belongs to.
+void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name, uint64_t steam_id));
 
 }  // namespace coop::party

@@ -106,8 +106,10 @@ none of it in the widened parts:
 - **Characters paired with the wrong players** (`session.cpp`, update_remote_players). A lost boss fight's reload
   brought all five back at one bonfire, and each game matched the others' characters to their players by the
   positions they report: three games got some wrong. The session member records, which the game pairs with its
-  characters itself, were compared with character names only, while they hold Steam names. The records now come
-  first; a position match is refused while two players stand within 3 m of each other.
+  characters itself, were compared with character names only, while they hold Steam names. Now the member's Steam
+  id comes first (session member id +0: `DLNRD::SteamPlayerData`, vtable `0x10FB604`; its +0xC
+  `SteamOnlineIDData`, vtable `0x10FD7FC`, holds the 64-bit id at +0x28, as `0x715EE0` reads it), then the
+  record's Steam name; a position match is refused while two players stand within 3 m of each other.
 - **What followed from it.** When 6700k fell, three games took the dying character for a living player's and rebuilt
   it while 6700k still lay dead (`party.cpp` rebuilds a character whose player is back on their feet). The host then
   had no character for 6700k and sent its game no more enemy lists (0xE57850 sends a member's list only while the

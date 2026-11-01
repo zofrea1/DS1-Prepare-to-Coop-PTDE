@@ -43,6 +43,20 @@ const uint8_t kSendTestCode[7] = {0x83, 0xBB, 0x34, 0x02, 0x00, 0x00, 0x00};
 // The receiver (0xE556F0) keeps only the newest position, which the enemy's copy moves to. (An enemy's actions are
 // messages of their own, sent the frame they start: 0xE56AB0, packet type 0x21.)
 constexpr uint32_t kChrTable = 0x2B4;
+
+// An enemy another game moves walks or runs by its copy's speed: the NetAIManipulator's update (0xE21DD0) hands its
+// move (vt+0x98, 0xE20C50) this frame's step toward the last update (velocity x the frame's dt, 0xE2265D), and the move
+// takes the step's length times 30 for a speed in m/s, at 30 FPS: under 2.5 the stick it gives the character is 0.5
+// (walk), else 1.0 (run). At a high frame rate the step is a fraction of a 30 FPS frame's: an enemy running at 5 m/s
+// read 1.0 m/s at 144 FPS and 2.5 at 60, so the copy played its walk while it was moved at a run, and slid (the
+// 2026-11-01 report from the deck at 90 FPS and a 5800X3D; attacks, which come as their own messages, looked right).
+// The players' copies had the same factor (0xE1E8FE), which the FPS Unlock turns into 1 / dt (ghost.cpp); this one
+// is turned the same way here: its operand reads our 1 / dt, from the frame's step the game uses (0x11E7E90, which
+// the FPS Unlock writes every frame; 1/30 when it does not run).
+constexpr uint32_t kEnemyGait = 0x00E20E92;  // mulsd xmm0, qword ptr [011E7CD8h] (30.0)
+const uint8_t kEnemyGaitCode[8] = {0xF2, 0x0F, 0x59, 0x05, 0xD8, 0x7C, 0x1E, 0x01};
+constexpr uint32_t kFrameStep = 0x011E7E90;
+alignas(8) volatile double g_enemy_steps = 30.0;  // frames per second of this frame
 constexpr uint32_t kRoundGap = 0x1BC;
 constexpr float kVanillaRoundGap = 0.25f;
 
@@ -532,6 +546,19 @@ bool install() {
     g_snap = bytes_match(kEnemySnap, kEnemySnapCode, sizeof(kEnemySnapCode)) &&
              patch_call(kPlayerSnap, kPlayerSnapCode, sizeof(kPlayerSnapCode), reinterpret_cast<void*>(&snap_player)) &&
              patch_call(kEnemySnap, kEnemySnapCode, sizeof(kEnemySnapCode), reinterpret_cast<void*>(&snap_enemy));
+    bool gait = false;
+    {
+        uint8_t code[8];
+        std::memcpy(code, kEnemyGaitCode, 4);
+        const uint32_t operand = reinterpret_cast<uint32_t>(&g_enemy_steps);
+        std::memcpy(code + 4, &operand, 4);
+        gait = patch(kEnemyGait, kEnemyGaitCode, code, sizeof(code));
+    }
+    if (gait) {
+        LOG_INFO("[coop] Enemies another player's game moves walk and run by their real speed at any frame rate");
+    } else {
+        LOG_ERROR("[coop] Network rate: the walk/run test of enemies other games move did not match this build");
+    }
     uint8_t op = 0;
     const bool send = read8(kSendReload, &op) && (op == kReloadMov || op == kReloadAdd) &&
                       bytes_match(kSendReload + 1, kReloadOperand, sizeof(kReloadOperand));
@@ -583,6 +610,9 @@ void tick(int rate) {
     const double dt = g_frame_clock > 0 ? c - g_frame_clock : 0.0;
     g_frame_clock = c;
     g_frame_dt = dt > 0 && dt < 1.0 ? dt : 0.0;
+    float step = 0.0f;
+    std::memcpy(&step, reinterpret_cast<const void*>(kFrameStep), sizeof(step));
+    g_enemy_steps = step > 0.0005f && step < 1.0f ? 1.0 / step : 30.0;
     if (g_frame_dt > 0 && !long_frame(g_frame_dt)) {
         g_mean_frame = g_mean_frame > 0 ? g_mean_frame + (g_frame_dt - g_mean_frame) / 32.0 : g_frame_dt;
     }

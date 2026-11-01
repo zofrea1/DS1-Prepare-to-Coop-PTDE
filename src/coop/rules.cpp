@@ -1348,6 +1348,71 @@ bool __cdecl hk_kill_souls_client() {
     return reinterpret_cast<bool(__cdecl*)()>(kIsClient)();
 }
 
+// Every game in which an enemy dies pays its own player that enemy's souls (0xE78A40, from the death 0xE80790 and its
+// siblings; the local player alive, once per enemy: chr+0x1FF bit 7), and with the Ring of the Evil Eye's effect (199)
+// its heal (SpEffect 2241, vt+0x1F4). In the game's co-op every player is near every kill. Here the session host's
+// game takes every player's hits on the enemies it has, also those it no longer runs far away (WorldChrMan's update
+// gives a character whose map entity is not active, [chr+0xC]+8 != 2, the rate -1 at chr+0xF4: no update at all;
+// 0xE3F815), and its copy died at once: on 2026-11-01 the host at Firelink was paid for every Undead Burg hollow the
+// deck killed (the Taurus Demon there read rate -1 in the host's game), while the guests at Firelink, whose games did
+// not have those deaths, got nothing. A kill pays only in a game that runs the enemy, as the guests' games did: the
+// souls and the heal are skipped for an enemy at rate -1 (the rest of the death goes on: the "souls given" bit, the
+// drop). In a session, for the host and the co-op guests; an invader and play outside a session keep the game's rule.
+constexpr uint32_t kKillRewardTest = 0x00E78AB1;  // test ebx,ebx ; je 0xE78B31 ; comiss xmm0,[010D7EE8h] (11 bytes)
+constexpr uint32_t kKillRewardGo = 0x00E78ABC;    // jbe 0xE78AF3 (no souls; the heal test)
+constexpr uint32_t kKillRewardSkip = 0x00E78B31;  // past the souls and the heal
+constexpr uint32_t kKillSoulsFloor = 0x010D7EE8;  // the float the souls are compared with
+uint32_t g_kill_reward_go = kKillRewardGo;
+uint32_t g_kill_reward_skip = kKillRewardSkip;
+float g_kill_souls_floor = 0.0f;
+
+bool __cdecl kill_reward_here(uint32_t chr) {
+    if (!g_state.active || g_state.invader || !chr) return true;
+    uint32_t rate = 0;
+    if (!read32(chr + 0xF4, &rate) || rate != 0xFFFFFFFF) return true;
+    static int lines = 0;
+    if (++lines <= 30) {
+        uint32_t entity = 0;
+        read32(chr + 0x208, &entity);
+        game::Vec3 at{}, me{};
+        const bool where = game::chr_position(chr, &at) && game::position(&me, nullptr);
+        const float dx = at.x - me.x, dy = at.y - me.y, dz = at.z - me.z;
+        LOG_INFO("[coop] Enemy %d died here, but this game does not run it (another player's kill, %.0f m away): no "
+                 "souls for it here", static_cast<int>(entity), where ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0f);
+    }
+    return false;
+}
+
+// At the test: ebx = our player (0: none, as the game skips then), ebp = the enemy, xmm0 = its souls (also at
+// [esp+14h]); the comparison the patch took over is made again (the call may change xmm0) before the jbe.
+__declspec(naked) void hk_kill_reward() {
+    __asm {
+        test ebx, ebx
+        je skip
+        pushad
+        push ebp
+        call kill_reward_here
+        add esp, 4
+        test al, al
+        popad
+        je skip
+        movss xmm0, dword ptr [esp + 14h]
+        comiss xmm0, dword ptr [g_kill_souls_floor]
+        jmp dword ptr [g_kill_reward_go]
+    skip:
+        jmp dword ptr [g_kill_reward_skip]
+    }
+}
+
+bool install_kill_reward() {
+    static const uint8_t k[11] = {0x85, 0xDB, 0x74, 0x7C, 0x0F, 0x2F, 0x05, 0xE8, 0x7E, 0x0D, 0x01};
+    g_kill_souls_floor = *reinterpret_cast<const float*>(kKillSoulsFloor);
+    uint8_t code[11] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_kill_reward) - (kKillRewardTest + 5));
+    std::memcpy(code + 1, &rel, 4);
+    return patch(kKillRewardTest, k, code, sizeof(code));
+}
+
 // ---------------------------------------------------------------- an invader takes no boss rewards
 // A boss's death (2003[12] Handle Boss Defeat: Lua event 4050 through 0xD66240) runs BlockClear2 in every game in the
 // world: the clear bonus (SetClearBonus, the area's GameAreaParam bonusSoul, into PlayerGameData+0xF0) paid by
@@ -4297,8 +4362,19 @@ int attack_hold(uint32_t chr) {
             it->second.told = true;
             static int lines = 0;
             if (++lines <= 20) {
-                LOG_INFO("[coop] Enemy %08X: attack %d has gone on for %.0f s; it can change hands again", chr, action,
-                         kAttackHold);
+                // The 2026-11-01 report of an enemy that would not die (two 20 s holds of attack 3040 at Firelink):
+                // who it is and what state it is in.
+                uint32_t entity = 0, hp = 0, max_hp = 0, f1fc = 0, rate = 0;
+                read32(chr + 0x208, &entity);
+                read32(chr + 0x2D4, &hp);
+                read32(chr + 0x2D8, &max_hp);
+                read32(chr + 0x1FC, &f1fc);
+                read32(chr + 0xF4, &rate);
+                LOG_INFO("[coop] Enemy %08X (entity %d): attack %d has gone on for %.0f s; it can change hands again "
+                         "(HP %d/%d, host's report %d, moved by %s, AI %s, flags 1FC %08X, rate %d)", chr,
+                         static_cast<int>(entity), action, kAttackHold, static_cast<int>(hp), static_cast<int>(max_hp),
+                         g_state.guest ? host_reported_hp(chr) : -2, mover(chr), ai_off_here(chr) ? "off" : "on", f1fc,
+                         static_cast<int>(rate));
             }
         }
         return 0;
@@ -5101,10 +5177,31 @@ void __stdcall note_ai_state(int entity, int state) {
     }
     if (!g_state.active) return;
     static int lines = 0;
-    if (lines >= 80) return;
     const uint32_t chr = chr_by_entity(entity);
     uint32_t team = 0;
-    if (!chr || !read32(chr + 0x74, &team) || team != kBossTeam) return;
+    if (!chr || !read32(chr + 0x74, &team)) return;
+    if (team != kBossTeam) {
+        // Other enemies an event wakes (the Undead Burg's ambushes: a hollow behind crates that jumps at the player
+        // within 5 m, 11015110; one that drops in, 11015111), for the 2026-11-01 report of one that seemed to wake as
+        // a plain enemy: which run woke it and which game moves it then. The switches off (every load) are not logged.
+        static int woken = 0;
+        if (!state || woken >= 60) return;
+        ++woken;
+        uint32_t id = 0, by = 0;
+        if (g_cur_event) {
+            read32(g_cur_event + 0x28, &id);
+            read32(g_cur_event + 0x44, &by);
+        }
+        game::Vec3 at{}, me{};
+        const bool where = game::chr_position(chr, &at) && game::position(&me, nullptr);
+        LOG_INFO("[coop] Enemy %d: AI switched on by %s %d%s; moved by %s, %.0f m from us", entity,
+                 g_cur_event ? "event" : "Lua", static_cast<int>(id),
+                 static_cast<int>(by) >= 10001 && static_cast<int>(by) <= 10010 ? " (a run another player's game started)"
+                                                                                : "",
+                 mover(chr), where ? dist3(me, at) : -1.0f);
+        return;
+    }
+    if (lines >= 80) return;
     uint32_t id = 0, slot = 0, by = 0;
     if (g_cur_event) {
         read32(g_cur_event + 0x28, &id);
@@ -5355,6 +5452,7 @@ int install() {
     failed += install_one("NPCs are people for a co-op guest", install_wander_ghost() == 0);
     failed += install_one("a guest's kills give full souls",
                           redirect_call(kKillSoulsClientSite, kIsClient, reinterpret_cast<void*>(&hk_kill_souls_client)));
+    failed += install_one("a kill pays only in a game that runs the enemy", install_kill_reward());
     failed += install_one("a guest's HP tests skip missing characters",
                           swap_pointer(kHpRateVtable + 4, kHpRateTest, reinterpret_cast<void*>(&hk_hp_rate_test),
                                        &g_hp_rate_orig));

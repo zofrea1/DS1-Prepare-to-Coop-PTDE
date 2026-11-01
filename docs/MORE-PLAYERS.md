@@ -130,8 +130,30 @@ none of it in the widened parts:
 - **DynamicSmoothing** (`netrate.cpp`) counted the receiving game's own frame stalls and frame steps as jitter; the
   Deck's smoothing values jumped about on the health bars. Gaps across a long frame of ours are left out, deviations
   within half a frame are not counted, and the smoothing falls back 2.5 times faster.
-- Not from the widening: the invader's "other world" was a stranger's session with the same password; the Dried
-  Fingers' 1.5 weight gave the party's world 60 % of each search (2 of 7 picks: about a 1 in 10 run).
+- Not from the widening: the invader's "other world" was another Prepare to Co-op session (an invader's search does
+  not filter by password); the Dried Fingers' 1.5 weight gave the party's world 60 % of each search (2 of 7 picks:
+  about a 1 in 10 run).
+
+## The second five-player test (2026-11-01)
+
+The host and two guests at Firelink Shrine, two guests in the Undead Burg (the Hellkite's flyover, the Taurus Demon
+alone), an invasion of the party by the Deck. Every character was matched by Steam id in every game, and none of the
+first test's faults came back. Found:
+
+- **The host's souls from far kills** (`rules.cpp`, hk_kill_reward at `0xE78AB1`). Every game pays its player the
+  souls of an enemy that dies in it (`0xE78A40`). The host's game takes the hits on enemies it no longer runs
+  (WorldChrMan's update gives a character whose map entity is not active the rate -1 at chr+0xF4: no update), and its
+  copy dies at the killing blow; the guests' games at Firelink had no such death. The souls and the Ring of the Evil
+  Eye's heal are now skipped for an enemy at rate -1, in the host's game and the guests'.
+- **Enemies sliding** (`netrate.cpp`): the NetAIManipulator's move (`0xE20C50`) takes the frame's step times 30
+  (`0xE20E92`) against 2.5 m/s for walk or run; at 90 or 144 FPS a running copy walked. The factor is 1 / dt now.
+- **The faulting reads at loads** were our own character's effect checks (the Crimson Blossoms' debuff, Chameleon)
+  in its first frames (chr+0x1E0 not yet a `SpecialEffect`, vtable `0x11932B8`); the effect list is read only behind
+  that vtable.
+- **Not known yet:** an enemy at Firelink whose health was gone in two games fought on and never died (two 20 s holds
+  of its attack 3040); an early Burg ambush that seemed to wake as a plain enemy (11015110 or 11015111; neither
+  event's animation ran in any game). Both are logged now: an enemy at 1 HP or less that still attacks or has not
+  begun to die, the details of a 20 s attack hold, and every event that switches an ordinary enemy's AI on.
 
 ## Testing
 

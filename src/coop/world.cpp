@@ -318,9 +318,18 @@ bool apply(uint32_t chr, int id) {
     }
 }
 
+// A character's effects: chr+0x1E0 a NS_FRPG::SpecialEffect (vtable 0x11932B8, made at 0xE74FC6), +4 the first node.
+// A character being made or freed in a load holds anything there (1.0f, 0xCCCCCCCC: the first-chance faults of the
+// 2026-10-31 and 2026-11-01 tests: our own character's checks, the Crimson Blossoms' debuff and Chameleon, in its
+// first frames, before any other player's character was back): only the game's own object is read.
+constexpr uint32_t kSpecialEffectVtable = 0x011932B8;
+
 uint32_t find_effect(uint32_t chr, int id, uint32_t* ctrl_out) {
-    uint32_t ctrl = 0, node = 0;
-    if (!chr || !read32(chr + 0x1E0, &ctrl) || ctrl < 0x10000 || !read32(ctrl + 4, &node)) return 0;
+    uint32_t ctrl = 0, node = 0, vt = 0;
+    if (!chr || !read32(chr + 0x1E0, &ctrl) || ctrl < 0x10000 || !read32(ctrl, &vt) || vt != kSpecialEffectVtable ||
+        !read32(ctrl + 4, &node)) {
+        return 0;
+    }
     for (int guard = 0; node && guard < 512; ++guard) {
         uint32_t nid = 0;
         if (!read32(node + 0x28, &nid)) return 0;
@@ -900,6 +909,56 @@ std::map<uint32_t, std::pair<int, int>> g_enemy_hp;  // EnemyIns -> last HP, max
 int g_logged_level = -1;
 int g_hp_left_logs = 0;
 
+// The 2026-11-01 report: an enemy whose health was gone in two players' games fought on, then stood idle, never died
+// and was there until a rest. An enemy whose health reads 1 or less for 4 s while it still attacks (an animation of
+// 3000-4999, as the 20 s holds of attack 3040 then: a corpse attacks nothing), or that reads 0 with no death begun
+// (chr+0x1FF bit 5), is logged once with what decides it.
+struct LowHp {
+    double since = 0;
+    int action = -2;
+    double action_at = 0;
+    bool told = false;
+};
+std::map<uint32_t, LowHp> g_low_hp;
+int g_low_hp_lines = 0;
+
+void watch_low_hp(uint32_t chr, int h, int m) {
+    if (h > 1 || m <= 0) {
+        g_low_hp.erase(chr);
+        return;
+    }
+    const double t = now();
+    uint32_t ctrl = 0, action = 0xFFFFFFFF;
+    if (read32(chr + 0x28, &ctrl) && ctrl) read32(ctrl + 0x350, &action);
+    LowHp& w = g_low_hp[chr];
+    if (w.since == 0) w = LowHp{t, static_cast<int>(action), t, false};
+    if (static_cast<int>(action) != w.action) {
+        w.action = static_cast<int>(action);
+        w.action_at = t;
+    }
+    uint8_t f1ff = 0;
+    read8(chr + 0x1FF, &f1ff);
+    const bool acting = w.action >= 3000 && w.action < 5000;
+    const bool no_death = h <= 0 && !(f1ff & 0x20);
+    if (w.told || t - w.since < 4.0 || !(acting || no_death) || g_low_hp_lines >= 20) return;
+    w.told = true;
+    ++g_low_hp_lines;
+    uint32_t entity = 0, f1fc = 0, rate = 0, current = 0, own = 0, team = 0;
+    uint8_t ai = 0;
+    read32(chr + 0x208, &entity);
+    read32(chr + 0x1FC, &f1fc);
+    read32(chr + 0xF4, &rate);
+    read32(chr + 0x2C, &current);
+    read32(chr + 0x410, &own);
+    read32(chr + 0x74, &team);
+    if (ctrl) read8(ctrl + 0xC0, &ai);
+    LOG_INFO("[coop] Enemy %08X (entity %d, team %u): its health has read %d/%d for %.0f s but it %s (animation %d, "
+             "moved by %s, AI %s, host's report %d, flags 1FC %08X, rate %d)", chr, static_cast<int>(entity), team, h, m,
+             t - w.since, acting ? "still attacks" : "has not begun to die", w.action,
+             current && current == own ? "this game" : "another game", (ai & 1) ? "on" : "off",
+             session::guest() ? rules::host_hp_report(chr) : -2, f1fc, static_cast<int>(rate));
+}
+
 void enemy_hp_tick() {
     static double last = 0;
     if (!g_active || now() - last < 0.1) return;
@@ -907,6 +966,7 @@ void enemy_hp_tick() {
     std::set<uint32_t> seen;
     each_enemy([&](uint32_t chr) {
         const int h = hp(chr), m = max_hp(chr);
+        watch_low_hp(chr, h, m);
         auto it = g_enemy_hp.find(chr);
         if (h <= 0) {
             if (it != g_enemy_hp.end() && it->second.second > 0 && it->second.first * 10 > it->second.second &&
@@ -1726,6 +1786,7 @@ void tick() {
         g_fill_hp.clear();
         g_base_max.clear();
         g_scaled_at.clear();
+        g_low_hp.clear();
         g_forced_max.clear();
     }
 }

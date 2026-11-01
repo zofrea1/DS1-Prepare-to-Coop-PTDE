@@ -60,8 +60,10 @@ std::string g_version = PREPARE_TO_COOP_VERSION;
 constexpr const char* kLegacyProtocol = "8";
 // Dried Fingers. 1.0.0 invaders go to a world with "ptdesc_taunt" = 1 before any other, so with few players one
 // such host would draw every 1.0.0 invader. Hosts from 1.1.0 on publish "ptdesc_fingers" instead, which only 1.1.0
-// invaders read, and make the world kFingersWeight times as likely to be picked as one without (pick_invade_world).
-constexpr double kFingersWeight = 1.5;
+// invaders read, and make the world kFingersWeight times as likely to be picked as one without (pick_invade_world):
+// 65% more likely since 1.4.0 (50% before; the invader's game decides, so an older invader still uses 1.5). While they
+// are in effect InvasionCooldown is off (taunt, invasion_over), until the session ends and the rules reset.
+constexpr double kFingersWeight = 1.65;
 // Steam's room in our lobby: more than the game's four players, so that lobby members who never join (players of
 // other games that use Spacewar, or knocks that fail) cannot fill it. The game's own limit is kept by host_answer.
 constexpr int kLobbyRoom = 16;
@@ -975,6 +977,13 @@ void invasion_over(uint64_t id) {
         return;
     }
     if (g_cfg.invasion_cooldown_s <= 0) return;
+    // Dried Fingers ask for invaders: no cooldown while they are in effect (to the end of the session, a close over an
+    // invader included: finish() ends the invasion before the rules reset). The next session has InvasionCooldown again.
+    if (rules::state().taunt) {
+        LOG_INFO("[coop] The invasion is over (%s left last); Dried Fingers: no invasion cooldown",
+                 steam::persona(id).c_str());
+        return;
+    }
     g_invade_open_at = now() + g_cfg.invasion_cooldown_s;
     publish_cooldown();
     LOG_INFO("[coop] The invasion is over (%s left last): no other invader for %d s (InvasionCooldown)",
@@ -5152,7 +5161,12 @@ void taunt() {
     if (!hosting()) return;
     rules::state().taunt = true;
     steam::set_lobby_data(g_lobby, "ptdesc_fingers", "1");  // not ptdesc_taunt: see kFingersWeight
-    LOG_INFO("[coop] Invaders are taunted into this world");
+    // No InvasionCooldown while the fingers are in effect: one that is running ends now (invasion_over starts none).
+    const bool cooling = now() < g_invade_open_at;
+    g_invade_open_at = 0;
+    publish_cooldown();
+    LOG_INFO("[coop] Invaders are taunted into this world; no invasion cooldown until the session ends%s",
+             cooling ? " (the one running is lifted)" : "");
     say(kMsgTaunt);
     g_last_state = 0;
 }

@@ -53,7 +53,7 @@ Rest at any bonfire: each rest gives you every co-op item you do not carry.
 | Chaos Eye Orb | Invade a session that allows invaders, as an evil spirit. Defeat every co-op player for a Humanity each; fall, and each of them earns one. |
 | Abyssal Eye Orb | A guest or an invader returns home; the host disbands the session. |
 | Ominous Tome | Host: change the world rules (allies cannot harm each other, allies can harm each other, the host against the guests). |
-| Dried Fingers | Host: taunt invaders into your world: an invader looking for a world is 50% more likely to pick yours. |
+| Dried Fingers | Host: taunt invaders into your world: an invader looking for a world is 65% more likely to pick yours, and there is no invasion cooldown (`InvasionCooldown`) until the session ends. |
 | Cursed Pendant | Curse your own world (pure black World Tendency), alone or as host: black phantoms appear in every area that has them and stay until you use the pendant again, and the NPC invaders (Kirk, Leeroy, Mildred, Jeremiah) come even while you are hollow, whatever your covenant. The curse lasts through sessions; it is not saved, so after restarting the game use the pendant again. |
 | Crimson Blossom | Not used: one blooms with each death in a session (up to five; none when the team defeats a boss while you are down), each lowering maximum HP by 10% (`DeathDebuffs`); a line on screen says so. They wither when anyone in the session rests at a bonfire, and the health they took comes back with the bar; a team wipe or the end of the session withers them too (a guest's as they arrive home, a host's when the host closes the world). |
 | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds. |

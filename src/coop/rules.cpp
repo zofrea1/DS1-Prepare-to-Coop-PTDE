@@ -4403,6 +4403,13 @@ void boss_copy_tick() {
 // is more than kListStale old gives up an enemy of its list as soon as another game sends that enemy's position: the
 // receiver (0xE556F0) marks the entry (bit 0 of its flags byte, which only the network's copy takes, 0xE55360), and
 // the other game has been handed it since. An enemy no other game moves stays ours (the host may be loading).
+// Where the players are does not matter: the host's game only compares the bids the games send it (every 5 s,
+// 0xE57DD0, packet 0x14; 0xE558F0/0x46FF00 settle each enemy two lists share) and needs neither the enemy nor its map
+// (net handles name the same enemy in every game: the world's 17 blocks have fixed places), so two guests in the
+// Catacombs get their lists every 3 s while the host is in the Depths (0xE3D930 finds a member's character in any
+// map: remote players are in no map block; PlayerIns vt+0x9C is `mov al,1`). While the host's game sends no lists
+// (its load) every game keeps its last one, and those never share an enemy, so nothing is given up then. An enemy a
+// scripted move's lead holds (lead_mode) is left alone: the ownership test answers for it either way.
 constexpr uint32_t kListTakenSite = 0x00E57C3F;
 constexpr uint32_t kOwnTableReset = 0x00E553F0;
 constexpr double kListStale = 5.0;
@@ -4440,7 +4447,7 @@ int scan_own_enemies(uint32_t table, bool stale, uint32_t* first) {
             for (uint32_t k = 0; k < n; ++k) {
                 int16_t* o = ptr<int16_t>(own + k * 2);
                 uint8_t* f = ptr<uint8_t>(flags + k);
-                if (*o < 0 || !(*f & 1) || k >= chr_count || !chr_entries) continue;
+                if (*o < 0 || !(*f & 1) || k >= chr_count || !chr_entries || lead_mode(i << 11 | k) >= 0) continue;
                 const uint32_t chr = *ptr<uint32_t>(chr_entries + k * 0x20);
                 if (!chr || !moved_here(chr)) continue;
                 if (!stale) {

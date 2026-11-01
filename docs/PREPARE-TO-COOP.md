@@ -28,7 +28,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | Chaos Eye Orb | Invade a co-operative session that allows invaders, as an evil spirit. | outside a session |
    | Abyssal Eye Orb | A guest or an invader returns home; the host disbands the session. | in a session; the host and the guests not while an invader is present |
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams; each use moves on). | host |
-   | Dried Fingers | Host: taunt invaders; an invader searching for a world is 50% more likely to pick yours. | host |
+   | Dried Fingers | Host: taunt invaders; an invader searching for a world is 65% more likely to pick yours, and `InvasionCooldown` is off until the session ends. | host |
    | Cursed Pendant | Curse your own world: it counts as pure black World Tendency until you use the pendant again, and the NPC invaders come even while you are hollow. | your own world: alone or as host |
    | Crimson Blossom | Not used: one blooms with each death in a session (up to five; none when the team defeats a boss while you are down), each lowering maximum HP by 10% (`DeathDebuffs`, on by default since 1.1.0); it is given when the respawn warp goes and the reload keeps the world. They wither when anyone in the session rests (the health they took comes back), the whole team falls, or the session ends: a guest's as the trip home begins, a host's when it closes the world (Abyssal Eye Orb, Black Separation Crystal), with the health they took given back as at a rest (after the trip's load, on top of the health the guest has at home); and whenever the player is in the world with no session for 3 s (at home they lie in the own world's key array, which a visit to another world does not show, so one from a death at home came back after a visit). | never |
    | Parchment of Deliverance | Pay a soul level's worth of souls to revive certain NPCs lost while visiting other worlds, then return to your last bonfire. Asks first. | outside a session |
@@ -169,8 +169,8 @@ The Steam lobby has room for 16 members, while the game keeps four players (the 
 and invaders together), which the host enforces when it answers. Players of other games that use Spacewar, or
 knocks that never get through, can sit in a lobby but cannot fill it. Steam lobbies cannot remove a member.
 
-An invader picks at random among the worlds that allow invaders. Dried Fingers make a world 1.5 times as likely
-to be picked. Hosts from 1.1.0 on publish them as `ptdesc_fingers`: 1.0.0 invaders go to a `ptdesc_taunt` world
+An invader picks at random among the worlds that allow invaders. Dried Fingers make a world 1.65 times as likely
+to be picked (1.5 before 1.4.0; the invader's game picks, so an older invader still weighs 1.5). Hosts from 1.1.0 on publish them as `ptdesc_fingers`: 1.0.0 invaders go to a `ptdesc_taunt` world
 before any other, so with few players one host would draw all of them.
 
 When the world picked cannot take the player (full, invaders refused there, busy for too long, gone, or no answer),
@@ -198,7 +198,10 @@ worlds a count of each and when the next one on cooldown opens.
 `InvasionCooldown` (the host's, minutes, default 3, 0 to 10): when the last invader who arrived (`kArrived`) leaves the
 host's world in any way (death, victory, the Darksign, its own leave, a lost connection, the host closing the world),
 the host takes no invader for that long. Until then another invader may still join the ones in the world. The cooldown outlives the session, so a host who closes the world and opens
-it again is still on cooldown.
+it again is still on cooldown. Dried Fingers (a 1.4.0 host) turn it off for the rest of the session: their use lifts
+a cooldown that is running (`ptdesc_cooldown` = 0), and an invasion that ends while they are in effect starts none,
+also when the host closes the world over an invader. The rules reset with the session, so the next one has
+`InvasionCooldown` again.
 
 A join whose game session ends before the load, with the joiner still at home, knocks once more by itself. In the
 2026-10-25 test the first invasion of a world after an earlier invasion of it always fell through 0.5 to 3.5 s into

@@ -98,7 +98,9 @@ const Def kDefs[kCount] = {
      L"Loose pages of faded writing that describe a rite to\nlay bare one's true nature before one's allies.\n\n"
      L"The host changes the rules of the world with each use."},
     {-95, 0, 2129, L"Dried Fingers", L"Taunt invaders into joining",
-     L"Withered fingers.\n\nThe host uses them to taunt invaders into joining."},
+     L"Withered fingers.\n\nThe host uses them to taunt invaders into joining.\n\n"
+     L"Invaders find the world more often, and may come\nagain at once after an invasion, until the world\n"
+     L"is closed."},
     {-94, 0, 2037, L"Cursed Pendant", L"Cause disasters in one's own world",
      L"An old pendant, scratched and dull. Some say it was\ntaken from the tomb of the Gravelord.\n\n"
      L"Use it in one's own world to bring disaster upon it,\nalone or as host, and again to lift the curse.\n\n"

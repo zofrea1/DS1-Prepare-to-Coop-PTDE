@@ -2132,7 +2132,7 @@ bool bonfire_lit(int object) {
 }
 
 void note_lit_here(int object) {
-    if (game::own_world()) return;
+    if (game::own_world() || g_invader) return;  // (an invader's visit leaves its bonfires as they were)
     g_lit_here.insert(object);
     g_bonfire_hold[object] = now() + 2.0;
     // Whatever the host's game says next, the light is there: a guest's own light shows at once.

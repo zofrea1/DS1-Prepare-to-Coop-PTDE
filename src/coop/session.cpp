@@ -958,6 +958,19 @@ void broadcast(T& msg, bool reliable = true, uint64_t except = 0) {
     broadcast_raw(&msg, sizeof(msg), reliable, except);
 }
 
+bool peer_is_invader(uint64_t id);
+
+// To the co-op players only (reliable): what an invader's game must not take, also from a host of 1.4.0 to an
+// invader of an older version that would (a bonfire's first light).
+template <typename T>
+void broadcast_coop(T& msg, uint64_t except = 0) {
+    if (!g_lobby) return;
+    const uint64_t me = steam::self();
+    for (uint64_t m : steam::lobby_members(g_lobby)) {
+        if (m != me && m != except && !is_lost(m) && !peer_is_invader(m)) steam::send(m, &msg, sizeof(msg), true);
+    }
+}
+
 // Steam knows another player's name only once it has heard of them: a joiner's hello can come before they are in our
 // lobby, and Steam then answers "[unknown]". Kept, that name matched nothing for the rest of the session: the host's
 // floating health bars kept the guest's Steam name instead of their character, soul level and ping, and the host's
@@ -4072,8 +4085,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             BonfireMsg m;
             if (!as(&m)) return;
             if (g_role == Role::Host) {
-                broadcast(m, true, from);
-            } else if (from != g_host) {
+                if (peer_is_invader(from)) return;
+                broadcast_coop(m, from);
+            } else if (from != g_host || g_invade) {
                 return;
             }
             rules::remote_bonfire_lit(m.bonfire);
@@ -4381,7 +4395,7 @@ void send_bonfire_lit(int bonfire) {
     fill_header(&m, kBonfireLit);
     m.bonfire = bonfire;
     if (g_role == Role::Host) {
-        broadcast(m);
+        broadcast_coop(m);
     } else if (g_host && g_step == Step::InWorld && !g_invade) {
         send_to(g_host, m);
     }

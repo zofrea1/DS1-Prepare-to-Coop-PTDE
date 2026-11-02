@@ -3750,6 +3750,8 @@ void remote_bonfire_warp(int bonfire) {
 
 void remote_bonfire_lit(int bonfire) {
     if (!g_bonfire_lit_orig || bonfire < 0) return;
+    // An invader lights nothing in the world it invades, and takes nothing of its lights home (Grok f9f7497c).
+    if (g_state.invader) return;
     world::note_lit_here(bonfire);
     if (world::bonfire_lit(bonfire)) {
         LOG_INFO("[coop] Bonfire %d: another player lit it, and it is lit here already (not lit again)", bonfire);

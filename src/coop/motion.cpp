@@ -24,11 +24,12 @@ namespace {
 // (+0x2C0 timer, +0x2C4 current class). The stub keeps the replaced load of the timer and swaps al for the
 // sender's gait when the character moves at all (al != 0) and that player reported one. The class becomes the
 // stick the character is given (0.5 walk, 1.0 run) and, for a sprint, the dash flag +0x1E4: the copy is driven as if
-// its player held the stick and the dash button. With no gait reported (an invasion, where both sides keep the game's
-// own rules, or a report gone stale) the game's own guess decides, its sprint from Remastered's 4.5 m/s instead of
-// the game's 6: a player walks at up to 2.2 m/s, jogs at 4.0 and sprints at 5.15 (the 2026-11-02 evening test, where
-// the speeds over 6 were rolls), so at 6 no sprint would ever show. (The afternoon's build tried 6, from a jog
-// thought to reach 5.3 that was the end of a sprint.)
+// its player held the stick and the dash button. Invaders and the players they invade report theirs too (1.4.0; until
+// then invasions were left to the guess). With no gait reported (a player of an older version, or a report gone stale)
+// the game's own guess decides: its run from 3 m/s instead of the game's 2 (kRunSite), its sprint from Remastered's 4.5
+// m/s instead of the game's 6. A player walks at up to 2.2 m/s, jogs at 4.0 and sprints at 5.15 (the 2026-11-02
+// evening test, where the speeds over 6 were rolls), so at 6 no sprint would ever show. (The afternoon's build tried
+// 6, from a jog thought to reach 5.3 that was the end of a sprint.)
 constexpr uint32_t kGaitSite = 0x00E1E935;    // movss xmm0, dword ptr [ecx+2C0h]       (8 bytes)
 constexpr uint32_t kSprintSite = 0x00E1E924;  // movss xmm2, dword ptr [011603ACh] (6.0) (8 bytes)
 // The guess's run line, 2 m/s (the shared 2.0 at 0x115F588, read here only for this): a walk goes up to 2.2 and showed
@@ -329,7 +330,8 @@ Gait local_gait() {
                      real == 1 ? "yes" : real == 0 ? "no" : "unknown");
         }
     }
-    // Every 60 s of moving: the fastest each gait went (the other side's own guess sprints from 6 m/s).
+    // Every 60 s of moving: the mean and the fastest of each gait (without our report, the other side's guess runs
+    // from 3 m/s and sprints from 4.5).
     const double now_s = static_cast<double>(t.QuadPart) / static_cast<double>(g_freq.QuadPart);
     if (g_gait_speeds.since == 0) g_gait_speeds.since = g_gait_speeds.last = now_s;
     if (g > kStand && g_speed > g_gait_speeds.peak[g]) g_gait_speeds.peak[g] = g_speed;

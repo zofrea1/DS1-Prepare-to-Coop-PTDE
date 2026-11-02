@@ -118,6 +118,8 @@ enum MsgType : uint8_t {
     kBonfires = 39,      // 1.4.0, host -> co-op guests: our bonfires' kindling (world::BonfirePoints each), to a guest
                          // who arrived and to all whenever it changes; a guest's game takes it while in our world
     kBonfireKindle = 40, // 1.4.0, co-op guest -> host: I kindled this bonfire of your world (BonfireMsg)
+    kBossSouls = 41,     // 1.4.0, co-op player -> all (through the host): my game paid a boss's souls (Simple: the
+                         // amount), for a player whose game did not run the boss's defeat (world.cpp)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -3055,6 +3057,7 @@ void on_world_globals(const uint8_t* data, uint32_t size) {
     std::string changes;
     const int changed = rules::apply_world_globals(data, size, &changes);
     drops::flags_rewritten();
+    world::defeat_rebase();
     if (changed < 0) {
         LOG_ERROR("[coop] The host's world state did not fit (%u bytes); our copy stays as it was", size);
     } else if (changed > 0) {
@@ -3069,6 +3072,7 @@ void on_world_globals(const uint8_t* data, uint32_t size) {
 void on_world_flags(const uint8_t* data, uint32_t size) {
     const int written = rules::apply_world_flag_snapshot(data, size);
     drops::flags_rewritten();
+    world::defeat_rebase();
     if (g_step == Step::InWorld && written >= 0) g_copy_settles_at = now() + kCopySettle;
     if (written < 0) {
         LOG_ERROR("[coop] The host's map flags did not fit our copy of their world (%u bytes); kept ours", size);
@@ -4135,6 +4139,19 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             world::set_host_bonfires(data + sizeof(Header), size - static_cast<uint32_t>(sizeof(Header)));
             break;
         }
+        case kBossSouls: {
+            Simple m;
+            if (!as(&m) || g_invade) return;
+            if (g_role == Role::Host) {
+                if (peer_is_invader(from)) return;
+                broadcast_coop(m, from);
+            } else if (from != g_host) {
+                return;
+            }
+            LOG_INFO("[coop] %s's game paid a boss's %u souls", steam::persona(from).c_str(), m.value);
+            world::remote_boss_souls(static_cast<int>(m.value));
+            break;
+        }
         case kBonfireKindle: {
             BonfireMsg m;
             if (!as(&m) || g_role != Role::Host || peer_is_invader(from)) return;
@@ -4577,6 +4594,20 @@ void send_npc_talk(int talk, int line, int row, int a2, int a3, talk::Kind kind)
     m.kind = static_cast<uint8_t>(kind);
     if (g_role == Role::Host) {
         broadcast(m);
+    } else if (g_host && g_step == Step::InWorld) {
+        send_to(g_host, m);
+    }
+}
+
+// Our game paid its player a boss's souls (rules.cpp hk_clear_bonus): the amount, for a player whose game did not
+// run the boss's defeat (world.cpp). Invaders take no boss souls and tell nobody.
+void send_boss_souls(int souls) {
+    if (g_role == Role::None || !g_lobby || g_invade || souls <= 0) return;
+    Simple m{};
+    fill_header(&m, kBossSouls);
+    m.value = static_cast<uint32_t>(souls);
+    if (g_role == Role::Host) {
+        broadcast_coop(m);
     } else if (g_host && g_step == Step::InWorld) {
         send_to(g_host, m);
     }
@@ -5104,6 +5135,7 @@ void set_callbacks() {
     world::set_rest_handler(&send_rest);
     world::set_death_handler(&send_death);
     rules::set_flag_listener(&queue_flag);
+    rules::set_clear_bonus_listener(&send_boss_souls);
     rules::set_bonfire_warp_listener(&send_bonfire_warp);
     rules::set_bonfire_lit_listener(&send_bonfire_lit);
     rules::set_bonfire_kindle_listener(&send_bonfire_kindle);

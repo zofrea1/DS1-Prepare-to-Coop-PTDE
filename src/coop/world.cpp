@@ -772,7 +772,80 @@ bool g_was_fight = false;
 
 uint32_t boss_handle(int slot);
 
+// ---------------------------------------------------------------- a boss's souls, wherever we stood
+// A boss's souls are its area's clear bonus (GameAreaParam, through SetClearBonus 0xD5F3D0 into PlayerGameData+0xF0),
+// paid by GetClearBonus (0xD5DEB0) as its event handles the defeat: only in a game that runs that event, one whose
+// player is in the boss's map. A boss that dies while we are in the world is dead for us wherever we stood, and
+// its items come (common event 970 on the flag, drops.cpp); its souls come too: the game that paid tells the
+// others the amount (kBossSouls), and a game whose defeat flag came on without a payment of its own pays that
+// amount, once its player stands (a fallen player waits for the respawn). Whichever of the two comes first pays;
+// the game's own payment after ours is skipped (rules.cpp hk_clear_bonus).
+constexpr double kSoulsWait = 8.0;     // after the flag, for our own game's payment
+constexpr double kSoulsWindow = 20.0;  // an amount heard this long before the flag (or after it) is this boss's
+constexpr double kSoulsGiveUp = 180.0;
+double g_souls_paid_at = 0;    // our game paid a boss's souls itself
+double g_souls_heard_at = 0;   // another player's game paid some
+int g_souls_heard = 0;
+double g_souls_due_at = 0;     // a defeat flag came on here; 0: none waiting
+double g_souls_given_at = 0;   // we paid another game's amount
+
+void give_souls(uint32_t me, int souls) {
+    uint32_t vt = 0, fn = 0;
+    if (!me || !read32(me, &vt) || !vt || !read32(vt + 0x1EC, &fn) || !fn) return;
+    __asm {
+        push 1
+        push 0
+        push souls
+        mov ecx, me
+        mov eax, fn
+        call eax
+    }
+}
+
+void boss_souls_tick() {
+    if (g_souls_due_at <= 0) return;
+    const double t = now();
+    if (!g_active || g_invader) {
+        g_souls_due_at = 0;
+        return;
+    }
+    if (t - g_souls_due_at < kSoulsWait) return;
+    if (g_souls_paid_at >= g_souls_due_at - kSoulsWindow) {
+        g_souls_due_at = 0;  // ours came
+        return;
+    }
+    if (g_souls_heard <= 0 || g_souls_heard_at < g_souls_due_at - kSoulsWindow) {
+        if (t - g_souls_due_at > kSoulsWindow) {
+            LOG_INFO("[coop] A boss died in the world, but no player's game told us its souls");
+            g_souls_due_at = 0;
+        }
+        return;
+    }
+    const uint32_t me = game::player();
+    if (game::loading() || !me || local_dead()) {
+        if (t - g_souls_due_at > kSoulsGiveUp) g_souls_due_at = 0;
+        return;
+    }
+    give_souls(me, g_souls_heard);
+    LOG_INFO("[coop] A boss's %d souls from another player's game: our game did not run its defeat (we were "
+             "elsewhere)", g_souls_heard);
+    g_souls_given_at = t;
+    g_souls_due_at = 0;
+}
+
 }  // namespace
+
+void note_boss_souls(int) { g_souls_paid_at = now(); }
+
+bool boss_souls_paid_here() { return g_souls_given_at > 0 && now() - g_souls_given_at < 60.0; }
+
+void remote_boss_souls(int souls) {
+    if (souls <= 0 || g_invader) return;
+    g_souls_heard = souls;
+    g_souls_heard_at = now();
+}
+
+void defeat_rebase() { g_defeat_known = false; }
 
 bool boss_defeat_flag(int id) {
     return std::find(std::begin(kBossDefeatFlags), std::end(kBossDefeatFlags), id) != std::end(kBossDefeatFlags);
@@ -801,6 +874,7 @@ void defeat_tick() {
     }
     if (g_defeat_known && (on & ~g_defeat_on)) {
         g_defeat_at = now();
+        if (g_active && !g_invader && g_souls_due_at <= 0) g_souls_due_at = g_defeat_at;
         for (size_t i = 0; i < sizeof(kBossDefeatFlags) / sizeof(kBossDefeatFlags[0]); ++i) {
             if ((on & ~g_defeat_on) & (1u << i)) {
                 LOG_INFO("[coop] Boss defeat flag %d is on: its rewards come over the next 5 s", kBossDefeatFlags[i]);
@@ -809,6 +883,7 @@ void defeat_tick() {
     }
     g_defeat_on = on;
     g_defeat_known = true;
+    boss_souls_tick();
     const bool fight = boss_fight() || rules::state().teammate_boss_fight;
     if (!local_dead()) {
         g_fight_over_at = 0;

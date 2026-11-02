@@ -998,10 +998,70 @@ bool local_working_flag(int id) {
 // drops.cpp whoever made them: our own scripts or another player's, applied here.
 int g_drop_old = -1;
 
+// ---------------------------------------------------------------- an NPC's step goes home when it lines up
+// An NPC's story is a range of flags in 1000-1999 with one on: their state (Lautrec 1570-1599, the Firekeeper
+// 1140-1169). A step clears the range and sets the next state (Batch Set Event Flags through the setter, 0xBC209D,
+// then Set Event Flag), from a map event or a talk. A guest's own world takes a step its game made in the host's world
+// only when the NPC stood at the same point in both before it: the whole range alike in the two stores. A step that
+// does not line up stays in the host's world, and the guest's quest stays where it was at home; one that does
+// advances it there too, and so does the next while they stay in step. Until 1.4.0 every step went home, back or
+// forward: a veteran guest's Lautrec, long dead at home, could be back at Firelink after a newcomer's Gargoyles. The
+// ranges are those the map scripts' NPC events are started with (start, end, next state), merged where they overlap;
+// a flag in none of them is its block of ten.
+const int16_t kNpcRanges[][2] = {
+    {1000, 1029}, {1030, 1036}, {1060, 1074}, {1090, 1109}, {1110, 1119}, {1120, 1139}, {1140, 1169}, {1170, 1189},
+    {1190, 1209}, {1210, 1219}, {1220, 1229}, {1230, 1239}, {1240, 1249}, {1250, 1259}, {1270, 1279}, {1280, 1289},
+    {1290, 1309}, {1310, 1319}, {1320, 1339}, {1340, 1343}, {1360, 1363}, {1380, 1399}, {1400, 1409}, {1410, 1413},
+    {1420, 1429}, {1430, 1459}, {1460, 1489}, {1490, 1514}, {1540, 1569}, {1570, 1599}, {1600, 1619}, {1620, 1631},
+    {1640, 1649}, {1670, 1678}, {1690, 1693}, {1700, 1709}, {1760, 1769}, {1820, 1839}, {1840, 1859}, {1860, 1869},
+    {1870, 1889}};
+
+// Sub-block 1 of the general block (flags 1000-1999) in a store (0x14 own, 0x90 visited), 0 if unreadable; as
+// general_block (the world state, below) reads it.
+uint32_t npc_block(uint32_t efm, uint32_t store) {
+    uint32_t areas = 0, block = 0, size = 0;
+    if (!read32(efm + store, &areas) || !areas || !read32(areas + 8, &block) || !read32(areas + 12, &size) ||
+        size != 128) {
+        return 0;
+    }
+    return block;
+}
+
+// -1: not an NPC's flag, or not a guest's game in the host's world; 1: the NPC stands at the same point at home; 0: not.
+int g_npc_aligned = -1;
+std::set<uint32_t> g_unaligned_events;  // map events that made a step that did not line up (not done at home)
+
+int npc_alignment(int id) {
+    if (id < 1000 || id > 1999 || !g_state.guest || g_state.invader || !seamless_rules()) return -1;
+    const uint32_t efm = game::event_flag_man();
+    uint32_t active = 0;
+    if (!efm || !read32(efm + 0x10C, &active) || active != efm + 0x90) return -1;
+    int lo = id / 10 * 10, hi = lo + 9;
+    for (const auto& r : kNpcRanges) {
+        if (id >= r[0] && id <= r[1]) {
+            lo = r[0];
+            hi = r[1];
+            break;
+        }
+    }
+    const uint32_t own = npc_block(efm, 0x14), visited = npc_block(efm, 0x90);
+    if (!own || !visited || own == visited) return -1;
+    for (int f = lo; f <= hi; ++f) {
+        const int idx = f - 1000;
+        uint32_t a = 0, b = 0;
+        if (!read32(own + (idx >> 5) * 4, &a) || !read32(visited + (idx >> 5) * 4, &b)) return -1;
+        const uint32_t mask = 1u << (31 - (idx & 31));  // the getter's bit (0xD38C40)
+        if ((a & mask) != (b & mask)) return 0;
+    }
+    return 1;
+}
+
 void __stdcall before_set_flag(int id) {
     g_old_value = -1;
     g_drop_old = -1;
+    g_npc_aligned = -1;
     if (g_flag_quiet) return;
+    if (GetCurrentThreadId() == g_main_thread) g_npc_aligned = npc_alignment(id);
     if (GetCurrentThreadId() == g_main_thread && drops::watched(id)) g_drop_old = game::flag(id) ? 1 : 0;
     if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return;
     if (!seamless_rules() || !shared_flag(id) || local_working_flag(id)) return;
@@ -1026,11 +1086,21 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     if (!g_state.guest || host_disaster_flag(id)) return;
     // Home keeps what our own game did in the host's world: our map events (also on a run another player's game
     // started in a map we were in), our talks, our pickups. A change another player's game made and only sent us
-    // (applied here, apply_remote_flag) stays in the host's world, a boss's defeat included: a boss killed while we
-    // were elsewhere is still ours to fight at home (one we saw die comes home, mirror_event_done). Until 1.4.0
-    // every change of the session went home, and with it what our game merely heard of: angeline's own world took
-    // Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
-    if (g_applying_remote) return;
+    // (applied here, apply_remote_flag) stays in the host's world, but a boss's defeat: a boss that dies while we are
+    // in the world is dead for us too, wherever we stood (its souls and items come as well: world.cpp, drops.cpp).
+    // Until 1.4.0 every change of the session went home, and with it what our game merely heard of: angeline's own
+    // world took Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
+    if (g_applying_remote && !world::boss_defeat_flag(id)) return;
+    // An NPC's step that does not line up with their state at home (npc_alignment).
+    if (g_npc_aligned == 0) {
+        static int lines = 0;
+        if (++lines <= 40) {
+            LOG_INFO("[coop] Flag %d %s: an NPC's step in the host's world that does not line up with ours at home; "
+                     "not taken home", id, (value & 0xFF) ? "on" : "off");
+        }
+        if (g_cur_event && g_unaligned_events.size() < 4096) g_unaligned_events.insert(g_cur_event);
+        return;
+    }
     // Nor what our game did while its copy of the host's world was not the host's yet (hold_event_runs): judged on
     // what we brought, it is neither the host's world's progress nor ours.
     if (g_hold_runs) return;
@@ -1441,7 +1511,23 @@ void* g_clear_bonus_orig = nullptr;
 
 bool invader_here() { return g_state.active && g_state.invader; }
 
+void (*g_clear_bonus_fn)(int souls) = nullptr;
+
 void __stdcall hk_clear_bonus(int arg) {
+    const uint32_t pgd0 = game::player_game_data();
+    float due = 0;
+    if (pgd0) read32(pgd0 + 0xF0, reinterpret_cast<uint32_t*>(&due));
+    if (!invader_here() && g_state.active && due >= 1.0f) {
+        if (world::boss_souls_paid_here()) {
+            // Another game's amount came first (world.cpp): ours would pay the same boss twice.
+            *ptr<float>(pgd0 + 0xF0) = 0.0f;
+            LOG_INFO("[coop] A boss's %.0f souls: paid here already from another player's game", due);
+            return;
+        }
+        world::note_boss_souls(static_cast<int>(due));
+        if (g_clear_bonus_fn) g_clear_bonus_fn(static_cast<int>(due));
+        LOG_INFO("[coop] A boss's %.0f souls: paid by our game (the others are told)", due);
+    }
     if (invader_here()) {
         const uint32_t pgd = game::player_game_data();
         float bonus = 0;
@@ -1806,7 +1892,17 @@ constexpr uint32_t kEventDone = 0x00BBEEB0;
 void* g_event_done_orig = nullptr;
 int g_done_lines = 0;
 
-// The flag an event's end sets (event id + slot), and whether it was on before (-1: not a map event of a guest's).
+// The flag an event's end sets (event id + slot), -1: not a map event.
+int event_end_flag(uint32_t ev) {
+    if (!ev) return -1;
+    uint32_t id = 0, slot_word = 0;
+    if (!read32(ev + 0x28, &id) || !read32(ev + 0x2C, &slot_word)) return -1;
+    const int slot = static_cast<int16_t>(slot_word & 0xFFFF);
+    if (static_cast<int>(id) < 10000000 || slot < 0) return -1;
+    return static_cast<int>(id) + slot;
+}
+
+// The same, for a co-op guest's game in a seamless session (-1 otherwise).
 int event_done_flag(uint32_t ev) {
     if (!g_state.guest || g_state.invader || !seamless_rules() || !ev) return -1;
     uint32_t id = 0, slot_word = 0;
@@ -1824,6 +1920,9 @@ void mirror_event_done(uint32_t ev, bool was_on) {
     if (flag < 0) return;
     const bool mirrored = g_mirroring_events.erase(ev) != 0;
     const bool boss = !was_on && world::boss_defeat_flag(flag);
+    // A step of an NPC's that did not line up was not taken home: the event stays undone there, so its step can
+    // still come at home.
+    if (g_unaligned_events.erase(ev) != 0 && !boss) return;
     if ((!mirrored && !boss) || g_hold_runs) return;
     const uint32_t efm = game::event_flag_man();
     uint32_t active = 0;
@@ -1843,10 +1942,23 @@ void mirror_event_done(uint32_t ev, bool was_on) {
     }
 }
 
+// A boss whose defeat flag is its event's end is set here straight in the store, so the flag sharing never saw it
+// either: the Stray Demon died in Darksim's game and a player elsewhere in that world never learned of it (no
+// rewards, no souls, alive in their world). Its defeat now goes to the others as a flag of ours.
+void share_boss_end(int flag, bool was_on) {
+    if (flag < 0 || was_on || !world::boss_defeat_flag(flag) || !seamless_rules() || !g_flag_listener) return;
+    if (!game::flag(flag) || g_contested.count(flag) || !shared_flag(flag)) return;
+    LOG_INFO("[coop] Boss defeat flag %d came on as its event ended: shared with the others", flag);
+    g_flag_listener(flag, true);
+}
+
 void __fastcall hk_event_done(uint32_t ev) {
+    const int end_flag = event_end_flag(ev);
+    const bool end_was_on = end_flag >= 0 && game::flag(end_flag);
     const int flag = event_done_flag(ev);
     const bool was_on = flag >= 0 && game::flag(flag);
     reinterpret_cast<void(__fastcall*)(uint32_t)>(g_event_done_orig)(ev);
+    if (GetCurrentThreadId() == g_main_thread) share_boss_end(end_flag, end_was_on);
     mirror_event_done(ev, was_on);
 }
 
@@ -3744,6 +3856,8 @@ int end_disasters(bool cursed_here) {
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
 
 void hold_event_runs(bool on) { g_hold_runs = on ? 1 : 0; }
+
+void set_clear_bonus_listener(void (*fn)(int souls)) { g_clear_bonus_fn = fn; }
 
 uint32_t take_held_runs() {
     const uint32_t n = g_held_runs;

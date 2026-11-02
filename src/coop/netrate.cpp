@@ -140,7 +140,7 @@ bool g_receiving = false;  // above the game's own rate: the patches below are i
 // followed the same way. An update later than gap + smoothing stops the character at the one before until it comes;
 // 2.5 J is about the 97th percentile of the lateness of an even spread, plus 4 ms for the frame it is read on. The
 // smoothing goes up fast (kRiseRate) and down slowly (kFallRate), within [kDynMin, kMaxSmoothing]: a burst of late
-// updates raises it for a few seconds, a steady link brings it down to 16 ms. A player's smoothing is shown on
+// updates raises it for a few seconds, a steady link brings it down to kDynMin. A player's smoothing is shown on
 // their floating health bar (OverheadPlayerDisplay 5).
 // The gaps are measured in our own frames, when the game takes the updates, so two things in them are ours and not the
 // network's: the frame they fall on (an update a little late or early moves to the frame before or after: up to a
@@ -150,7 +150,12 @@ bool g_receiving = false;  // above the game's own rate: the patches below are i
 // smoothing jumping about on their health bars on a network with a low ping. Now a deviation within half of our frame
 // is not counted, and the gaps that cover a long frame of ours (kHitchMin and kHitchRatio times our usual frame) are
 // left out. The smoothing also comes back down faster after a burst (kFallRate, 0.01 until then: 18 s from 200 ms).
-constexpr double kDynMin = 0.016;
+// The floor. 16 ms until the 2026-11-02 test: two PCs at home at sixty a second, where the jitter read 2 to 3 ms and
+// the smoothing sat at the floor; the other player's character still stood 8 to 24 times in 15 s (updates 34 to 43
+// ms apart, with 17 between them on average), and a boss another game moved up to four times a second (gaps to 56 ms
+// at 28). Movement looked jittery on the best link there is. 25 ms covers those gaps (with each update covered over
+// at least the mean gap, below), for 9 ms more delay.
+constexpr double kDynMin = 0.025;
 constexpr double kJitterGain = 2.5;
 constexpr double kJitterFloor = 0.004;
 constexpr double kRiseRate = 0.08;  // seconds of smoothing a second
@@ -292,8 +297,14 @@ Track* note_update(uint32_t manip, double gap, double slack, bool enemy) {
             t->smooth = t->smooth - kFallRate * dt > want ? t->smooth - kFallRate * dt : want;
         }
     }
+    // The time to cover this update: its gap plus the smoothing, the gap at least the mean gap. Taken in our frames, an
+    // update that came early (the one before late, or both in one frame of ours, or a sender's short frame) had a gap
+    // of a few ms, was covered that soon, and the copy then stood until the next one, which came at the usual time:
+    // with 8 ms frames here and 11 to 14 ms on the sender, a 5 ms gap and then a 35 ms one, a stand of 14 ms. What an
+    // update carries is the sender's own step, which is about the mean however soon it came.
     const double slacked = gap * slack;
-    t->cover = g_receiving && gap + t->smooth > slacked ? gap + t->smooth : slacked;
+    const double base = g_receiving && t->mean > gap && gap > 0 && gap < 2.0 ? t->mean : gap;
+    t->cover = g_receiving && base + t->smooth > slacked ? base + t->smooth : slacked;
     t->last = g_clock;
     if (t->updates < 0xFFFF) ++t->updates;
     return t;

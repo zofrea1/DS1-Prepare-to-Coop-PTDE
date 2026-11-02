@@ -3915,13 +3915,18 @@ bool ai_off_here(uint32_t chr) {
 // low (kBidFallen): a standing player's game wins, unless its copy sleeps (kBidAiOff), when the fallen player's game,
 // whose copy runs, keeps the enemy.
 // The low bids, lowest first: a game whose player is beyond the distance term's 64 m while another player is nearer
-// (kBidFar), one whose copy sleeps while another player is near (kBidAiOff), one whose player fell while a standing
-// player is near (kBidFallen). Each replaces a bid the game made itself (0xE6D250 says nothing at all for an enemy
-// that game does not update), so none of them adds an enemy to the bidding; they only order the games that already
-// bid: a nearer standing player's game always wins, and the enemy is never left with no game.
+// (kBidFar), one whose copy sleeps while another player is near (kBidAiOff, kBidAiOffKeep for the game that moves it
+// now), one whose player fell while a standing player is near (kBidFallen). Each replaces a bid the game made itself
+// (0xE6D250 says nothing at all for an enemy that game does not update), so none of them adds an enemy to the bidding;
+// they only order the games that already bid: a nearer standing player's game always wins, and the enemy is never left
+// with no game.
+// When the copies sleep in both games, both bid the same, and the enemy went back and forth between them at every
+// hand-out: the Asylum Demon on its perch and the Stray Demon below changed hands every 1 to 5 s for the whole session
+// (2026-11-02, two players in the Asylum). The game that moves it keeps it on a tie.
 constexpr uint32_t kBidFar = 1;
 constexpr uint32_t kBidAiOff = 2;
-constexpr uint32_t kBidFallen = 3;
+constexpr uint32_t kBidAiOffKeep = 3;
+constexpr uint32_t kBidFallen = 4;
 constexpr uint32_t kBidCap = 0x7FFF;  // the game's own cap (0xE6D250)
 
 // The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
@@ -4010,7 +4015,8 @@ uint32_t net_priority(uint32_t chr) {
                 LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): its AI is off in this game; the lowest bid from here "
                          "while another player is near it", chr, at.x, at.y, at.z);
             }
-            return kBidAiOff;  // the bid's high word (0xE56270 packs bid << 16 | index); the highest wins
+            // The bid's high word (0xE56270 packs bid << 16 | index); the highest wins.
+            return moved_here(chr) ? kBidAiOffKeep : kBidAiOff;
         }
     }
     const float mine = dist3(me, at);
@@ -4244,9 +4250,21 @@ void track_sleepers() {
 // waiting outside the fight has no gauge, but their game still runs the boss.
 constexpr uint32_t kMenuManVar = 0x013786D0;
 
+// A character by its handle (ChrIns+4). The map's characters are in WorldChrMan's tables by the handle's index and
+// slot; the players' (0x10044000 and on: ours, then the others') are not, and came back as no one. The no-target boss
+// nudge took a boss fighting the other player for one fighting no one ("gone") and turned it onto our own player,
+// every 15 s in each game that moved it (the Asylum Demon, 2026-11-02).
 uint32_t chr_of_handle(uint32_t handle) {
     uint32_t wcm = 0, table = 0, count = 0, entries = 0, chr = 0;
     if (handle == 0xFFFFFFFF || !read32(game::kWorldChrManVar, &wcm) || !wcm) return 0;
+    // The players: WorldChrMan +0x24 count, +0x28 their entries (0x20 each, the character first; ours is entry 0).
+    uint32_t players = 0, arr = 0;
+    if (read32(wcm + 0x24, &players) && read32(wcm + 0x28, &arr) && arr) {
+        for (uint32_t i = 0; i < players && i < 8; ++i) {
+            uint32_t p = 0, h = 0;
+            if (read32(arr + i * 0x20, &p) && p && read32(p + 4, &h) && h == handle) return p;
+        }
+    }
     const uint32_t index = (handle >> 14) & 0x3F, slot = handle & 0x3FFF;
     if (!read32(wcm + 0x240 + index * 4, &table) || !table || !read32(table, &count) || slot >= count ||
         !read32(table + 4, &entries) || !read32(entries + slot * 0x20, &chr)) {
@@ -4936,9 +4954,13 @@ void boss_handover_tick() {
             LOG_INFO("[coop] Boss %d: another game moves it now; %s", e, anim_probe(chr).c_str());
         } else if (was == 2 && by == 1 && ++lines <= 120) {
             const uint32_t target = target_of(chr);
+            const uint32_t target_chr = chr_of_handle(target);
             LOG_INFO("[coop] Boss %d: this game moves it now (another game did); its target here: %s; %s", e,
-                     target == 0xFFFFFFFF ? "none" : chr_of_handle(target) == game::player() ? "our player"
-                                                                                           : "another character",
+                     target == 0xFFFFFFFF                 ? "none"
+                     : !target_chr                        ? "no one we know"
+                     : target_chr == game::player()       ? "our player"
+                     : is_remote_player(target_chr)       ? "another player"
+                                                          : "another character",
                      anim_probe(chr).c_str());
         }
         was = by;

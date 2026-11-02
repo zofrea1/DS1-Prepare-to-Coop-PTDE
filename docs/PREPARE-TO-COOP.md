@@ -732,7 +732,11 @@ receiving side changes too (`netrate.cpp`): the pop takes every update that is w
 holds the whole state); the movement covers an update in at least the gap plus `NetworkSmoothing` (each player's
 own, default 33 ms; stubs at `0xE1F3A1` and `0xE21663`), where the game's 20% (10%) of slack is a few ms at thirty
 a second and an update a little late left the character standing; and the turn is a 30 FPS frame over the gap plus
-the smoothing (stubs at `0xE1F83C` and `0xE1F8CB`, never less than the game's fifth, at most the whole turn). A
+the smoothing (stubs at `0xE1F83C` and `0xE1F8CB`, never less than the game's fifth, at most the whole turn). Since
+1.4.0 the gap in the cover is at least the copy's mean gap: an update that came early (the one before late, or a short
+frame on either side) was covered that much sooner, and the copy stood until the next one came at the usual time. With
+`DynamicSmoothing` each copy's smoothing follows its own updates, from 25 ms (16 until the 2026-11-02 test, where
+two PCs at home at sixty a second still saw the other player stand 8 to 24 times in 15 s). A
 character is then drawn about one update interval plus the smoothing behind its player, plus the ping (about 66 ms
 at thirty a second, against the game's 200 ms). At six a second everything is the game's own. A guest of 1.2.0 or
 older keeps sending six a second.
@@ -880,7 +884,10 @@ second one, which walked back toward its perch and fought only once the guest hi
 had no target for 4 s (the AI's target, `0xCE3710`, the one the events' "Character Target State" test reads: none, or
 a character that fell or is gone) while its AI is on, no event animation plays on it and our player stands within
 40 m is turned on our player with the event scripts' ForceChangeTarget (`0xD61E00`, stdcall(entity, 10000)), at most
-every 15 s per boss. Until 1.4.0 every boss that passed to this game was turned so at once, at most every 10 s: bosses
+every 15 s per boss. The target is a handle (`ChrIns+4`): the map's characters are found in WorldChrMan's tables by its
+index and slot, the players' (`0x10044000` and on) in its player list (`+0x24` count, `+0x28` entries of 0x20). Until
+the 2026-11-02 test only the tables were searched, so a boss fighting the other player counted as fighting no one and
+was turned onto our player every 15 s. Until 1.4.0 every boss that passed to this game was turned so at once, at most every 10 s: bosses
 that changed hands often turned and jerked in fights with nothing wrong.
 
 The bonfires' state is a table beside the flag stores (`[[0x137E204]+0xB48]`, a list at +0x24; an entry holds the

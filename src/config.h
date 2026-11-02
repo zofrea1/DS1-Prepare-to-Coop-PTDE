@@ -43,7 +43,7 @@ struct CoopConfig {
     // Each player's own: above the game's rate, the ms other players' characters (and the enemies other games move)
     // stay behind their updates as a margin for late ones (0 to 200). 33 ms is about a frame at 30 FPS.
     int net_smoothing = 33;
-    // Each player's own: the smoothing follows each other player's (and each enemy copy's) connection, from 16 ms on
+    // Each player's own: the smoothing follows each other player's (and each enemy copy's) connection, from 25 ms on
     // an even one up to 200 ms on a poor one, starting at NetworkSmoothing. false = NetworkSmoothing for all.
     bool dynamic_smoothing = true;
     // Players in a session, the host and every guest and invader together (2 to 8). The game holds 4; above that

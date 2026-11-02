@@ -31,7 +31,7 @@ bool install();
 // NetworkSmoothing in ms (0 .. kMaxSmoothing): the margin for late updates above the game's own rate.
 void set_smoothing(int ms);
 // DynamicSmoothing: each other player's character and each enemy copy gets its own margin from how evenly its updates
-// come (16 ms .. kMaxSmoothing; NetworkSmoothing is where it starts). Off: NetworkSmoothing for all.
+// come (25 ms .. kMaxSmoothing; NetworkSmoothing is where it starts). Off: NetworkSmoothing for all.
 void set_dynamic(bool on);
 // The smoothing in ms that a character's network manipulator (chr+0x2C of another player's character, or of an
 // enemy another game moves) is drawn with now, -1 when none (the game's own rate, or no update lately).

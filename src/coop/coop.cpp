@@ -478,7 +478,7 @@ void coop_install(const CoopConfig& config) {
              std::max(coop::netrate::kVanilla, std::min(coop::netrate::kMax, g_cfg.net_rate)),
              std::max(0, std::min(coop::netrate::kMaxSmoothing, g_cfg.net_smoothing)),
              g_cfg.dynamic_smoothing ? ", then each player's and enemy's own from how evenly their updates come, "
-                                       "16 to 200 ms (DynamicSmoothing)"
+                                       "25 to 200 ms (DynamicSmoothing)"
                                      : "");
     g_installed = true;
     if (g_cfg.check_updates) {

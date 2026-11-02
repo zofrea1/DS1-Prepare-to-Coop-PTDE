@@ -7,8 +7,9 @@
 //
 //  * Gait: PTDE picks a remote character's walk, run or sprint from its estimated speed (0xE1E6A0: stand, walk
 //    from 0.01 m/s, run from 2, sprint from 6). Remastered sends the sender's own gait with every sample and only
-//    falls back to the speed (sprint from 4.5). Each player sends its gait here; the receiving game's choice is
-//    replaced by it while the character is moving, and the fallback's sprint threshold is Remastered's.
+//    falls back to the speed (sprint from 4.5). Each player sends its gait here (a sprint is the character's own
+//    sprint state, not the button); the receiving game's choice is replaced by it while the character is moving.
+//    Without one (an invasion) the game's own guess stays, with its own 6 m/s: a jog reaches 5.3.
 //  * Bonfire ceremonies: sitting down, the sitting loop, standing up, kindling, Reverse Hollowing and the rest
 //    are event animations (ChrIns 0xE69590), which the player samples do not carry: the other players saw the
 //    character stand still. Remastered Seamless Co-op watches that function on the local player and, for its

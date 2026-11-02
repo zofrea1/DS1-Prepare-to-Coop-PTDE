@@ -25,10 +25,12 @@ namespace {
 // sender's gait when the character moves at all (al != 0) and that player reported one. The class becomes the
 // stick the character is given (0.5 walk, 1.0 run) and, for a sprint, the dash flag +0x1E4: the copy is driven as if
 // its player held the stick and the dash button. With no gait reported (an invasion, where both sides keep the game's
-// own rules, or a report gone stale) the game's own guess decides: sprint from 6 m/s. Until 1.4.0 that was lowered to
-// Remastered's 4.5 (round 5, when the guess still read a run as a walk at a high frame rate: the FPS Unlock now gives it
-// the real speed), and a jog, 4.7 to 5.3 m/s (2026-11-02), showed as a sprint.
+// own rules, or a report gone stale) the game's own guess decides, its sprint from Remastered's 4.5 m/s instead of
+// the game's 6: a player walks at up to 2.2 m/s, jogs at 4.0 and sprints at 5.15 (the 2026-11-02 evening test, where
+// the speeds over 6 were rolls), so at 6 no sprint would ever show. (The afternoon's build tried 6, from a jog
+// thought to reach 5.3 that was the end of a sprint.)
 constexpr uint32_t kGaitSite = 0x00E1E935;    // movss xmm0, dword ptr [ecx+2C0h]       (8 bytes)
+constexpr uint32_t kSprintSite = 0x00E1E924;  // movss xmm2, dword ptr [011603ACh] (6.0) (8 bytes)
 constexpr uint32_t kNetworkManipulatorVtable = 0x0118DDEC;
 
 struct GaitEntry {
@@ -39,6 +41,7 @@ struct GaitEntry {
 constexpr int kGaitEntries = players::kMaxPlayers - 1;
 static_assert(kGaitEntries == 7, "gait_stub compares with 7");
 GaitEntry g_gaits[kGaitEntries] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}};
+alignas(4) float g_sprint_speed = 4.5f;  // Remastered's fallback threshold (PTDE 6.0)
 
 __declspec(naked) void gait_stub() {
     __asm {
@@ -75,9 +78,11 @@ __declspec(naked) void gait_stub() {
 // copy with the dash flag, played the sprint at a jog's speed until the button was let go (2026-11-02). The character
 // itself knows: its walk animation controller ([ChrCtrl+0x164], WalkAnim_Twist for a player) answers vtable +0x20
 // (0xE0DC40: the walk state is the dash state), which the stamina drain asks every frame (0xE80AA8) before it takes
-// a point off. A jog also reached 5.3 m/s, over the 5.2 that counted as a sprint without the flag: its copy switched
-// between running and sprinting.
+// a point off. The walk and run come from the speed: a walk goes up to 2.2 m/s and a jog runs at 4.0, so the line
+// between them is 3 m/s. It was 2.2, the top of a walk, and a full walk switched between walking and running on the
+// other screens several times a second (2026-11-02 evening).
 constexpr uint32_t kWalkAnimTwistDash = 0x00E0DC40;
+constexpr double kRunFrom = 3.0;
 LARGE_INTEGER g_freq{};
 LARGE_INTEGER g_prev_t{};
 game::Vec3 g_prev_pos{};
@@ -107,10 +112,14 @@ int sprinting(uint32_t chr) {
     return r ? 1 : 0;
 }
 
-// The speeds each gait of ours reached, for the log (what the game's own guess on the other side sees).
+// The speeds each gait of ours reached, for the log (what the game's own guess on the other side sees): the fastest
+// (a roll counts as a run) and the time-weighted mean.
 struct GaitSpeeds {
     double peak[4] = {};
+    double sum[4] = {};   // speed x time
+    double time[4] = {};  // time in each gait
     double since = 0;
+    double last = 0;
 };
 GaitSpeeds g_gait_speeds;
 
@@ -245,6 +254,14 @@ bool install() {
         if (!patch(kGaitSite, k, code, sizeof(code))) ++failed;
     }
     {
+        static const uint8_t k[8] = {0xF3, 0x0F, 0x10, 0x15, 0xAC, 0x03, 0x16, 0x01};
+        uint8_t code[8];
+        std::memcpy(code, k, 4);
+        const uint32_t operand = reinterpret_cast<uint32_t>(&g_sprint_speed);
+        std::memcpy(code + 4, &operand, 4);
+        if (!patch(kSprintSite, k, code, sizeof(code))) ++failed;
+    }
+    {
         // mov ecx,[esi+28h] ; fld dword ptr [011E7CA0h]
         static const uint8_t k[9] = {0x8B, 0x4E, 0x28, 0xD9, 0x05, 0xA0, 0x7C, 0x1E, 0x01};
         g_anim_start_orig = detour(kEventAnimStart, k, sizeof(k), reinterpret_cast<void*>(&hk_anim_start));
@@ -288,9 +305,9 @@ Gait local_gait() {
     Gait g = kWalk;
     if (g_speed < 0.3) {
         g = kStand;
-    } else if (real == 1 ? g_speed > 2.2 : real < 0 && ((dash && g_speed > 3.2) || g_speed > 6.0)) {
+    } else if (real == 1 ? g_speed > kRunFrom : real < 0 && dash && g_speed > 4.5) {
         g = kSprint;
-    } else if (g_speed > 2.2) {
+    } else if (g_speed > kRunFrom) {
         g = kRun;
     }
     if (g != g_local) {
@@ -302,17 +319,24 @@ Gait local_gait() {
     }
     // Every 60 s of moving: the fastest each gait went (the other side's own guess sprints from 6 m/s).
     const double now_s = static_cast<double>(t.QuadPart) / static_cast<double>(g_freq.QuadPart);
-    if (g_gait_speeds.since == 0) g_gait_speeds.since = now_s;
+    if (g_gait_speeds.since == 0) g_gait_speeds.since = g_gait_speeds.last = now_s;
     if (g > kStand && g_speed > g_gait_speeds.peak[g]) g_gait_speeds.peak[g] = g_speed;
+    if (const double step = now_s - g_gait_speeds.last; g > kStand && step > 0 && step < 0.5) {
+        g_gait_speeds.sum[g] += g_speed * step;
+        g_gait_speeds.time[g] += step;
+    }
+    g_gait_speeds.last = now_s;
     if (now_s - g_gait_speeds.since >= 60.0) {
         static int lines = 0;
         const GaitSpeeds& s = g_gait_speeds;
+        auto mean = [&s](int i) { return s.time[i] > 0 ? s.sum[i] / s.time[i] : 0.0; };
         if ((s.peak[kWalk] > 0 || s.peak[kRun] > 0 || s.peak[kSprint] > 0) && ++lines <= 30) {
-            LOG_INFO("[coop] Our fastest, last 60 s: walk %.2f m/s, run %.2f m/s, sprint %.2f m/s", s.peak[kWalk],
-                     s.peak[kRun], s.peak[kSprint]);
+            LOG_INFO("[coop] Our speeds, last 60 s (mean / fastest): walk %.2f / %.2f m/s over %.0f s, run %.2f / %.2f "
+                     "over %.0f s, sprint %.2f / %.2f over %.0f s", mean(kWalk), s.peak[kWalk], s.time[kWalk],
+                     mean(kRun), s.peak[kRun], s.time[kRun], mean(kSprint), s.peak[kSprint], s.time[kSprint]);
         }
         g_gait_speeds = GaitSpeeds{};
-        g_gait_speeds.since = now_s;
+        g_gait_speeds.since = g_gait_speeds.last = now_s;
     }
     return g_local = g;
 }

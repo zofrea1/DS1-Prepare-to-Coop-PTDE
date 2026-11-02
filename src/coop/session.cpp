@@ -114,6 +114,9 @@ enum MsgType : uint8_t {
                          // (ItemDropMsg; itemshare.cpp), and the host's list to a guest who arrives
     kItemClaim = 37,     // 1.4.0, co-op guest -> host: I would pick up this shared drop (ItemKeyMsg)
     kItemTaken = 38,     // 1.4.0, host -> co-op guests: this shared drop is that player's (ItemTakenMsg); off the floor
+    kBonfires = 39,      // 1.4.0, host -> co-op guests: our bonfires' kindling (world::BonfirePoints each), to a guest
+                         // who arrived and to all whenever it changes; a guest's game takes it while in our world
+    kBonfireKindle = 40, // 1.4.0, co-op guest -> host: I kindled this bonfire of your world (BonfireMsg)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -1657,6 +1660,7 @@ bool invader_arrival(game::InvasionPoint* ip) {
 
 void send_world_globals(uint64_t to);
 void send_live_drops(uint64_t to);
+void send_bonfires(uint64_t to);
 
 void host_answer(const Pending& p) {
     Welcome w{};
@@ -3775,6 +3779,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                     send_world_globals(from);
                     send_world_flags(from);
                     send_live_drops(from);
+                    send_bonfires(from);
                     g_world_sent.clear();  // what our world has, to the newcomer (and again to the others)
                     g_world_polled = 0;
                 } else if (std::find(g_invaders_in.begin(), g_invaders_in.end(), from) == g_invaders_in.end()) {
@@ -4032,6 +4037,18 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             g_follow_told = 0;
             g_follow_bonfire = m.bonfire;
             g_follow_at = now() + 3.0;
+            break;
+        }
+        case kBonfires: {
+            if (from != g_host || g_role != Role::Guest || g_invade) return;
+            world::set_host_bonfires(data + sizeof(Header), size - static_cast<uint32_t>(sizeof(Header)));
+            break;
+        }
+        case kBonfireKindle: {
+            BonfireMsg m;
+            if (!as(&m) || g_role != Role::Host || peer_is_invader(from)) return;
+            LOG_INFO("[coop] %s kindled bonfire %d of our world", peer(from)->name.c_str(), m.bonfire);
+            world::kindle_for_guest(m.bonfire);
             break;
         }
         case kBonfireLit: {
@@ -4317,6 +4334,29 @@ void send_bonfire_warp(int bonfire) {
     fill_header(&m, kBonfireWarp);
     m.bonfire = bonfire;
     broadcast(m);
+}
+
+// The host: our bonfires' kindling, to one co-op guest (to = 0: to everyone; invaders' games leave it).
+void send_bonfires(uint64_t to) {
+    const std::vector<uint8_t> pts = world::bonfire_points();
+    std::vector<uint8_t> msg(sizeof(Header) + pts.size());
+    Header h{kMagic, kBonfires};
+    std::memcpy(msg.data(), &h, sizeof(h));
+    if (!pts.empty()) std::memcpy(msg.data() + sizeof(h), pts.data(), pts.size());
+    if (to) {
+        steam::send(to, msg.data(), static_cast<uint32_t>(msg.size()), true);
+    } else {
+        broadcast_raw(msg.data(), static_cast<uint32_t>(msg.size()), true);
+    }
+}
+
+// A co-op guest: our Kindle in the host's world, for the host's game to add.
+void send_bonfire_kindle(int bonfire) {
+    if (g_role != Role::Guest || !g_host || g_invade || g_step != Step::InWorld) return;
+    BonfireMsg m{};
+    fill_header(&m, kBonfireKindle);
+    m.bonfire = bonfire;
+    send_to(g_host, m);
 }
 
 void send_bonfire_lit(int bonfire) {
@@ -4938,6 +4978,7 @@ void set_callbacks() {
     rules::set_flag_listener(&queue_flag);
     rules::set_bonfire_warp_listener(&send_bonfire_warp);
     rules::set_bonfire_lit_listener(&send_bonfire_lit);
+    rules::set_bonfire_kindle_listener(&send_bonfire_kindle);
     rules::set_anim_done_listener(&send_anim_done);
     rules::set_event_lead_listener(&send_event_lead);
     talk::set_listener(&send_npc_talk);
@@ -5195,6 +5236,8 @@ void tick() {
     remote_characters_upkeep();
     player_net_watch();
     itemshare_tick();
+    // The host: our bonfires' kindling to the guests whenever it changes (a light, a Kindle, a guest's Kindle).
+    if (world::bonfires_changed() && g_role == Role::Host && g_lobby) send_bonfires(0);
     rules::tick();
     {
         const auto& st = rules::state();

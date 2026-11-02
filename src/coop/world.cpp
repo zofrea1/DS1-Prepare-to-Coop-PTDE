@@ -1034,9 +1034,9 @@ void watch_hands(uint32_t chr) {
     const bool where = game::chr_position(chr, &at) && game::position(&me, nullptr);
     const float dx = at.x - me.x, dy = at.y - me.y, dz = at.z - me.z;
     LOG_INFO("[coop] Enemy %08X (entity %d) changed hands %zu times in 30 s here (now moved by %s); at (%.1f, %.1f, "
-             "%.1f), %.0f m from us", chr, static_cast<int>(entity), h.changes.size(),
+             "%.1f), %.0f m from us; our bid now %u", chr, static_cast<int>(entity), h.changes.size(),
              mover == 1 ? "this game" : mover == 2 ? "another game" : "neither", at.x, at.y, at.z,
-             where ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0f);
+             where ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0f, rules::bid_for(chr));
 }
 
 // `was_up`: we saw it with more than 1 HP at the last look. One already dead when we first saw it (the dead of a load,
@@ -1300,14 +1300,30 @@ void scale_tick() {
 }
 
 // ---------------------------------------------------------------- our own world's bonfires
-// The bonfires' state lives in a table beside the event flags ([[0x137E204]+0xB48], a list at +0x24 of nodes {next,
-// ?, entry}; entry 0x14 bytes: +4 the bonfire object, +8/+0xA two counts, +0xC lit, +0xD state, +0xE kindle level;
-// 0xBD8870 finds one, 0xBD8960 sets +0xD/+0xE, the bonfire menu's Kindle reads +0xE). It is not part of the flag
-// stores, so a visit to another world can leave that world's bonfires in it: after the host invaded a world further on
-// (2026-10-25), their own Undead Burg bonfire gave 15 Estus (kindled twice), which no one had kindled. While we are in
-// our own world the table is copied twice a second; back home from another world, our bonfires whose kindling changed
-// meanwhile get theirs back. A change at home is logged with what the session was doing, to find any other way in.
+// The bonfires' kindling lives in a table beside the event flags ([[0x137E204]+0xB48], a list at +0x24 of nodes {next,
+// ?, entry}; an entry is a FrpgNetBonfireDbItem, 0x14 bytes: +4 the bonfire object, +8 its points (short), +0xA points
+// from the network (short), +0xC ?, +0xD the bonfire's state, +0xE its level). 0xBD8870 finds an entry, 0xBD8AA0
+// (stdcall(table, bonfire), ret 8) makes one, and a bonfire's update (0xD58xxx) makes its own as soon as it runs, with
+// no points. The first light (Util_RequestLevelUpFirst, 0xD5D850) and each Kindle (Util_RequestLevelUp, 0xD5D830, a
+// humanity) are requests the bonfire's update takes the frame after: 0xBD83E0 (esi = entry, stdcall(10, 0), ret 8)
+// adds 10 points within the game's limits. The level (5, 10, 15, 20 Estus) comes from the points every frame
+// (0xBD9200, against a param row; 0xBD9100 the Estus), written to +0xE, and +0xD from the bonfire's own state. The
+// table is not part of the flag stores, so a visit to another world can leave that world's bonfires in it: after the
+// host invaded a world further on (2026-10-25), their own Undead Burg bonfire gave 15 Estus (kindled twice), which no
+// one had kindled. While we are in our own world the table is copied twice a second; back home from another world, our
+// bonfires whose points changed meanwhile get theirs back. A change at home is logged with what the session was doing.
+//
+// A co-op guest in the host's world sees the host's kindling (1.4.0): the host sends its points with the guest's
+// arrival and whenever they change, the guest's game takes them for every bonfire while there (making the entries it
+// has none for), and a Kindle of the guest's is passed to the host, who adds the points in its own world. Until then
+// the guest saw its own table there: "Light Bonfire" at a bonfire the host had lit, and the light it sent to the
+// others was a first light in the host's game too, 10 more points on a lit bonfire: kindled, at no cost (the host's
+// second Asylum bonfire gave 10 Estus, the guest 5; 2026-11-02). Back home the guest's own points come back; a bonfire
+// lit during the visit (by the guest, or by anyone for everyone) stays lit there, unkindled.
 constexpr uint32_t kBonfireOwner = 0x0137E204;
+constexpr uint32_t kBonfireMake = 0x00BD8AA0;
+constexpr uint32_t kBonfireAddPoints = 0x00BD83E0;
+constexpr int16_t kLitPoints = 10;  // the first light's points (level 1)
 struct BonfireState {
     uint16_t a = 0, b = 0;
     uint8_t lit = 0, state = 0, kindle = 0;
@@ -1317,6 +1333,19 @@ struct BonfireState {
 };
 std::map<int, BonfireState> g_home_bonfires;
 bool g_away_from_home = false;
+
+// The host: our table changed since it was last sent. A guest: the host's table, and what we did with it.
+bool g_bonfires_dirty = false;
+struct HostBonfire {
+    int16_t a = 0, b = 0;
+    uint8_t level = 0;
+};
+std::map<int, HostBonfire> g_host_bonfires;
+bool g_host_bonfires_known = false;
+std::set<int> g_mirrored;  // bonfires whose entry we wrote from the host's (put back at home)
+std::set<int> g_lit_here;  // lit during this visit: lit at home too
+std::map<int, double> g_bonfire_hold;  // our own light or Kindle of this bonfire: its points are the game's until then
+int g_bonfire_lines = 0;
 
 // Calls fn(entry address, bonfire object) for each entry; false if the table is not there.
 template <typename F>
@@ -1346,6 +1375,69 @@ BonfireState read_bonfire(uint32_t entry) {
     return st;
 }
 
+uint32_t bonfire_table() {
+    uint32_t owner = 0, table = 0;
+    return read32(kBonfireOwner, &owner) && owner && read32(owner + 0xB48, &table) ? table : 0;
+}
+
+uint32_t make_bonfire_entry(int object) {
+    const uint32_t table = bonfire_table();
+    if (!table) return 0;
+    __try {
+        return reinterpret_cast<uint32_t(__stdcall*)(uint32_t, int)>(kBonfireMake)(table, object);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+void write_bonfire(uint32_t entry, int16_t a, int16_t b, uint8_t level) {
+    *ptr<int16_t>(entry + 8) = a;
+    *ptr<int16_t>(entry + 0xA) = b;
+    *ptr<uint8_t>(entry + 0xE) = level;
+}
+
+// A guest in the host's world: our table takes the host's points for every bonfire (none where the host has none).
+void mirror_host_bonfires() {
+    if (!g_host_bonfires_known) return;
+    std::map<int, uint32_t> ours;
+    if (!each_bonfire([&](uint32_t entry, int object) { ours[object] = entry; })) return;
+    for (const auto& [object, h] : g_host_bonfires) {
+        // Our game adds the points of our own light or Kindle the frame after the request: not written meanwhile, or
+        // the two would add up (and a refill in between would count both).
+        if (const auto hold = g_bonfire_hold.find(object); hold != g_bonfire_hold.end() && now() < hold->second) continue;
+        uint32_t entry = 0;
+        if (const auto it = ours.find(object); it != ours.end()) entry = it->second;
+        if (!entry) {
+            if (h.a == 0 && h.b == 0) continue;
+            entry = make_bonfire_entry(object);
+            if (!entry) continue;
+        }
+        // The points only: a loaded bonfire writes its own level from them every frame (the host's level of one it
+        // has not loaded is 0).
+        const BonfireState st = read_bonfire(entry);
+        if (static_cast<int16_t>(st.a) == h.a && static_cast<int16_t>(st.b) == h.b) continue;
+        g_mirrored.insert(object);
+        write_bonfire(entry, h.a, h.b, h.level);
+        if (++g_bonfire_lines <= 120) {
+            LOG_INFO("[coop] Bonfire %d: the host's kindling here (points %d -> %d, level %d -> %d)", object,
+                     static_cast<int16_t>(st.a), h.a, st.kindle, h.level);
+        }
+    }
+    for (const auto& [object, entry] : ours) {
+        if (g_host_bonfires.count(object)) continue;
+        // (A bonfire we have just lit is not in the host's list until the host's game has lit it too.)
+        if (const auto hold = g_bonfire_hold.find(object); hold != g_bonfire_hold.end() && now() < hold->second) continue;
+        const BonfireState st = read_bonfire(entry);
+        if (st.a == 0 && st.b == 0 && st.kindle == 0) continue;
+        g_mirrored.insert(object);
+        write_bonfire(entry, 0, 0, 0);
+        if (++g_bonfire_lines <= 120) {
+            LOG_INFO("[coop] Bonfire %d: not lit in the host's world (our points %d set aside while we are here)",
+                     object, static_cast<int16_t>(st.a));
+        }
+    }
+}
+
 void bonfire_tick() {
     static double last = 0;
     if (now() - last < 0.5) return;
@@ -1353,6 +1445,7 @@ void bonfire_tick() {
     if (!game::in_game() || game::loading()) return;
     if (!game::own_world()) {
         g_away_from_home = true;  // the copy waits for us at home
+        if (g_active && !g_invader && session::guest()) mirror_host_bonfires();
         return;
     }
     const bool back = g_away_from_home;
@@ -1361,6 +1454,25 @@ void bonfire_tick() {
     const bool read = each_bonfire([&](uint32_t entry, int object) {
         const BonfireState st = read_bonfire(entry);
         const auto it = g_home_bonfires.find(object);
+        // Back from the host's world: a bonfire whose entry took the host's points, or that was lit there.
+        const bool lit_here = back && g_lit_here.count(object) != 0;
+        if (back && (g_mirrored.count(object) || lit_here)) {
+            BonfireState want = it != g_home_bonfires.end() ? it->second : BonfireState{};
+            want.lit = st.lit;
+            want.state = st.state;
+            if (lit_here && static_cast<int16_t>(want.a) < kLitPoints) {
+                want.a = static_cast<uint16_t>(kLitPoints);
+                if (want.kindle < 1) want.kindle = 1;
+            }
+            if (!(want == st)) {
+                write_bonfire(entry, static_cast<int16_t>(want.a), static_cast<int16_t>(want.b), want.kindle);
+                LOG_INFO("[coop] Bonfire %d: our own kindling again (points %d -> %d, level %d -> %d%s)", object,
+                         static_cast<int16_t>(st.a), static_cast<int16_t>(want.a), st.kindle, want.kindle,
+                         lit_here ? "; lit while we were away, so lit here too" : "");
+            }
+            now_seen[object] = want;
+            return;
+        }
         if (back && it != g_home_bonfires.end() && !(it->second == st)) {
             // The kindling only: a bonfire lit in the host's world is lit in a guest's own world too (its flag).
             BonfireState kept = st;
@@ -1378,6 +1490,10 @@ void bonfire_tick() {
             now_seen[object] = kept;
             return;
         }
+        // The points (a light, a Kindle): the level alone drops to 0 in every load and comes back from them.
+        if (!back && (it == g_home_bonfires.end() || it->second.a != st.a || it->second.b != st.b)) {
+            g_bonfires_dirty = true;  // the host's guests take it
+        }
         if (!back && it != g_home_bonfires.end() && it->second.kindle != st.kindle) {
             LOG_INFO("[coop] Bonfire %d: kindle level %d -> %d at home (%s)", object, it->second.kindle, st.kindle,
                      g_active ? (g_invader_present ? "in a session, an invader here" : "in a session") : "no session");
@@ -1388,6 +1504,13 @@ void bonfire_tick() {
         now_seen[object] = st;
     });
     if (read) g_home_bonfires.swap(now_seen);
+    if (back) {
+        g_mirrored.clear();
+        g_lit_here.clear();
+        g_bonfire_hold.clear();
+        g_host_bonfires.clear();
+        g_host_bonfires_known = false;
+    }
 }
 
 // The death debuff: the row for the number of Crimson Blossoms the player carries. With DeathDebuffs off,
@@ -1963,6 +2086,100 @@ void tick() {
         g_spot_watch.clear();
         g_forced_max.clear();
     }
+}
+
+// ---------------------------------------------------------------- bonfires shared from the host's world
+std::vector<uint8_t> bonfire_points() {
+    std::vector<uint8_t> out;
+    each_bonfire([&](uint32_t entry, int object) {
+        const BonfireState st = read_bonfire(entry);
+        if (out.size() >= kBonfireBytes * kMaxBonfires) return;
+        BonfirePoints p{object, static_cast<int16_t>(st.a), static_cast<int16_t>(st.b), st.kindle, {}};
+        const auto* raw = reinterpret_cast<const uint8_t*>(&p);
+        out.insert(out.end(), raw, raw + sizeof(p));
+    });
+    return out;
+}
+
+bool bonfires_changed() {
+    const bool was = g_bonfires_dirty;
+    g_bonfires_dirty = false;
+    return was;
+}
+
+void set_host_bonfires(const uint8_t* data, uint32_t size) {
+    g_host_bonfires.clear();
+    for (uint32_t i = 0; i + sizeof(BonfirePoints) <= size; i += sizeof(BonfirePoints)) {
+        BonfirePoints p{};
+        std::memcpy(&p, data + i, sizeof(p));
+        g_host_bonfires[p.object] = HostBonfire{p.a, p.b, p.level};
+    }
+    if (!g_host_bonfires_known && ++g_bonfire_lines <= 120) {
+        LOG_INFO("[coop] The host's bonfires came (%zu): their kindling is ours while we are in their world",
+                 g_host_bonfires.size());
+    }
+    g_host_bonfires_known = true;
+}
+
+bool bonfire_lit(int object) {
+    bool lit = false;
+    each_bonfire([&](uint32_t entry, int o) {
+        if (o != object) return;
+        const BonfireState st = read_bonfire(entry);
+        lit = static_cast<int16_t>(st.a) > 0 || st.kindle > 0;
+    });
+    return lit;
+}
+
+void note_lit_here(int object) {
+    if (game::own_world()) return;
+    g_lit_here.insert(object);
+    g_bonfire_hold[object] = now() + 2.0;
+    // Whatever the host's game says next, the light is there: a guest's own light shows at once.
+    if (const auto it = g_host_bonfires.find(object); it != g_host_bonfires.end() && it->second.a < kLitPoints) {
+        it->second.a = kLitPoints;
+        if (it->second.level < 1) it->second.level = 1;
+    }
+}
+
+void note_own_kindle(int object) {
+    // The guest's game adds the points to its entry now; the host's answer follows. Until then the host's points here
+    // are taken as kindled too, so that the copy does not take them back.
+    g_bonfire_hold[object] = now() + 2.0;
+    if (const auto it = g_host_bonfires.find(object); it != g_host_bonfires.end()) {
+        it->second.a = static_cast<int16_t>(std::min(32000, it->second.a + kLitPoints));
+        it->second.level = static_cast<uint8_t>(std::min(4, it->second.level + 1));
+    }
+}
+
+bool kindle_for_guest(int object) {
+    uint32_t found = 0;
+    each_bonfire([&](uint32_t entry, int o) {
+        if (o == object) found = entry;
+    });
+    g_bonfires_dirty = true;  // the guest hears our points either way (its game counted the Kindle already)
+    if (!found) {
+        LOG_INFO("[coop] Bonfire %d: a guest kindled it, but our world has no such bonfire lit", object);
+        return false;
+    }
+    const int16_t before = *ptr<int16_t>(found + 8);
+    uint32_t fn = kBonfireAddPoints;
+    __try {
+        __asm {
+            push esi
+            mov esi, found
+            push 0
+            push 10
+            call fn
+            pop esi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    const int16_t after = *ptr<int16_t>(found + 8);
+    LOG_INFO("[coop] Bonfire %d: kindled by a guest in our world (points %d -> %d%s)", object, before, after,
+             after == before ? ": at its limit already" : "");
+    return after != before;
 }
 
 void set_session(bool active, bool invader, bool invader_present) {

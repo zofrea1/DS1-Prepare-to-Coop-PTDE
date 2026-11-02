@@ -51,6 +51,30 @@ void remote_rest();
 // or as soon as we have a character again.
 void session_over_blossoms(const char* why);
 
+// Bonfire kindling shared from the host's world (see world.cpp, "our own world's bonfires").
+struct BonfirePoints {
+    int32_t object;
+    int16_t a, b;   // the entry's points (+8) and the network's (+0xA)
+    uint8_t level;  // its level (+0xE)
+    uint8_t pad[3];
+};
+constexpr uint32_t kBonfireBytes = sizeof(BonfirePoints);
+constexpr uint32_t kMaxBonfires = 100;
+// The host: our table, BonfirePoints each.
+std::vector<uint8_t> bonfire_points();
+// The host: our table changed since the last call (a light, a Kindle, a rest's reset).
+bool bonfires_changed();
+// A co-op guest: the host's table (its kindling is ours while we are in its world; ours comes back at home).
+void set_host_bonfires(const uint8_t* data, uint32_t size);
+// This bonfire is lit in our game (any points or level).
+bool bonfire_lit(int object);
+// A bonfire lit during this visit (by us, or by another player for everyone): lit at home too, unkindled.
+void note_lit_here(int object);
+// A guest: we kindled this bonfire in the host's world (our game added its points; the host's answer follows).
+void note_own_kindle(int object);
+// The host: a co-op guest kindled this bonfire of our world (their humanity): 10 points here, in our game's limits.
+bool kindle_for_guest(int object);
+
 bool boss_fight();
 // The co-op scaling of this enemy's health is in place in this game (or none is wanted): its max HP is the scaled
 // one, so health given as a share of it comes out right.

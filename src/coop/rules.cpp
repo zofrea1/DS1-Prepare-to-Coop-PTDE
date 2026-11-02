@@ -2138,13 +2138,19 @@ bool travel_closed(int id) {
     return g_state.guest && id == kFlagLordvessel && g_host_world_known && !g_host_lordvessel;
 }
 // Util_RequestLevelUpFirst (0xD5D850, stdcall(bonfire), ret 4): a bonfire lit for the first time
-// (OnEvent_BonfireFirstLvUp). Lighting one lights it for every player in the session.
+// (OnEvent_BonfireFirstLvUp). Lighting one lights it for every player in the session. The request is 10 points on
+// the bonfire whatever it has (world.cpp): another player's light is taken only for a bonfire not lit here, or it
+// kindled ours (2026-11-02). Util_RequestLevelUp (0xD5D830, the same, and a humanity): a co-op guest's Kindle in the
+// host's world goes to the host too, whose world it is.
 constexpr uint32_t kBonfireLit = 0x00D5D850;
+constexpr uint32_t kBonfireKindle = 0x00D5D830;
 using IntStdFn = void(__stdcall*)(int);
 IntStdFn g_bonfire_warp_orig = nullptr;
 IntStdFn g_bonfire_lit_orig = nullptr;
+IntStdFn g_bonfire_kindle_orig = nullptr;
 void (*g_bonfire_warp_fn)(int) = nullptr;
 void (*g_bonfire_lit_fn)(int) = nullptr;
+void (*g_bonfire_kindle_fn)(int) = nullptr;
 bool g_remote_call = false;
 
 void __stdcall hk_bonfire_warp(int bonfire) {
@@ -2168,9 +2174,24 @@ void __stdcall hk_bonfire_warp(int bonfire) {
 void __stdcall hk_bonfire_lit(int bonfire) {
     if (!g_remote_call && g_state.active && !g_state.invader && g_bonfire_lit_fn) {
         LOG_INFO("[coop] Bonfire %d lit for everyone", bonfire);
+        world::note_lit_here(bonfire);
         g_bonfire_lit_fn(bonfire);
     }
     g_bonfire_lit_orig(bonfire);
+}
+
+void __stdcall hk_bonfire_kindle(int bonfire) {
+    // The game's Kindle takes a humanity, and none is done without one (the bonfire's update tests PlayerGameData+0x7C).
+    uint32_t pgd = 0;
+    int humanity = 0;
+    const bool can_pay = (pgd = game::player_game_data()) != 0 && read32(pgd + 0x7C, reinterpret_cast<uint32_t*>(&humanity)) &&
+                         humanity > 0;
+    if (can_pay && g_state.active && g_state.guest && !g_state.invader && !game::own_world() && g_bonfire_kindle_fn) {
+        LOG_INFO("[coop] Bonfire %d kindled in the host's world: the host's game adds it", bonfire);
+        world::note_own_kindle(bonfire);
+        g_bonfire_kindle_fn(bonfire);
+    }
+    g_bonfire_kindle_orig(bonfire);
 }
 
 // ---------------------------------------------------------------- teams (Ominous Tome, invaders)
@@ -3689,6 +3710,7 @@ void note_world_reset() { g_world_reset_at = GetTickCount64(); }
 void set_bonfire_warp_listener(void (*fn)(int)) { g_bonfire_warp_fn = fn; }
 void set_separation_listener(void (*fn)(bool host)) { g_separation_fn = fn; }
 void set_bonfire_lit_listener(void (*fn)(int)) { g_bonfire_lit_fn = fn; }
+void set_bonfire_kindle_listener(void (*fn)(int)) { g_bonfire_kindle_fn = fn; }
 
 bool own_lordvessel() { return game::flag(kFlagLordvessel); }
 
@@ -3726,6 +3748,11 @@ void remote_bonfire_warp(int bonfire) {
 
 void remote_bonfire_lit(int bonfire) {
     if (!g_bonfire_lit_orig || bonfire < 0) return;
+    world::note_lit_here(bonfire);
+    if (world::bonfire_lit(bonfire)) {
+        LOG_INFO("[coop] Bonfire %d: another player lit it, and it is lit here already (not lit again)", bonfire);
+        return;
+    }
     g_remote_call = true;
     g_bonfire_lit_orig(bonfire);
     g_remote_call = false;
@@ -3964,19 +3991,26 @@ struct Gain {
 };
 std::unordered_map<uint32_t, Gain> g_gains;
 
-bool change_hold(uint32_t chr, const game::Vec3& at, const game::Vec3& me) {
+// The hold's bid: under an attack's (kBidCap), and the later the gain the higher. A game's bid reaches the host up to
+// a second late (the report), so the game that has just lost an enemy could still be bidding its own hold when the
+// host next handed it out: two holds at the cap tied, and the enemy went back and forth every second (the Asylum Demon
+// before its fight and the hollows around it, every 1 to 5 s, at times every second for 10 s: 2026-11-02 evening). The
+// newer gain now outbids the older one, so the game that has it keeps it.
+uint32_t change_hold(uint32_t chr, const game::Vec3& at, const game::Vec3& me) {
     const bool own = moved_here(chr);
     if (g_gains.size() > 4096) g_gains.clear();
     auto it = g_gains.find(chr);
     if (it == g_gains.end()) {
         g_gains.emplace(chr, Gain{own, -100});
-        return false;
+        return 0;
     }
     Gain& g = it->second;
     if (own && !g.own) g.at = seconds();
     g.own = own;
-    if (!own || seconds() - g.at >= kChangeHold) return false;
-    return !world::local_dead() && !ai_off_here(chr) && dist3(me, at) <= kBidReach;
+    const double held = seconds() - g.at;
+    if (!own || held >= kChangeHold) return 0;
+    if (world::local_dead() || ai_off_here(chr) || dist3(me, at) > kBidReach) return 0;
+    return kBidCap - 1 - static_cast<uint32_t>(held / kChangeHold * 255.0);
 }
 
 uint32_t net_priority(uint32_t chr) {
@@ -3995,7 +4029,7 @@ uint32_t net_priority(uint32_t chr) {
     // one); a player in another area (the Undead Asylum) stands in other coordinates and is near nothing here.
     const int area = (game::map_id() >> 24) & 0xFF;
     auto elsewhere = [area](const PeerSpot& p) { return p.map == -1 || ((p.map >> 24) & 0xFF) != area; };
-    if (change_hold(chr, at, me)) return kBidCap;
+    if (const uint32_t hold = change_hold(chr, at, me)) return hold;
     if (world::local_dead()) {
         for (const PeerSpot& p : g_peer_spots) {
             if (p.dead || elsewhere(p) || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
@@ -4251,9 +4285,7 @@ void track_sleepers() {
 constexpr uint32_t kMenuManVar = 0x013786D0;
 
 // A character by its handle (ChrIns+4). The map's characters are in WorldChrMan's tables by the handle's index and
-// slot; the players' (0x10044000 and on: ours, then the others') are not, and came back as no one. The no-target boss
-// nudge took a boss fighting the other player for one fighting no one ("gone") and turned it onto our own player,
-// every 15 s in each game that moved it (the Asylum Demon, 2026-11-02).
+// slot; the players' (0x10044000 and on: ours, then the others') in its player list.
 uint32_t chr_of_handle(uint32_t handle) {
     uint32_t wcm = 0, table = 0, count = 0, entries = 0, chr = 0;
     if (handle == 0xFFFFFFFF || !read32(game::kWorldChrManVar, &wcm) || !wcm) return 0;
@@ -4497,10 +4529,10 @@ void gauge_boss_chrs(std::vector<uint32_t>* out) {
 // at once (at most every 10 s): bosses that changed hands every 3 to 9 s turned and jerked in fights that had nothing
 // wrong with them, onto our player instead of the target their AI had chosen. Now the AI keeps its own target. Only a
 // boss this game moves that has had no target for kNoTargetGrace is turned, while its AI is on, no event animation
-// plays on it and our player stands within kNoTargetReach of it: no target is the AI's target handle -1 (0xCE3710,
-// thiscall(chr), what the events' "Character Target State" test reads) or a character that is dead or gone. It is
-// turned on our player with the event scripts' ForceChangeTarget (0xD61E00: stdcall(entity, target), the target
-// 10000 = the local player; ret 8), at most once every kNoTargetRetry per boss.
+// plays on it, no attack, and our player stands within kNoTargetReach of it: no target is the AI's target -1 (0xCE3710,
+// thiscall(chr), what the events' "Character Target State" test reads: an entity id, see chr_of_target) or a character
+// that is dead or gone. It is turned on our player with the event scripts' ForceChangeTarget (0xD61E00:
+// stdcall(entity, target), the target 10000 = the local player; ret 8), at most once every kNoTargetRetry per boss.
 constexpr uint32_t kForceChangeTarget = 0x00D61E00;
 constexpr uint32_t kTargetOf = 0x00CE3710;
 constexpr double kNoTargetGrace = 4.0;
@@ -4527,6 +4559,25 @@ uint32_t target_of(uint32_t chr) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0xFFFFFFFF;
     }
+}
+
+// The character an AI's target names. 0xCE3710 gives the target's event entity id, not a handle: the target accessor's
+// vtable +0x50 (0xCB6780) asks the character's vtable +0x254, ChrIns+0x208, and PlayerIns says 10000 for the local
+// player (0x470E10), as the events' entity ids do. Until the 2026-11-02 evening test it was looked up as a handle,
+// which found no one for any target at all: the no-target nudge took every boss fighting a player for one fighting
+// no one and turned it onto the player of the game that moved it, every 15 s and in the middle of an attack too (the
+// Asylum Demon switching between the two players mid-swing and missing both).
+uint32_t chr_of_target(uint32_t id) {
+    if (id == 0xFFFFFFFF || id == 0) return 0;
+    if (id == 10000) return game::player();
+    uint32_t wcm = 0, players = 0, arr = 0;
+    if (read32(game::kWorldChrManVar, &wcm) && wcm && read32(wcm + 0x24, &players) && read32(wcm + 0x28, &arr) && arr) {
+        for (uint32_t i = 1; i < players && i < 8; ++i) {
+            uint32_t p = 0, e = 0;
+            if (read32(arr + i * 0x20, &p) && p && read32(p + 0x208, &e) && e == id) return p;
+        }
+    }
+    return chr_by_entity(static_cast<int>(id));
 }
 
 // The animation a character plays now, by id: ChrCtrl+0x350 (the same as ActionCtrl+0x60, ActionCtrl = ChrCtrl+0x2C).
@@ -4910,8 +4961,9 @@ void boss_target_tick() {
             continue;
         }
         const uint32_t target = target_of(chr);
-        const uint32_t target_chr = chr_of_handle(target);
-        if (target_chr && !chr_dead(target_chr)) {
+        const uint32_t target_chr = chr_of_target(target);
+        // Not in the middle of an attack either: the AI turns to its target at the start of the next one.
+        if ((target_chr && !chr_dead(target_chr)) || attack_action(action_of(chr))) {
             w.since = -1;
             continue;
         }
@@ -4954,7 +5006,7 @@ void boss_handover_tick() {
             LOG_INFO("[coop] Boss %d: another game moves it now; %s", e, anim_probe(chr).c_str());
         } else if (was == 2 && by == 1 && ++lines <= 120) {
             const uint32_t target = target_of(chr);
-            const uint32_t target_chr = chr_of_handle(target);
+            const uint32_t target_chr = chr_of_target(target);
             LOG_INFO("[coop] Boss %d: this game moves it now (another game did); its target here: %s; %s", e,
                      target == 0xFFFFFFFF                 ? "none"
                      : !target_chr                        ? "no one we know"
@@ -5732,6 +5784,13 @@ int install() {
         static const uint8_t k[9] = {0x8B, 0x44, 0x24, 0x04, 0xA3, 0xA0, 0xE2, 0x2D, 0x01};
         g_bonfire_lit_orig = reinterpret_cast<IntStdFn>(detour(kBonfireLit, k, sizeof(k), reinterpret_cast<void*>(&hk_bonfire_lit)));
         failed += install_one("bonfire lighting", g_bonfire_lit_orig != nullptr);
+    }
+    {
+        // mov eax,[esp+4] ; mov [012DE2A8h],eax
+        static const uint8_t k[9] = {0x8B, 0x44, 0x24, 0x04, 0xA3, 0xA8, 0xE2, 0x2D, 0x01};
+        g_bonfire_kindle_orig = reinterpret_cast<IntStdFn>(
+            detour(kBonfireKindle, k, sizeof(k), reinterpret_cast<void*>(&hk_bonfire_kindle)));
+        failed += install_one("bonfire kindling", g_bonfire_kindle_orig != nullptr);
     }
     {
         // push ebx ; mov ebx,[eax+74h] ; push edi

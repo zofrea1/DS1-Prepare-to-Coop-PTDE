@@ -101,6 +101,8 @@ bool warp_destination(int bonfire);
 void set_host_world(bool known, bool lordvessel, uint32_t warps);
 // A bonfire was lit for the first time (Util_RequestLevelUpFirst): `fn(bonfire)` tells the others.
 void set_bonfire_lit_listener(void (*fn)(int bonfire));
+// A co-op guest kindled a bonfire in the host's world (Util_RequestLevelUp): `fn(bonfire)` tells the host.
+void set_bonfire_kindle_listener(void (*fn)(int bonfire));
 // The same, on behalf of another player (does not report back).
 void remote_bonfire_warp(int bonfire);
 void remote_bonfire_lit(int bonfire);

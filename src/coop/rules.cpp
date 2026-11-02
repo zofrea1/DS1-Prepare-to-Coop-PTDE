@@ -1026,10 +1026,11 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     if (!g_state.guest || host_disaster_flag(id)) return;
     // Home keeps what our own game did in the host's world: our map events (also on a run another player's game
     // started in a map we were in), our talks, our pickups. A change another player's game made and only sent us
-    // (applied here, apply_remote_flag) stays in the host's world, but for a boss's defeat: the team's kill. Until
-    // 1.4.0 every change of the session went home, and with it what our game merely heard of: angeline's own world
-    // took Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
-    if (g_applying_remote && !world::boss_defeat_flag(id)) return;
+    // (applied here, apply_remote_flag) stays in the host's world, a boss's defeat included: a boss killed while we
+    // were elsewhere is still ours to fight at home (one we saw die comes home, mirror_event_done). Until 1.4.0
+    // every change of the session went home, and with it what our game merely heard of: angeline's own world took
+    // Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
+    if (g_applying_remote) return;
     // Nor what our game did while its copy of the host's world was not the host's yet (hold_event_runs): judged on
     // what we brought, it is neither the host's world's progress nor ours.
     if (g_hold_runs) return;
@@ -1805,30 +1806,48 @@ constexpr uint32_t kEventDone = 0x00BBEEB0;
 void* g_event_done_orig = nullptr;
 int g_done_lines = 0;
 
-void mirror_event_done(uint32_t ev) {
-    if (!g_state.guest || g_state.invader || !seamless_rules() || !ev) return;
+// The flag an event's end sets (event id + slot), and whether it was on before (-1: not a map event of a guest's).
+int event_done_flag(uint32_t ev) {
+    if (!g_state.guest || g_state.invader || !seamless_rules() || !ev) return -1;
     uint32_t id = 0, slot_word = 0;
-    if (!read32(ev + 0x28, &id) || !read32(ev + 0x2C, &slot_word)) return;
+    if (!read32(ev + 0x28, &id) || !read32(ev + 0x2C, &slot_word)) return -1;
     const int slot = static_cast<int16_t>(slot_word & 0xFFFF);
-    if (static_cast<int>(id) < 10000000 || slot < 0) return;
-    if (!g_mirroring_events.erase(ev)) return;
+    if (static_cast<int>(id) < 10000000 || slot < 0) return -1;
+    return static_cast<int>(id) + slot;
+}
+
+// A boss whose defeat flag is its own event's end (the Stray Demon's 11810900: IF dead, Handle Boss Defeat, END)
+// never went home through the flag setter, not even for the player who killed it. One our game saw die here (the
+// flag was off when the event ended: not a boss the host's world had killed before we came) goes home as well.
+void mirror_event_done(uint32_t ev, bool was_on) {
+    const int flag = event_done_flag(ev);
+    if (flag < 0) return;
+    const bool mirrored = g_mirroring_events.erase(ev) != 0;
+    const bool boss = !was_on && world::boss_defeat_flag(flag);
+    if ((!mirrored && !boss) || g_hold_runs) return;
     const uint32_t efm = game::event_flag_man();
     uint32_t active = 0;
     if (!efm || !read32(efm + 0x10C, &active) || active != efm + 0x90) return;
-    const int flag = static_cast<int>(id) + slot;
+    uint32_t id = 0, slot_word = 0;
+    read32(ev + 0x28, &id);
+    read32(ev + 0x2C, &slot_word);
+    const int slot = static_cast<int16_t>(slot_word & 0xFFFF);
     ++g_flag_quiet;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
     call_set_flag(efm, flag, 1);
     *ptr<uint32_t>(efm + 0x10C) = active;
     --g_flag_quiet;
     if (++g_done_lines <= 40) {
-        LOG_INFO("[coop] Event %d (slot %d) finished in the host's world: done in our own world too", id, slot);
+        LOG_INFO("[coop] Event %d (slot %d) finished in the host's world: done in our own world too%s", id, slot,
+                 boss && !mirrored ? " (a boss we saw die)" : "");
     }
 }
 
 void __fastcall hk_event_done(uint32_t ev) {
+    const int flag = event_done_flag(ev);
+    const bool was_on = flag >= 0 && game::flag(flag);
     reinterpret_cast<void(__fastcall*)(uint32_t)>(g_event_done_orig)(ev);
-    mirror_event_done(ev);
+    mirror_event_done(ev, was_on);
 }
 
 // ---------------------------------------------------------------- why a throw did not happen (diagnostic)

@@ -7,13 +7,25 @@
 #include "partylist.h"
 #include "log.h"
 
+#include <windows.h>
+
+#include <cstdarg>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
+#include <mutex>
 
 // More than four players in a session (MaxPlayers 5 to 8). The game holds four: itself and three others.
 //  * The game session's member limit, SessMan+0x8C, is set to 4 when the session manager starts (0xD2CB1B) and is
-//    what the session's room is made with (0xD2D4F0 -> attribute 0x80000001); nothing else in the session layer has
-//    room for a fixed number (members, packets and queues are lists).
+//    what the session's room is made with (0xD2D4F0 -> attribute 0x80000001).
+//  * The network library (DLNRD) makes each session object (SteamSessionLight) with a pool of member objects and
+//    their streams, made up front for a number of people, its own player among them: the session factory,
+//    SteamMatchingSystem's slot 9 (0x722940, thiscall(out, people), ret 8), passes people - 1 and people to the
+//    constructor (0x72B040 -> 0x713050, +0x144 and +0x148), and 4 and 5 when asked for none: the game's four and one
+//    to spare. A member the pool has no object for is not added ("member joined but could not be added", 0x72BEEC)
+//    and its join falls through. Until 1.4.0's last test build this was left at five: on 2026-11-02 a sixth player
+//    was counted for a moment and gone again three times, and one knocking on a session of five was turned away by
+//    its own game within 0.2 s (notice 20001004), with nothing of it in our log.
 //  * GameDataMan keeps the other players' PlayerGameData in one block of three (+0xC, 0x4C0 each, made by the
 //    constructor 0xC06710 as 0x10 + 0xE40 bytes with the count at block+0xC), a state byte for each (+0x10, three
 //    bytes; 0x1F once the player is ready to be made) and another byte each inline at +0x84..+0x86. A member's slot
@@ -116,6 +128,83 @@ void __stdcall reset_extra_slots() {
 }
 
 uint32_t g_reset_tail = kResetTail;
+
+// The network sessions' size: MaxPlayers and one to spare, as the game's own five for four.
+constexpr uint32_t kFactorySlot = 0x010FDE60;  // SteamMatchingSystem vtable 0x10FDE3C, slot 9
+const uint8_t kFactoryOld[4] = {0x40, 0x29, 0x72, 0x00};  // 0x722940
+uint32_t g_factory = 0x00722940;
+uint32_t g_people = 5;
+int g_sessions_made = 0;
+
+void __stdcall note_session(uint32_t asked) {
+    if (g_sessions_made++ < 10) {
+        LOG_INFO("[coop] The game's network library made a session object for %u people (asked for %u)",
+                 asked < g_people ? g_people : asked, asked);
+    }
+}
+
+// In place of the factory: `people` ([esp+8]) raised to g_people. ecx (the matching system) and the arguments are
+// kept; eax is the factory's to change (it is set from fs:[0] first).
+__declspec(naked) void hk_session_factory() {
+    __asm {
+        mov eax, dword ptr [esp + 8]
+        pushad
+        push eax
+        call note_session
+        popad
+        cmp eax, dword ptr [g_people]
+        jae go
+        mov eax, dword ptr [g_people]
+        mov dword ptr [esp + 8], eax
+    go:
+        jmp dword ptr [g_factory]
+    }
+}
+
+// The network library's error lines: 0x7075F0 (cdecl(format, ...), level 0x53724E01) hands them to the library's
+// log (0x707470), which formats a line only for an output function at 0x136304C that retail never sets, so they went
+// nowhere (a player who could not get into a session of five left no word of why; 2026-11-02). They are formatted and
+// logged here instead (the library's own text, in Japanese), each message 5 times at most and 300 in all. The
+// formatting is guarded: the game never formatted these, so a bad argument in one would never have shown.
+constexpr uint32_t kNetError = 0x007075F0;
+const uint8_t kNetErrorOld[8] = {0x8B, 0x54, 0x24, 0x04, 0x8D, 0x4C, 0x24, 0x08};
+std::mutex g_net_mu;
+const wchar_t* g_net_formats[64] = {};
+int g_net_counts[64] = {};
+int g_net_lines = 0;
+
+bool format_net_line(wchar_t* out, size_t n, const wchar_t* fmt, va_list args) {
+    __try {
+        _vsnwprintf(out, n - 1, fmt, args);
+        out[n - 1] = 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void __cdecl net_error(const wchar_t* fmt, ...) {
+    if (!fmt) return;
+    {
+        std::lock_guard<std::mutex> lock(g_net_mu);
+        if (g_net_lines >= 300) return;
+        int i = 0;
+        while (i < 64 && g_net_formats[i] && g_net_formats[i] != fmt) ++i;
+        if (i < 64) {
+            g_net_formats[i] = fmt;
+            if (++g_net_counts[i] > 5) return;
+        }
+        ++g_net_lines;
+    }
+    wchar_t line[512] = {};
+    va_list args;
+    va_start(args, fmt);
+    const bool ok = format_net_line(line, 512, fmt, args);
+    va_end(args);
+    char utf8[1024] = {};
+    WideCharToMultiByte(CP_UTF8, 0, ok ? line : fmt, -1, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+    LOG_INFO("[coop] The game's network library: %s%s", utf8, ok ? "" : " (could not be formatted)");
+}
 
 __declspec(naked) void hk_reset_tail() {
     __asm {
@@ -409,6 +498,7 @@ int install_all() {
         std::memcpy(code + 1, &rel, 4);
         match = match && bytes_match(at, code, sizeof(code));
     }
+    match = match && bytes_match(kFactorySlot, kFactoryOld, sizeof(kFactoryOld));
     if (!match) {
         LOG_ERROR("[coop] More players: this build of the game differs; sessions keep the game's four players");
         return -1;
@@ -475,6 +565,10 @@ int install_all() {
     one(jump_to(0x00D6A850, kD6A850, sizeof(kD6A850), reinterpret_cast<void*>(&count_summon_type), false),
         "the summon type count");
     if (failed) return failed;
+    g_people = static_cast<uint32_t>(g_max + 1);
+    const uint32_t factory = reinterpret_cast<uint32_t>(&hk_session_factory);
+    one(patch(kFactorySlot, kFactoryOld, &factory, sizeof(factory)), "the network sessions' size");
+    if (failed) return failed;
     one(patch_imm<int32_t>(0x00D2CB1B, kMemberLimit, sizeof(kMemberLimit), 6, g_max), "the member limit");
     return failed;
 }
@@ -482,6 +576,10 @@ int install_all() {
 }  // namespace
 
 bool install_early(int max_players) {
+    // The network library's error lines, at any player count.
+    if (!jump_to(kNetError, kNetErrorOld, sizeof(kNetErrorOld), reinterpret_cast<void*>(&net_error), false)) {
+        LOG_ERROR("[coop] The network library's error lines do not match this build (not logged)");
+    }
     // The party list first, at any player count: with four players and an NPC phantom the fourth had no entry.
     partylist::install();
     g_party_slot = partylist::field(0x7C);
@@ -526,8 +624,8 @@ void tick() {
 
 void log_status() {
     if (g_max == 4) return;
-    LOG_INFO("[coop] More players: up to %d in a session (the game's records, slots and character set widened; the "
-             "floating health bars %s; %s)", g_max,
+    LOG_INFO("[coop] More players: up to %d in a session (the game's records, slots and character set widened, its "
+             "network sessions made for %u; the floating health bars %s; %s)", g_max, g_people,
              g_bars ? "show every other player, seven at most" : "stay with the party's four",
              partylist::widened() ? "the party list holds eight" : "players past the party's four have no party entry");
 }

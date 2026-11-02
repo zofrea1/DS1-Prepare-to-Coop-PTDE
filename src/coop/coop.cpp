@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "coop.h"
 
+#include "crterror.h"
 #include "deathtext.h"
 #include "drops.h"
 #include "game.h"
@@ -370,6 +371,7 @@ void coop_install_early(const CoopConfig& config) {
     g_enabled = g_cfg.enabled;
     if (!g_enabled) return;
     patch_save_extension(g_cfg.save_extension);
+    coop::crterror::install();
     // Before the game makes its session and character managers.
     coop::players::install_early(g_cfg.max_players);
     g_steam_hooked = coop::steam::install_early(static_cast<uint32_t>(g_cfg.app_id), &tick,

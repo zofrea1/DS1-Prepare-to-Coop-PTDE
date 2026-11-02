@@ -3,6 +3,7 @@
 #include "session.h"
 
 #include "deadlist.h"
+#include "drops.h"
 #include "game.h"
 #include "hook.h"
 #include "items.h"
@@ -1689,6 +1690,7 @@ bool invader_arrival(game::InvasionPoint* ip) {
 }
 
 void send_world_globals(uint64_t to);
+void send_world_flags(uint64_t to);
 void send_live_drops(uint64_t to);
 void send_bonfires(uint64_t to);
 bool guests_know_free_for_all();
@@ -1791,7 +1793,14 @@ void host_answer(const Pending& p) {
     more.w = w;
     more.wait_s = wait;
     send_to(p.from, more);
-    if (w.status == kOk && !p.invade) send_world_globals(p.from);
+    // The world's state and its map flags go with the welcome, so the guest's game runs our world's events on them
+    // from its first frame here (and again on arrival, for what changed during the load). Until 1.4.0 the map flags
+    // came on arrival only, and a guest's game ran our world's events through the load on its copy of our maps as
+    // it was: its own progress, or another world it had visited (2026-11-02: Darksim's, at Firelink).
+    if (w.status == kOk && !p.invade) {
+        send_world_globals(p.from);
+        send_world_flags(p.from);
+    }
     const PeerInfo* who = nullptr;
     for (const auto& q : g_peers) who = q.id == p.from ? &q : who;
     // Why, in words: an older player's game holds four (1.3.0 and before), so it is told "full" by a session of four
@@ -3034,6 +3043,7 @@ void send_world_globals(uint64_t to) {
 void on_world_globals(const uint8_t* data, uint32_t size) {
     std::string changes;
     const int changed = rules::apply_world_globals(data, size, &changes);
+    drops::flags_rewritten();
     if (changed < 0) {
         LOG_ERROR("[coop] The host's world state did not fit (%u bytes); our copy stays as it was", size);
     } else if (changed > 0) {
@@ -3047,6 +3057,7 @@ void on_world_globals(const uint8_t* data, uint32_t size) {
 // Guest: the host's map flags replace our copy of the host's world (every map, not only the one we joined in).
 void on_world_flags(const uint8_t* data, uint32_t size) {
     const int written = rules::apply_world_flag_snapshot(data, size);
+    drops::flags_rewritten();
     if (written < 0) {
         LOG_ERROR("[coop] The host's map flags did not fit our copy of their world (%u bytes); kept ours", size);
     } else {
@@ -3846,7 +3857,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             break;
         }
         case kWorldFlags: {
-            if (from != g_host || g_role != Role::Guest || g_invade || g_step != Step::InWorld) return;
+            // With the welcome (before the load) and on arrival.
+            if (from != g_host || g_role != Role::Guest || g_invade) return;
+            if (g_step != Step::InWorld && g_step != Step::Joining && g_step != Step::Loading) return;
             on_world_flags(data + sizeof(Header), size - static_cast<uint32_t>(sizeof(Header)));
             break;
         }

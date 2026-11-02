@@ -27,6 +27,9 @@ bool install();
 bool watched(int flag);
 // Such a flag changed in our game: set by our own scripts or by another player's (the session's shared flags).
 void flag_changed(int flag, bool on);
+// Many flags were written at once (the host's world state or map flags taken in): what the poll reads next is a new
+// baseline, not changes.
+void flags_rewritten();
 // A map script is about to award an item lot in our game (Award Items, Award Item Lot). `event`/`slot`: the map
 // event running it (0 outside one). False: this drop was given already (by us); the award is skipped.
 bool allow_award(int lot, int event, int slot);

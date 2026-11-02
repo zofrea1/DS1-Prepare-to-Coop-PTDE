@@ -599,8 +599,60 @@ bool allow_award(int lot, int event, int slot) {
     return true;
 }
 
+// The watched flags, read four times a second: a flag can come on without the flag setter that reports to
+// flag_changed (rules.cpp hk_set_flag). A map event's own flag is set as the event ends, and the Stray Demon's
+// defeat flag is one (11810900: IF dead, Handle Boss Defeat, END). On 2026-11-02 the demon died in Darksim's game
+// while the others lay dead and spectated; in their games the flag came on that way, no drop was armed, and the
+// Titanite Slab went to Darksim alone. A change seen here goes to flag_changed as the setter's would (a second call
+// for the same change does nothing). A new baseline, with changes ignored for kSettle s, after a load, a session's
+// start or end, another flag store (a guest's own world and the host's) and the host's state written in.
+namespace {
+
+constexpr double kPollEvery = 0.25;
+constexpr double kSettle = 3.0;
+std::vector<int8_t> g_poll;  // per g_flags: the last value read
+bool g_poll_valid = false;
+uint32_t g_poll_store = 0;
+double g_poll_at = 0, g_settle_until = 0;
+
+void poll_flags(double t, bool act, bool loading) {
+    if (!act || loading) {
+        g_poll_valid = false;
+        return;
+    }
+    if (t - g_poll_at < kPollEvery) return;
+    g_poll_at = t;
+    uint32_t store = 0;
+    const uint32_t efm = game::event_flag_man();
+    if (!efm || !read32(efm + 0x10C, &store)) return;  // the active store: +0x14 own, +0x90 a visited world
+    if (!g_poll_valid || store != g_poll_store || g_poll.size() != g_flags.size()) {
+        g_poll.resize(g_flags.size());
+        for (size_t i = 0; i < g_flags.size(); ++i) g_poll[i] = game::flag(g_flags[i]) ? 1 : 0;
+        g_poll_store = store;
+        g_poll_valid = true;
+        g_settle_until = t + kSettle;
+        return;
+    }
+    for (size_t i = 0; i < g_flags.size(); ++i) {
+        const int8_t v = game::flag(g_flags[i]) ? 1 : 0;
+        if (v == g_poll[i]) continue;
+        g_poll[i] = v;
+        if (t < g_settle_until) continue;
+        static int lines = 0;
+        if (++lines <= 40) {
+            LOG_INFO("[coop] One-time drop: flag %d turned %s (seen by the poll)", g_flags[i], v ? "on" : "off");
+        }
+        flag_changed(g_flags[i], v != 0);
+    }
+}
+
+}  // namespace
+
+void flags_rewritten() { g_poll_valid = false; }
+
 void tick() {
     if (!g_installed) return;
+    poll_flags(now(), active() && game::player_game_data() != 0, game::loading());
     if (!game::player_game_data()) {
         // No character. What was taken off the floor or chosen for us is still owed: kept for this character.
         settle_load(now());

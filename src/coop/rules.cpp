@@ -997,14 +997,53 @@ bool local_working_flag(int id) {
 // drops.cpp whoever made them: our own scripts or another player's, applied here.
 int g_drop_old = -1;
 
-void __stdcall before_set_flag(int id) {
+// The NPCs' states (flags 1000-1999: who stands where, who is alive, how far their story is) are the host's world's,
+// and the host's game moves them: its own map events decide from its own world, a talk (or Lua) from any player's
+// game still counts. Two map-event sets are refused:
+//  * in a co-op guest's game, any: it runs the host's world's events on a copy of that world that is not all the
+//    host's (the flags of its player, personal_flag, and anything else it held before the host's state came), and
+//    the host's game takes its runs (hk_event_sync, and the game's own type-1 sync, whose player is out of 10001..
+//    10010 and so taken unchecked);
+//  * in the host's game, on a run another player's game started: the event's player (+0x44) is 10000 for a run of
+//    our own (0xBC41AF, and 0xBBF440 each time our game passes a condition), another player's otherwise.
+// On 2026-11-02 Darksim's game ran Firelink's events while it loaded into damn_vix's world: Lautrec left his cell
+// (1570 -> 1577, 11010552) and went on to kill the Firekeeper (1577 -> 1578, 11020410; her 1140 -> 1141, 11020555;
+// both bells or Sen's gate open, 11500200, in its copy), and the host's and angeline's games took the runs and set
+// the flags in damn_vix's world: the Firekeeper dead, the Firelink bonfire out. Four minutes later his own flag 810
+// (personal) moved her on again (1141 -> 1146, 11020556). In 6700k's world (12:49) his game set them directly.
+// Refused, the event goes on without that flag; the host's own events set it when the host's world calls for it.
+bool npc_state_refused(int id) {
+    if (id < 1000 || id > 1999 || !g_cur_event || g_applying_remote || !seamless_rules()) return false;
+    if (GetCurrentThreadId() != g_main_thread) return false;
+    uint32_t event_id = 0, by = 10000;
+    read32(g_cur_event + 0x28, &event_id);
+    read32(g_cur_event + 0x44, &by);
+    const char* why = nullptr;
+    if (g_state.guest) {
+        why = "in our guest's game: the host's game moves the host's world's NPCs";
+    } else if (g_state.host && by != 10000 && by != 0) {
+        why = "on a run another player's game started";
+    }
+    if (!why) return false;
+    static int lines = 0;
+    if (++lines <= 60) {
+        LOG_INFO("[coop] Flag %d (an NPC's state) not set by event %d %s (player %u)", id,
+                 static_cast<int>(event_id), why, by);
+    }
+    return true;
+}
+
+// Nonzero: the set is refused (npc_state_refused), and neither the game's setter nor after_set_flag runs.
+int __stdcall before_set_flag(int id) {
     g_old_value = -1;
     g_drop_old = -1;
-    if (g_flag_quiet) return;
+    if (g_flag_quiet) return 0;
+    if (npc_state_refused(id)) return 1;
     if (GetCurrentThreadId() == g_main_thread && drops::watched(id)) g_drop_old = game::flag(id) ? 1 : 0;
-    if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return;
-    if (!seamless_rules() || !shared_flag(id) || local_working_flag(id)) return;
+    if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return 0;
+    if (!seamless_rules() || !shared_flag(id) || local_working_flag(id)) return 0;
     g_old_value = game::flag(id) ? 1 : 0;
+    return 0;
 }
 
 void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
@@ -1038,6 +1077,8 @@ __declspec(naked) void hk_set_flag() {
         pushad
         push dword ptr [ebp + 8]
         call before_set_flag
+        test eax, eax
+        jnz refused
         push dword ptr [ebp + 12]
         push dword ptr [ebp + 8]
         mov eax, [ebp - 4]
@@ -1047,6 +1088,7 @@ __declspec(naked) void hk_set_flag() {
         push dword ptr [ebp + 8]
         push dword ptr [ebp - 4]
         call after_set_flag
+    refused:
         popad
         pop ebp
         ret 8

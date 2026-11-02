@@ -46,6 +46,7 @@ struct CopyStats {
     int gap_ms = 0;
     float speed = 0;
     int stalls = 0;      // updates that came only after the copy had covered the one before (it stood meanwhile)
+    int stalls_slow = 0; // of them, taken in a slow frame of ours (the stand was inside our own hitch)
     int max_gap_ms = 0;  // the longest gap since the last read
 };
 bool copy_stats(uint32_t manip, CopyStats* out);

@@ -173,6 +173,11 @@ double g_mean_frame = 0;   // our usual frame, long ones left out
 
 bool long_frame(double frame) { return g_mean_frame > 0 && frame > kHitchMin && frame > kHitchRatio * g_mean_frame; }
 
+// A frame clearly slower than our usual one (1.5 times, and 8 ms over): what the late tail leaves out.
+bool slow_frame(double frame) {
+    return g_mean_frame > 0 && frame > 1.5 * g_mean_frame && frame > g_mean_frame + 0.008;
+}
+
 // The enemies' jump test (snap_enemy) allows for how far behind a copy is on purpose: it covers each update in gap +
 // smoothing, so the copy of an enemy moving at v is about v x that behind. The test's 4.8 m (16 m/s over the game's
 // own 0.3 s) was meant for the game's own rate, where nothing is held back; the Taurus Demon running down the bridge
@@ -195,6 +200,7 @@ struct Track {
     uint16_t updates = 0;
     uint16_t jumps = 0;
     uint16_t stalls = 0;  // updates that came after the one before was covered: the copy stood until this one came
+    uint16_t stalls_slow = 0;  // of them, taken in a slow frame of ours (the stand was inside our own hitch)
     float max_gap = 0;
     float speed = 0;
 };
@@ -237,13 +243,17 @@ Track* note_update(uint32_t manip, double gap, double slack, bool enemy) {
     if (!t) return nullptr;
     t->enemy = enemy;
     const double g = gap > 0 && gap < 2.0 ? gap : 0.0;
-    // The update before this one was covered in t->cover: a gap beyond that (and a frame) left the copy standing.
-    if (g > 0 && t->cover > 0 && g > t->cover + 0.004 && t->stalls < 0xFFFF) ++t->stalls;
-    if (g > t->max_gap) t->max_gap = static_cast<float>(g);
     // The frame this update was taken in: the one our last tick ended, or the time since it, whichever is longer (the
     // tick and the game's character updates come in some order within a frame).
     const double since_tick = g_frame_clock > 0 ? g_clock - g_frame_clock : 0.0;
     const double frame = since_tick > g_frame_dt ? since_tick : g_frame_dt;
+    const bool slow = slow_frame(frame);
+    // The update before this one was covered in t->cover: a gap beyond that (and a frame) left the copy standing.
+    if (g > 0 && t->cover > 0 && g > t->cover + 0.004) {
+        if (t->stalls < 0xFFFF) ++t->stalls;
+        if (slow && t->stalls_slow < 0xFFFF) ++t->stalls_slow;
+    }
+    if (g > t->max_gap) t->max_gap = static_cast<float>(g);
     if (g > 0 && !long_frame(frame)) {
         if (t->mean <= 0) {
             t->mean = g;
@@ -259,7 +269,9 @@ Track* note_update(uint32_t manip, double gap, double slack, bool enemy) {
             const double tail_cap = 2.0 * t->mean > kTailCapMin ? 2.0 * t->mean : kTailCapMin;
             if (over > tail_cap) over = tail_cap;
             t->tail *= std::exp(-g * 0.6931471805599453 / kTailHalfLife);
-            if (over > t->tail) t->tail = over;
+            // An update taken in a slow frame of ours came late because we did: smoothing cannot cover that (the
+            // character stood inside our own hitch), so it does not count toward the tail.
+            if (over > t->tail && !slow) t->tail = over;
         }
     }
     if (!g_dynamic || !g_receiving) {
@@ -371,7 +383,29 @@ void __stdcall turn_c(uint32_t manip) {
     __asm popad                                       \
     __asm popfd
 
-// The send test: the counter is held at g_send_floor or above, then compared with 0 for the game's `jg`.
+// Our own player's sends, for the other end's gaps (player_net_watch there counts the late ones): with the frame rate
+// above the network rate an update goes on the first frame the counter allows, so a gap past 1.5 periods is a frame of
+// ours that came late (a hitch, a load of effects or map) or a frame the FPS cap held. Read and logged by tick.
+double g_send_last = 0;
+int g_sends = 0, g_sends_late = 0, g_sends_late_slow = 0;
+double g_send_max_gap = 0;
+int g_send_rate = 0;
+
+void __cdecl note_send() {
+    const double c = clock_now();
+    const double gap = g_send_last > 0 ? c - g_send_last : 0.0;
+    g_send_last = c;
+    if (g_send_rate <= kVanilla || gap <= 0 || gap > 2.0) return;
+    ++g_sends;
+    if (gap > g_send_max_gap) g_send_max_gap = gap;
+    if (gap > 1.5 / g_send_rate) {
+        ++g_sends_late;
+        if (slow_frame(g_frame_dt)) ++g_sends_late_slow;
+    }
+}
+
+// The send test: the counter is held at g_send_floor or above, then compared with 0 for the game's `jg`; a send that
+// goes (the counter at 0 or below) is noted first.
 __declspec(naked) void send_test() {
     __asm {
         push eax
@@ -381,6 +415,14 @@ __declspec(naked) void send_test() {
         mov dword ptr [ebx + 234h], eax
     keep:
         pop eax
+        cmp dword ptr [ebx + 234h], 0
+        jg no_send
+    }
+    SAVE_STATE
+    __asm call note_send
+    RESTORE_STATE
+    __asm {
+    no_send:
         cmp dword ptr [ebx + 234h], 0
         ret
     }
@@ -644,10 +686,12 @@ bool copy_stats(uint32_t manip, CopyStats* out) {
     out->gap_ms = static_cast<int>(t->mean * 1000.0 + 0.5);
     out->speed = t->speed;
     out->stalls = t->stalls;
+    out->stalls_slow = t->stalls_slow;
     out->max_gap_ms = static_cast<int>(t->max_gap * 1000.0f + 0.5f);
     t->updates = 0;
     t->jumps = 0;
     t->stalls = 0;
+    t->stalls_slow = 0;
     t->max_gap = 0;
     return true;
 }
@@ -656,6 +700,32 @@ double since_update(uint32_t manip) {
     const Track* t = manip ? track(manip, false) : nullptr;
     if (!t || t->last <= 0) return -1;
     return clock_now() - t->last;
+}
+
+// Every 15 s in a session, when any of our sends came late: how many, the longest gap, and how many after a slow frame.
+void send_report(int rate) {
+    static double last = 0;
+    static int lines = 0;
+    g_send_rate = rate;
+    const double now = clock_now();
+    if (last == 0 || rate <= kVanilla) {
+        last = now;
+        g_sends = g_sends_late = g_sends_late_slow = 0;
+        g_send_max_gap = 0;
+        return;
+    }
+    if (now - last < 15.0) return;
+    const double window = now - last;
+    last = now;
+    if (g_sends_late > 0 && lines < 150) {
+        ++lines;
+        LOG_INFO("[coop] Our position updates, last %.0f s: %.1f a second (the session's %d), %d came late (over %.0f ms), "
+                 "%d of them after a slow frame of ours; longest gap %.0f ms; our frames %.1f ms on average",
+                 window, g_sends / window, rate, g_sends_late, 1500.0 / rate, g_sends_late_slow, g_send_max_gap * 1000.0,
+                 g_mean_frame * 1000.0);
+    }
+    g_sends = g_sends_late = g_sends_late_slow = 0;
+    g_send_max_gap = 0;
 }
 
 void tick(int rate) {
@@ -672,6 +742,7 @@ void tick(int rate) {
     }
     if (rate < kVanilla) rate = kVanilla;
     if (rate > kMax) rate = kMax;
+    send_report(rate);
     // The enemies' round, every frame: the table is made again with each map load.
     set_round_gap(kVanillaRoundGap * kVanilla / rate);
     set_handout(rate > kVanilla);

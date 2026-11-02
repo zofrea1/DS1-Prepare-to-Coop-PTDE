@@ -788,8 +788,13 @@ off, still holds the area's enemies without updating them: they stood where they
 and the host's next hand-out (up to 8 s), and the guest's game then started their AI with the player already on top of
 them. The armored hollows by the sewer from Firelink Shrine into the Undead Burg (no entity id, so no event: their jump
 is their own AI's) skipped the jump about half the time (2026-11-01). Above the game's own network rate both periods
-are 1 s. Positions are compared only within an area (the map id's top byte): a player in the Undead Asylum stands in
-other coordinates and counts as near nothing in the Undead Burg.
+are 1 s. So that two players both near an enemy, whose bids differ only by a few metres, do not pass it back and forth
+every second (each change starts its AI over in the other game: it stops, re-plans, turns, may take another target),
+an enemy that has just come to a game stays at least 3 s, the old pace: that game bids the cap meanwhile, as for an
+attack, unless its player is beyond 64 m, has fallen, or its copy sleeps. The bids themselves stay as the game makes
+them (a bonus for the moving game, tried in 1.3.0 development, changed who fought whom). Positions are compared only
+within an area (the map id's top byte): a player in the Undead Asylum stands in other coordinates and counts as near
+nothing in the Undead Burg.
 
 When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part way
 and another begins, in every game. Players saw the Asylum Demon break off attacks in all three 2026-10-29 tests,

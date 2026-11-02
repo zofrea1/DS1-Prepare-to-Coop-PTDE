@@ -3462,8 +3462,8 @@ void player_net_watch() {
         if (!uneven) continue;
         ++lines;
         LOG_INFO("[coop] %s's character here, last %.0f s: %.1f updates a second (mean gap %d ms, longest %d ms), %d "
-                 "stalls, jitter %d ms, smoothing %d ms, gait %d %s", p->name.c_str(), window, rate, st.gap_ms,
-                 st.max_gap_ms, st.stalls, st.jitter_ms, st.smoothing_ms, p->gait,
+                 "stalls (%d in a slow frame of ours), jitter %d ms, smoothing %d ms, gait %d %s", p->name.c_str(), window,
+                 rate, st.gap_ms, st.max_gap_ms, st.stalls, st.stalls_slow, st.jitter_ms, st.smoothing_ms, p->gait,
                  gait_fresh ? "(fresh)" : p->gait_at > 0 ? "(stale: the game's own guess)" : "(never heard)");
     }
 }

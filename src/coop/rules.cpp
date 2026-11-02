@@ -25,6 +25,7 @@
 #include <iterator>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace coop::rules {
@@ -3929,6 +3930,7 @@ uint32_t g_watch_bid = 0;
 double g_watch_bid_at = -100;
 
 int attack_hold(uint32_t chr);
+bool moved_here(uint32_t chr);
 int lead_mode(uint32_t handle);
 const char* mover(uint32_t chr);
 
@@ -3942,6 +3944,36 @@ const char* mover(uint32_t chr);
 // the boss to the host's game whenever the host was in the fight, however far back, and took it back from a guest
 // fighting alone when the host walked in. The one change of hands in the 2026-10-29 Taurus fight (19:54:28) came two
 // seconds after its last move ended (the attack lock), so it broke nothing off.
+// The hand-out is every second since 1.4.0 (netrate.cpp, set_handout): an enemy far from the game that moves it gets to
+// the near player's game at once. Between two players both near it, whose bids differ only by a few metres, it could
+// then change hands every second too, and each change starts the enemy's AI over in another game (it stops, re-plans,
+// turns, may take another target). So once an enemy comes to our game it stays at least kChangeHold, the pace of the
+// game's own 3 s hand-out: our game bids the cap meanwhile, as for an attack. Not while our player is beyond the
+// distance term's 64 m, has fallen, or our copy sleeps: then we are the wrong game anyway and it goes at once. The bids
+// themselves are left as the game makes them (no bonus for the game that moves it: that changed who fought whom,
+// afc7f76); only how soon after a change it may change again. An enemy we already have after a load is not held.
+constexpr double kChangeHold = 3.0;
+struct Gain {
+    bool own = false;
+    double at = -100;  // when it last came to us
+};
+std::unordered_map<uint32_t, Gain> g_gains;
+
+bool change_hold(uint32_t chr, const game::Vec3& at, const game::Vec3& me) {
+    const bool own = moved_here(chr);
+    if (g_gains.size() > 4096) g_gains.clear();
+    auto it = g_gains.find(chr);
+    if (it == g_gains.end()) {
+        g_gains.emplace(chr, Gain{own, -100});
+        return false;
+    }
+    Gain& g = it->second;
+    if (own && !g.own) g.at = seconds();
+    g.own = own;
+    if (!own || seconds() - g.at >= kChangeHold) return false;
+    return !world::local_dead() && !ai_off_here(chr) && dist3(me, at) <= kBidReach;
+}
+
 uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
     const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
@@ -3958,6 +3990,7 @@ uint32_t net_priority(uint32_t chr) {
     // one); a player in another area (the Undead Asylum) stands in other coordinates and is near nothing here.
     const int area = (game::map_id() >> 24) & 0xFF;
     auto elsewhere = [area](const PeerSpot& p) { return p.map == -1 || ((p.map >> 24) & 0xFF) != area; };
+    if (change_hold(chr, at, me)) return kBidCap;
     if (world::local_dead()) {
         for (const PeerSpot& p : g_peer_spots) {
             if (p.dead || elsewhere(p) || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
@@ -5919,6 +5952,7 @@ void tick() {
     cut_wait_tick();
     npc_death_tick();
     if (game::loading() && !g_host_killed.empty()) g_host_killed.clear();
+    if (game::loading() && !g_gains.empty()) g_gains.clear();  // a load frees the characters
     if (game::loading() && !g_mirroring_events.empty()) g_mirroring_events.clear();
     if (!g_state.active && !g_flag_churn.empty()) {
         g_flag_churn.clear();

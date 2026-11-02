@@ -911,9 +911,14 @@ ring +0x3C bit 2, goods +0x46 bit 3) it gets 0x80 and goes through `0xDC7E90`: i
 for it (packet 0x2A, kind 3) and the host makes it (`0xDC7E00` -> `0xDC7D20`) and tells its clients (kind 4), so the
 phantoms see the host's drop. Prepare to Co-op runs every item manager as its own world's (kItemClientChecks, the
 host's item packets dropped for a guest), so until 1.4.0 a drop stayed in its player's game. Now a 0x80 kind-1 item
-that `0xDC7D20` makes under our own player is announced (message 36: its entry and map, through the host), and every
-co-op game makes its own copy with `0xDC7C80` once its player is in that map (two seconds after a load at the
-earliest; a copy a load took away is not made again, as a load takes the dropper's own). The host's list goes to a
+that `0xDC7D20` makes under our own player is announced (message 36: its entry and map, through the host) and loses its
+0x80 at once, before `0xDC7E00` reads it: with it a host's drop also went out as kind 4, and an invader's game (which
+takes the host's item packets) made it and could pick it up through kinds 5 and 6, past the host's arbitration (Grok
+review be211f6c). Every co-op game makes its own copy, without 0x80, with `0xDC7C80` once its player is in that map
+and within 60 m (two seconds after a load at the earliest), and only while the kind-1 list has room: `0xDC7B30` takes
+the oldest off the floor at 30. A copy a load took away is not made again (as a load takes the dropper's own); one
+that went otherwise (the cap, a block) is made again when there is room, three times at most, and a grant for a copy
+that went since the request makes it again and takes it. The host's list goes to a
 guest who arrives. A pickup (`0xDC9460`, stdcall(manager, handle)) of a shared copy is decided by the host: the host
 takes it at once, a guest asks (message 37) and picks it up when the host says it is theirs (message 38, which every
 other game answers by removing its copy with `0xDC76F0`). A host whose lobby does not say `ptdesc_items` = 1 (before

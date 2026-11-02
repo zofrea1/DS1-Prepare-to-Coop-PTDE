@@ -38,6 +38,14 @@ namespace {
 // Pickup (0xDC9460, stdcall(manager, handle), from the action 0xD535A0): an item with 0x80 goes through 0xDC8EB0 (a
 // client asks the host, kind 5; else 0xDC8E50: removed with 0xDC78A0, which tells clients, and given), one without is
 // removed with 0xDC76F0 and given with 0xDC8CD0 (the items that do not fit are dropped again).
+// A drop we share loses its 0x80 at once (hk_net_create, before 0xDC7E00 reads it at 0xDC7E1B), and our copies of the
+// others' never have it: the game's own channel stays out of it. With 0x80 a host's drop also went out as packet 0x2A
+// kind 4; co-op guests drop those, but an invader's game made it, could pick it up (kind 5, which the host's game
+// answers at 0xDC906A with 0xDC78A0 and kind 6, past our pickup) and keep it while every co-op copy stayed on the
+// floor (Grok review be211f6c). Without 0x80 the game removes it with 0xDC76F0 and gives it with 0xDC8CD0.
+// Kind 1 holds 30 at most: 0xDC7B30 removes the oldest (0xDC76F0, from 0xDC7BAA) while [manager+0x14] >= 30 before it
+// links a new one, past our pickup too. A copy is made only while there is room, and one the cap took from our floor
+// (gone outside a load) is made again once there is (tick).
 constexpr uint32_t kItemManVar = 0x0137D6BC;
 constexpr uint32_t kNetCreate = 0x00DC7D20;  // ecx = entry, edx = manager -> the object (a shared item made here)
 constexpr uint32_t kCreate = 0x00DC7C80;     // ecx = entry, edx = manager -> the object (by kind)
@@ -48,6 +56,10 @@ constexpr uint32_t kPlayerDrop = 1;
 constexpr uint32_t kCanPickUp = 0x40;
 constexpr uint32_t kShared = 0x80;
 constexpr int kMaxItems = 6;
+constexpr uint32_t kDropCount = 0x14;  // the manager's count of kind-1 items
+constexpr uint32_t kDropCap = 30;      // 0xDC7B30 removes the oldest at this many
+constexpr float kMakeNear = 60.0f;     // a copy is made once our player is this near it
+constexpr int kMaxRemade = 3;          // a copy taken off our floor that often is not made again
 constexpr size_t kMaxDrops = 96;
 constexpr float kAtOurFeet = 5.0f;   // a drop of ours lies here (a queued one waits a frame or so)
 constexpr double kClaimWait = 3.0;  // a request the host did not answer may be made again after this
@@ -60,6 +72,8 @@ struct Shared {
     bool taken = false;
     uint64_t taker = 0;
     double claimed_at = 0;  // our request to pick it up went to the host then (a guest)
+    bool loaded_since = false;  // a load came since our copy was made: a copy missing now went with it
+    int remade = 0;             // times our copy was made again after the cap (or a block) took it
 };
 std::vector<Shared> g_shared;
 
@@ -219,18 +233,19 @@ bool sane(const uint8_t* e) {
 }
 
 // ---------------------------------------------------------------- our drops
-// (The part of a pickup that did not fit is dropped this way too, at our feet: shared as a drop of ours.)
-void note_created(uint32_t obj) {
-    if (!g_enabled || !g_coop) return;
+// (The part of a pickup that did not fit is dropped this way too, at our feet: shared as a drop of ours.) True when it
+// is shared: the caller takes the game's own bit off.
+bool note_created(uint32_t obj) {
+    if (!g_enabled || !g_coop) return false;
     uint8_t e[kEntryBytes];
-    if (!read_entry(obj, e)) return;
+    if (!read_entry(obj, e)) return false;
     const uint32_t handle = entry_u32(e, 0), flags = entry_u32(e, 0x28);
-    if ((handle & 0xF) != kPlayerDrop || !(flags & kShared) || !(flags & kCanPickUp)) return;
+    if ((handle & 0xF) != kPlayerDrop || !(flags & kShared) || !(flags & kCanPickUp)) return false;
     // Only our player's own drop: one at our feet (a host's game also makes the drops its clients ask for, kind 3).
     game::Vec3 me{};
-    if (!game::position(&me, nullptr)) return;
+    if (!game::position(&me, nullptr)) return false;
     const float dx = entry_f(e, 0x10) - me.x, dz = entry_f(e, 0x18) - me.z;
-    if (std::sqrt(dx * dx + dz * dz) > kAtOurFeet || !sane(e)) return;
+    if (std::sqrt(dx * dx + dz * dz) > kAtOurFeet || !sane(e)) return false;
     // A count of our own, from the time we started: a game started again does not repeat a drop the others still know.
     if (!g_seq) g_seq = static_cast<uint32_t>(std::time(nullptr)) << 4;
     Drop d;
@@ -240,6 +255,8 @@ void note_created(uint32_t obj) {
     std::memcpy(d.entry, e, sizeof(d.entry));
     d.entry[0] = static_cast<uint8_t>(kPlayerDrop);  // no handle: each game's manager gives its own
     d.entry[1] = d.entry[2] = d.entry[3] = 0;
+    const uint32_t own_flags = flags & ~kShared;
+    std::memcpy(d.entry + 0x28, &own_flags, 4);
     Shared& s = add(d);
     s.handle = handle;
     s.made = true;
@@ -248,12 +265,38 @@ void note_created(uint32_t obj) {
                  d.map);
     }
     if (g_out_drop) g_out_drop(d);
+    return true;
 }
 
 uint32_t __fastcall hk_net_create(void* entry, uint32_t man) {
     const uint32_t obj = g_net_create_orig(entry, man);
-    if (obj) note_created(obj);
+    if (obj && note_created(obj)) {
+        uint32_t flags = 0;
+        if (read32(obj + 0x38, &flags)) *ptr<uint32_t>(obj + 0x38) = flags & ~kShared;
+    }
     return obj;
+}
+
+// Room for one more kind-1 item without the cap taking the oldest off a floor.
+bool room(uint32_t man) {
+    uint32_t n = 0;
+    return read32(man + kDropCount, &n) && n < kDropCap;
+}
+
+// Our copy of a drop, made by our item manager as one of its own (a handle of its own, no 0x80). The handle, 0 if not.
+uint32_t make_copy(Shared& s, uint32_t man) {
+    uint8_t e[kEntryBytes];
+    std::memcpy(e, s.d.entry, sizeof(e));
+    e[0] = static_cast<uint8_t>(kPlayerDrop);
+    e[1] = e[2] = e[3] = 0;
+    const uint32_t flags = (entry_u32(e, 0x28) | kCanPickUp) & ~kShared;
+    std::memcpy(e + 0x28, &flags, 4);
+    const uint32_t obj = create(e, man);
+    uint32_t handle = 0;
+    if (!obj || !read32(obj + 0x10, &handle)) return 0;
+    s.handle = handle;
+    s.loaded_since = false;
+    return handle;
 }
 
 // ---------------------------------------------------------------- pickups
@@ -402,6 +445,15 @@ void remote_taken(uint64_t origin, uint32_t seq, uint64_t taker) {
             take_ours(*s, man);
             return;
         }
+        // Gone from our floor since we asked (not by a load): made again and taken, so the grant is not lost.
+        if (man && !game::loading() && !s->loaded_since && room(man) && make_copy(*s, man)) {
+            if (++g_lines <= 200) {
+                LOG_INFO("[coop] The host gave us the shared drop (%s), gone from our floor meanwhile: made again and "
+                         "taken", items_text(s->d.entry).c_str());
+            }
+            take_ours(*s, man);
+            return;
+        }
         // Gone from our floor meanwhile (a load): nobody has it, and nobody else will.
         if (++g_lines <= 200) LOG_INFO("[coop] The host gave us a shared drop that is no longer on our floor");
     }
@@ -425,35 +477,62 @@ void tick() {
     // Two seconds after a load (or the session's start) before anything is made: the map's floor is in by then.
     static double settled_at = 0;
     static double last_call = 0;
+    static double checked_at = 0;
+    if (g_coop && game::loading()) {
+        // A copy missing after this load went with it (as a load takes the dropper's own): not made again.
+        for (Shared& s : g_shared) s.loaded_since = true;
+    }
     if (!g_coop || !game::in_game() || game::loading()) return;
     if (now() - last_call > 0.5) settled_at = now();
     last_call = now();
     if (g_shared.empty() || now() - settled_at < 2.0) return;
     const uint32_t man = manager();
     if (!man) return;
+    // Our copies, once a second: one gone without a load (the kind-1 cap took it, or its block went away) is made again
+    // once we are in its map and there is room; one a load took stays gone.
+    if (now() - checked_at >= 1.0) {
+        checked_at = now();
+        for (Shared& s : g_shared) {
+            if (!s.handle || s.taken) continue;
+            const uint32_t obj = find_object(man, s.handle);
+            if (obj && is_copy(obj, s.handle, s.d.entry)) {
+                s.loaded_since = false;  // still here after the load
+                continue;
+            }
+            const bool by_load = s.loaded_since;
+            s.handle = 0;
+            // (An object of another kind of ours under that handle: not ours any more, and not made again either.)
+            if (!obj && !by_load && s.remade < kMaxRemade) {
+                s.made = false;
+                ++s.remade;
+            }
+            if (++g_lines <= 200) {
+                LOG_INFO("[coop] A shared drop (%s) is gone from our floor (%s)", items_text(s.d.entry).c_str(),
+                         by_load ? "a load" : obj ? "its handle is another item's" : "not picked up: made again later");
+            }
+        }
+    }
     const int map = game::map_id();
+    game::Vec3 me{};
+    if (!game::position(&me, nullptr)) return;
     int made = 0;
     for (Shared& s : g_shared) {
         if (s.made || s.taken || s.d.map != map || made >= 4) continue;
-        // On our floor: our item manager makes it as one of its own (a handle of its own).
-        uint8_t e[kEntryBytes];
-        std::memcpy(e, s.d.entry, sizeof(e));
-        e[0] = static_cast<uint8_t>(kPlayerDrop);
-        e[1] = e[2] = e[3] = 0;
-        uint32_t flags = entry_u32(e, 0x28) | kCanPickUp | kShared;
-        std::memcpy(e + 0x28, &flags, 4);
+        // Near our player: a block far off may not keep it.
+        const float dx = entry_f(s.d.entry, 0x10) - me.x, dz = entry_f(s.d.entry, 0x18) - me.z;
+        if (std::sqrt(dx * dx + dz * dz) > kMakeNear) continue;
+        // Only while the cap leaves room: making it would take the oldest drop off our floor.
+        if (!room(man)) break;
         s.made = true;
         ++made;
-        const uint32_t obj = create(e, man);
-        uint32_t handle = 0;
-        if (!obj || !read32(obj + 0x10, &handle)) {
+        if (!make_copy(s, man)) {
             if (++g_lines <= 200) LOG_ERROR("[coop] A shared drop could not be put on our floor");
             continue;
         }
-        s.handle = handle;
         if (++g_lines <= 200) {
             LOG_INFO("[coop] A shared drop (%s, dropped by %s) lies on our floor at (%.1f, %.1f, %.1f)",
-                     items_text(e).c_str(), who(s.d.origin), entry_f(e, 0x10), entry_f(e, 0x14), entry_f(e, 0x18));
+                     items_text(s.d.entry).c_str(), who(s.d.origin), entry_f(s.d.entry, 0x10),
+                     entry_f(s.d.entry, 0x14), entry_f(s.d.entry, 0x18));
         }
     }
 }

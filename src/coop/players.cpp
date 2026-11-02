@@ -26,6 +26,13 @@
 //    and its join falls through. Until 1.4.0's last test build this was left at five: on 2026-11-02 a sixth player
 //    was counted for a moment and gone again three times, and one knocking on a session of five was turned away by
 //    its own game within 0.2 s (notice 20001004), with nothing of it in our log.
+//  * The network library allocates from the game's network heap ([0x13787F8], 0x137F768 + 0x104), made once with a
+//    block of 4 MB (0xF8B520: push 400000h at 0xF8B595 for the CRT's _aligned_malloc, and the same size at 0x40A50F
+//    for the heap's set-up 0x40D390 and at 0x40A530 for the memory ranges' list 0x562C70). Every frame of a session
+//    the game asks it for its free space (vt+0x18, 0xD2EF0C) and leaves the session when under 64 KB
+//    (OnIrregularLeaveSession). A seventh player of 2026-11-02 got to the world, all six others made, and left it
+//    0.3 s later so, back home; on the try before, the game died at a C runtime error box a moment after arriving.
+//    With more players the heap is made 16 MB (kNetHeap); the lowest free space of each minute in a session is logged.
 //  * GameDataMan keeps the other players' PlayerGameData in one block of three (+0xC, 0x4C0 each, made by the
 //    constructor 0xC06710 as 0x10 + 0xE40 bytes with the count at block+0xC), a state byte for each (+0x10, three
 //    bytes; 0x1F once the player is ready to be made) and another byte each inline at +0x84..+0x86. A member's slot
@@ -128,6 +135,30 @@ void __stdcall reset_extra_slots() {
 }
 
 uint32_t g_reset_tail = kResetTail;
+
+// The network heap's block (see the top): 4 MB, 16 MB with more players.
+constexpr uint32_t kNetHeap = 0x01000000;
+const uint32_t kNetHeapSites[3] = {0x00F8B595, 0x0040A50F, 0x0040A530};
+const uint8_t kNetHeapOld[5] = {0x68, 0x00, 0x00, 0x40, 0x00};  // push 400000h
+constexpr uint32_t kNetHeapVar = 0x013787F8;      // the heap (its allocator interface), 0 until made
+constexpr uint32_t kNetHeapMade = 0x0137CDD8;     // the heap object, 0 until made (0x40C030)
+uint32_t g_net_heap = 0x00400000;
+uint32_t g_net_free_min = 0xFFFFFFFF;
+ULONGLONG g_net_free_at = 0;
+
+// The network heap's free space (the game's own test, 0xD2EF0C), 0 when there is no heap yet.
+uint32_t net_heap_free() {
+    uint32_t heap = 0, vt = 0, fn = 0;
+    if (!read32(kNetHeapVar, &heap) || !heap || !read32(heap, &vt) || !vt || !read32(vt + 0x18, &fn) || !fn) return 0;
+    uint32_t free_bytes = 0;
+    __asm {
+        mov ecx, heap
+        mov eax, fn
+        call eax
+        mov free_bytes, eax
+    }
+    return free_bytes;
+}
 
 // The network sessions' size: MaxPlayers and one to spare, as the game's own five for four.
 constexpr uint32_t kFactorySlot = 0x010FDE60;  // SteamMatchingSystem vtable 0x10FDE3C, slot 9
@@ -499,6 +530,7 @@ int install_all() {
         match = match && bytes_match(at, code, sizeof(code));
     }
     match = match && bytes_match(kFactorySlot, kFactoryOld, sizeof(kFactoryOld));
+    for (uint32_t at : kNetHeapSites) match = match && bytes_match(at, kNetHeapOld, sizeof(kNetHeapOld));
     if (!match) {
         LOG_ERROR("[coop] More players: this build of the game differs; sessions keep the game's four players");
         return -1;
@@ -569,6 +601,25 @@ int install_all() {
     const uint32_t factory = reinterpret_cast<uint32_t>(&hk_session_factory);
     one(patch(kFactorySlot, kFactoryOld, &factory, sizeof(factory)), "the network sessions' size");
     if (failed) return failed;
+    {
+        // The three sizes go together, before the heap is made (the game makes it once, at start-up).
+        uint32_t made = 0;
+        if (read32(kNetHeapMade, &made) && made) {
+            LOG_ERROR("[coop] More players: the network heap was made before us (it stays 4 MB)");
+        } else {
+            uint8_t code[5] = {0x68};
+            std::memcpy(code + 1, &kNetHeap, 4);
+            int done = 0;
+            for (uint32_t at : kNetHeapSites) done += patch(at, kNetHeapOld, code, sizeof(code)) ? 1 : 0;
+            if (done == 3) {
+                g_net_heap = kNetHeap;
+            } else {
+                for (uint32_t at : kNetHeapSites) patch(at, code, kNetHeapOld, sizeof(kNetHeapOld));
+                one(false, "the network heap's size");
+            }
+        }
+    }
+    if (failed) return failed;
     one(patch_imm<int32_t>(0x00D2CB1B, kMemberLimit, sizeof(kMemberLimit), 6, g_max), "the member limit");
     return failed;
 }
@@ -614,6 +665,20 @@ bool bars_fed() { return g_bars; }
 uint32_t bar_chr(int slot) { return g_bars && slot >= 0 && slot < g_bar_count ? g_bar_chrs[slot] : 0; }
 
 void tick() {
+    if (g_ok && game::session_state() != 0) {
+        const uint32_t free_bytes = net_heap_free();
+        if (free_bytes && free_bytes < g_net_free_min) g_net_free_min = free_bytes;
+        const ULONGLONG t = GetTickCount64();
+        if (g_net_free_at == 0) g_net_free_at = t;
+        if (t - g_net_free_at >= 60000 && g_net_free_min != 0xFFFFFFFF) {
+            LOG_INFO("[coop] Network memory: %u KB free at the least in the last minute (of %u KB; the game leaves "
+                     "the session under 64 KB)", g_net_free_min / 1024, g_net_heap / 1024);
+            g_net_free_min = 0xFFFFFFFF;
+            g_net_free_at = t;
+        }
+    } else {
+        g_net_free_at = 0;
+    }
     if (!g_ok || g_zeroed) return;
     // The state bytes past the game's three are not cleared by its constructor (it clears three).
     uint32_t gdm = 0, states = 0;
@@ -625,7 +690,8 @@ void tick() {
 void log_status() {
     if (g_max == 4) return;
     LOG_INFO("[coop] More players: up to %d in a session (the game's records, slots and character set widened, its "
-             "network sessions made for %u; the floating health bars %s; %s)", g_max, g_people,
+             "network sessions made for %u, its network heap %u MB; the floating health bars %s; %s)", g_max,
+             g_people, g_net_heap >> 20,
              g_bars ? "show every other player, seven at most" : "stay with the party's four",
              partylist::widened() ? "the party list holds eight" : "players past the party's four have no party entry");
 }

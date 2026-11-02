@@ -57,8 +57,6 @@ void set_flag_listener(void (*fn)(int id, bool on));
 void hold_event_runs(bool on);
 // The runs held back since the last call.
 uint32_t take_held_runs();
-// Our game paid its player a boss's souls (the clear bonus), for the other players' games.
-void set_clear_bonus_listener(void (*fn)(int souls));
 // A rest (ours or another player's) is about to reset the world's characters.
 void note_world_reset();
 // A cutscene is about to move our player into another map (map id, the cutscene's point entity).

@@ -118,8 +118,8 @@ enum MsgType : uint8_t {
     kBonfires = 39,      // 1.4.0, host -> co-op guests: our bonfires' kindling (world::BonfirePoints each), to a guest
                          // who arrived and to all whenever it changes; a guest's game takes it while in our world
     kBonfireKindle = 40, // 1.4.0, co-op guest -> host: I kindled this bonfire of your world (BonfireMsg)
-    kBossSouls = 41,     // 1.4.0, co-op player -> all (through the host): my game paid a boss's souls (Simple: the
-                         // amount), for a player whose game did not run the boss's defeat (world.cpp)
+    kBossSouls = 41,     // 1.4.0, co-op player -> all (through the host): my game paid a boss's souls
+                         // (BossSoulsMsg), for a player whose game did not run the boss's defeat (world.cpp)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -130,6 +130,8 @@ enum MsgType : uint8_t {
 enum WelcomeStatus : uint32_t { kOk = 0, kFull = 1, kBusy = 2, kRefused = 3, kVersion = 4, kBossFight = 5, kCooldown = 6 };
 // The first version whose invaders know kBossFight and kCooldown.
 constexpr const char* kRefusalsVersion = "1.3.0";
+// From 1.4.0 a co-op guest holds back its own flags until its copy of our world is ours (copy_hold_tick).
+constexpr const char* kHoldsCopyVersion = "1.4.0";
 
 #pragma pack(push, 1)
 struct Header {
@@ -253,6 +255,12 @@ struct HomewardMsg {
 struct Simple {
     Header h;
     uint32_t value;
+};
+// kBossSouls: the souls my game paid, and the defeat flag of the boss they were for.
+struct BossSoulsMsg {
+    Header h;
+    uint32_t souls;
+    int32_t flag;
 };
 // kRest's value is the rest's id (1.1.0: random, set by the one who rests and passed on by the host; 1.0.0: their
 // bonfire, or 0 passed on by a 1.0.0 host). Each player's reload phase is sent for the rest it answers.
@@ -3943,12 +3951,15 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             const int n = std::min<int>(m.count, kFlagsPerMsg);
             const bool from_guest = g_role == Role::Host;
             if (!from_guest && from != g_host) return;
-            // A guest's first seconds in our world: what its game set then it judged on its own copy, not yet ours
-            // (a guest of 1.4.0 holds that back itself; an older one sends it).
+            // An older guest's first seconds in our world: what its game set then it judged on its own copy, not yet
+            // ours. A guest of 1.4.0 holds that back itself and lets go 2 s after our map flags reached it: its first
+            // real flags come about 2 s and a round trip after we sent them, inside these 3 s, so they are not
+            // dropped here (Grok d6d05cb9). An unknown version counts as older.
             if (from_guest) {
                 const PeerInfo* p = nullptr;
                 for (const auto& q : g_peers) p = q.id == from ? &q : p;
-                if (p && p->arrived_at > 0 && now() - p->arrived_at < 3.0) {
+                if (p && p->arrived_at > 0 && now() - p->arrived_at < 3.0 &&
+                    compare_versions(p->mod, kHoldsCopyVersion) < 0) {
                     static int early = 0;
                     if (++early <= 20) {
                         LOG_INFO("[coop] %d flag change(s) from %s not taken: sent in their first 3 s in our world",
@@ -4140,7 +4151,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             break;
         }
         case kBossSouls: {
-            Simple m;
+            BossSoulsMsg m;
             if (!as(&m) || g_invade) return;
             if (g_role == Role::Host) {
                 if (peer_is_invader(from)) return;
@@ -4148,8 +4159,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             } else if (from != g_host) {
                 return;
             }
-            LOG_INFO("[coop] %s's game paid a boss's %u souls", steam::persona(from).c_str(), m.value);
-            world::remote_boss_souls(static_cast<int>(m.value));
+            LOG_INFO("[coop] %s's game paid boss %d's %u souls", steam::persona(from).c_str(), m.flag, m.souls);
+            world::remote_boss_souls(static_cast<int>(m.souls), m.flag);
             break;
         }
         case kBonfireKindle: {
@@ -4601,11 +4612,12 @@ void send_npc_talk(int talk, int line, int row, int a2, int a3, talk::Kind kind)
 
 // Our game paid its player a boss's souls (rules.cpp hk_clear_bonus): the amount, for a player whose game did not
 // run the boss's defeat (world.cpp). Invaders take no boss souls and tell nobody.
-void send_boss_souls(int souls) {
+void send_boss_souls(int souls, int flag) {
     if (g_role == Role::None || !g_lobby || g_invade || souls <= 0) return;
-    Simple m{};
+    BossSoulsMsg m{};
     fill_header(&m, kBossSouls);
-    m.value = static_cast<uint32_t>(souls);
+    m.souls = static_cast<uint32_t>(souls);
+    m.flag = flag;
     if (g_role == Role::Host) {
         broadcast_coop(m);
     } else if (g_host && g_step == Step::InWorld) {
@@ -5135,7 +5147,7 @@ void set_callbacks() {
     world::set_rest_handler(&send_rest);
     world::set_death_handler(&send_death);
     rules::set_flag_listener(&queue_flag);
-    rules::set_clear_bonus_listener(&send_boss_souls);
+    world::set_boss_souls_listener(&send_boss_souls);
     rules::set_bonfire_warp_listener(&send_bonfire_warp);
     rules::set_bonfire_lit_listener(&send_bonfire_lit);
     rules::set_bonfire_kindle_listener(&send_bonfire_kindle);

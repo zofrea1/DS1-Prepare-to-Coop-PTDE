@@ -778,16 +778,50 @@ uint32_t boss_handle(int slot);
 // player is in the boss's map. A boss that dies while we are in the world is dead for us wherever we stood, and
 // its items come (common event 970 on the flag, drops.cpp); its souls come too: the game that paid tells the
 // others the amount (kBossSouls), and a game whose defeat flag came on without a payment of its own pays that
-// amount, once its player stands (a fallen player waits for the respawn). Whichever of the two comes first pays;
-// the game's own payment after ours is skipped (rules.cpp hk_clear_bonus).
-constexpr double kSoulsWait = 8.0;     // after the flag, for our own game's payment
-constexpr double kSoulsWindow = 20.0;  // an amount heard this long before the flag (or after it) is this boss's
-constexpr double kSoulsGiveUp = 180.0;
-double g_souls_paid_at = 0;    // our game paid a boss's souls itself
-double g_souls_heard_at = 0;   // another player's game paid some
-int g_souls_heard = 0;
-double g_souls_due_at = 0;     // a defeat flag came on here; 0: none waiting
-double g_souls_given_at = 0;   // we paid another game's amount
+// amount, once its player stands (a fallen player waits for the respawn). Whichever of the two comes first pays:
+// our game's own late payment of a boss already paid from another game's amount is skipped (rules.cpp
+// hk_clear_bonus, own_boss_souls). Each defeat is matched by its flag: the amount comes with it (BossSoulsMsg).
+constexpr double kSoulsWait = 8.0;      // after the flag, for our own game's payment
+constexpr double kSoulsHeard = 60.0;    // how long a defeat waits for another game's amount
+constexpr double kSoulsKeep = 60.0;     // a paid defeat is kept this long (our game's late payment of it is skipped)
+constexpr double kSoulsUnmatched = 10.0;  // our payment before its flag waits this long for the flag
+constexpr double kSoulsGiveUp = 180.0;  // a fallen player's catch-up waits this long for the respawn
+// One entry per defeat (its flag), each matched on its own (Grok d6d05cb9: one slot for every boss let a second
+// defeat in the wait go unowed, paid one boss's souls for another, and skipped any payment of ours for 60 s after a
+// catch-up, a boss our game alone ran included).
+struct BossSouls {
+    int flag = 0;
+    double on_at = 0;     // the flag came on in our game (0: not yet; another game's amount came first)
+    double heard_at = 0;  // another player's game paid it: its amount
+    int heard = 0;
+    bool own = false;     // our game paid it
+    bool given = false;   // we paid the amount heard
+    bool told = false;    // "no amount came" logged
+};
+std::vector<BossSouls> g_souls;
+int g_souls_unmatched = 0;  // our payment that came before its flag (0 none), and when
+double g_souls_unmatched_at = 0;
+void (*g_souls_fn)(int souls, int flag) = nullptr;
+
+BossSouls* souls_entry(int flag, bool make) {
+    for (auto& e : g_souls) {
+        if (e.flag == flag) return &e;
+    }
+    if (!make || g_souls.size() >= 32) return nullptr;
+    g_souls.push_back(BossSouls{});
+    g_souls.back().flag = flag;
+    return &g_souls.back();
+}
+
+// The map of a boss's defeat flag (1AAB.... : area AA, block B), -1 for the flags below 10000 (no map).
+int defeat_map(int flag) {
+    if (flag < 10000000) return -1;
+    return ((flag / 100000) % 100) << 24 | ((flag / 10000) % 10) << 16;
+}
+
+void tell_souls(int souls, int flag) {
+    if (g_souls_fn && souls > 0) g_souls_fn(souls, flag);
+}
 
 void give_souls(uint32_t me, int souls) {
     uint32_t vt = 0, fn = 0;
@@ -802,48 +836,102 @@ void give_souls(uint32_t me, int souls) {
     }
 }
 
+// A defeat flag came on in our game (defeat_tick).
+void souls_flag_on(int flag, double t) {
+    if (!g_active || g_invader) return;
+    BossSouls* e = souls_entry(flag, true);
+    if (!e || e->on_at > 0) return;
+    e->on_at = t;
+    // Our game paid just before its flag (an event that hands the defeat and ends, the flag set by the end): a
+    // defeat in our map, if it has one.
+    const int map = defeat_map(flag), here = game::map_id();
+    const bool ours = map == -1 || here == -1 || (static_cast<uint32_t>(here) & 0xFFFF0000) == static_cast<uint32_t>(map);
+    if (ours && g_souls_unmatched > 0 && t - g_souls_unmatched_at <= kSoulsUnmatched) {
+        e->own = true;
+        tell_souls(g_souls_unmatched, flag);
+        g_souls_unmatched = 0;
+    }
+}
+
 void boss_souls_tick() {
-    if (g_souls_due_at <= 0) return;
     const double t = now();
     if (!g_active || g_invader) {
-        g_souls_due_at = 0;
+        g_souls.clear();
+        g_souls_unmatched = 0;
         return;
     }
-    if (t - g_souls_due_at < kSoulsWait) return;
-    if (g_souls_paid_at >= g_souls_due_at - kSoulsWindow) {
-        g_souls_due_at = 0;  // ours came
-        return;
-    }
-    if (g_souls_heard <= 0 || g_souls_heard_at < g_souls_due_at - kSoulsWindow) {
-        if (t - g_souls_due_at > kSoulsWindow) {
-            LOG_INFO("[coop] A boss died in the world, but no player's game told us its souls");
-            g_souls_due_at = 0;
-        }
-        return;
+    if (g_souls_unmatched > 0 && t - g_souls_unmatched_at > kSoulsUnmatched) {
+        LOG_INFO("[coop] Our game paid %d souls with no boss defeat flag of ours to go with them: not told",
+                 g_souls_unmatched);
+        g_souls_unmatched = 0;
     }
     const uint32_t me = game::player();
-    if (game::loading() || !me || local_dead()) {
-        if (t - g_souls_due_at > kSoulsGiveUp) g_souls_due_at = 0;
-        return;
+    const bool can_take = !game::loading() && me && !local_dead();
+    for (auto it = g_souls.begin(); it != g_souls.end();) {
+        BossSouls& e = *it;
+        bool drop = false;
+        if (e.on_at <= 0) {
+            drop = t - e.heard_at > kSoulsHeard;  // an amount for a defeat our game never saw
+        } else if (e.own || e.given) {
+            drop = t - e.on_at > kSoulsKeep;
+        } else if (t - e.on_at >= kSoulsWait) {
+            if (e.heard > 0) {
+                if (can_take) {
+                    give_souls(me, e.heard);
+                    LOG_INFO("[coop] Boss %d: its %d souls from another player's game (our game did not run its "
+                             "defeat: we were elsewhere)", e.flag, e.heard);
+                    e.given = true;
+                } else {
+                    drop = t - e.on_at > kSoulsGiveUp;
+                }
+            } else if (t - e.on_at > kSoulsHeard) {
+                if (!e.told) LOG_INFO("[coop] Boss %d died in the world, but no player's game told us its souls", e.flag);
+                drop = true;
+            }
+        }
+        it = drop ? g_souls.erase(it) : it + 1;
     }
-    give_souls(me, g_souls_heard);
-    LOG_INFO("[coop] A boss's %d souls from another player's game: our game did not run its defeat (we were "
-             "elsewhere)", g_souls_heard);
-    g_souls_given_at = t;
-    g_souls_due_at = 0;
 }
 
 }  // namespace
 
-void note_boss_souls(int) { g_souls_paid_at = now(); }
-
-bool boss_souls_paid_here() { return g_souls_given_at > 0 && now() - g_souls_given_at < 60.0; }
-
-void remote_boss_souls(int souls) {
-    if (souls <= 0 || g_invader) return;
-    g_souls_heard = souls;
-    g_souls_heard_at = now();
+bool own_boss_souls(int souls) {
+    const double t = now();
+    if (!g_active || g_invader || souls <= 0) return true;
+    // The defeat this payment is for: the latest of ours not paid by our game, in our map if it has one.
+    const int here = game::map_id();
+    BossSouls* best = nullptr;
+    for (auto& e : g_souls) {
+        if (e.on_at <= 0 || e.own || t - e.on_at > 30.0) continue;
+        const int map = defeat_map(e.flag);
+        if (map != -1 && here != -1 && (static_cast<uint32_t>(here) & 0xFFFF0000) != static_cast<uint32_t>(map)) continue;
+        if (!best || e.on_at > best->on_at) best = &e;
+    }
+    if (!best) {
+        // Before its flag: told once the flag comes (souls_flag_on).
+        g_souls_unmatched = souls;
+        g_souls_unmatched_at = t;
+        return true;
+    }
+    best->own = true;
+    if (best->given) {
+        LOG_INFO("[coop] Boss %d: our game's payment of its %d souls skipped (paid from another player's game already)",
+                 best->flag, souls);
+        return false;
+    }
+    tell_souls(souls, best->flag);
+    return true;
 }
+
+void remote_boss_souls(int souls, int flag) {
+    if (souls <= 0 || flag <= 0 || g_invader || !g_active || !boss_defeat_flag(flag)) return;
+    BossSouls* e = souls_entry(flag, true);
+    if (!e || e->heard > 0) return;
+    e->heard = souls;
+    e->heard_at = now();
+}
+
+void set_boss_souls_listener(void (*fn)(int souls, int flag)) { g_souls_fn = fn; }
 
 void defeat_rebase() { g_defeat_known = false; }
 
@@ -874,10 +962,10 @@ void defeat_tick() {
     }
     if (g_defeat_known && (on & ~g_defeat_on)) {
         g_defeat_at = now();
-        if (g_active && !g_invader && g_souls_due_at <= 0) g_souls_due_at = g_defeat_at;
         for (size_t i = 0; i < sizeof(kBossDefeatFlags) / sizeof(kBossDefeatFlags[0]); ++i) {
             if ((on & ~g_defeat_on) & (1u << i)) {
                 LOG_INFO("[coop] Boss defeat flag %d is on: its rewards come over the next 5 s", kBossDefeatFlags[i]);
+                souls_flag_on(kBossDefeatFlags[i], g_defeat_at);
             }
         }
     }

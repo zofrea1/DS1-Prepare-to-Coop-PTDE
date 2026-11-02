@@ -27,12 +27,14 @@ void set_host_scaling(const int* scaling);
 void tick();
 // A boss's defeat flag (every common event 970's first parameter).
 bool boss_defeat_flag(int id);
-// A boss's souls (its clear bonus): our game paid them now (rules.cpp).
-void note_boss_souls(int souls);
-// Another player's game paid a boss's souls (kBossSouls): ours if our game does not pay them itself.
-void remote_boss_souls(int souls);
-// We paid another game's amount lately: our game's own payment for that boss is skipped.
-bool boss_souls_paid_here();
+// Our game is about to pay a boss's souls (its clear bonus, rules.cpp hk_clear_bonus). False: that boss's souls were
+// paid here from another player's game already (this is our game's late payment of them): skip it.
+bool own_boss_souls(int souls);
+// Another player's game paid the souls of the boss whose defeat flag is `flag` (kBossSouls): ours if our game does
+// not pay them itself.
+void remote_boss_souls(int souls, int flag);
+// Our game paid a boss's souls: tell the others (session.cpp), with the boss's defeat flag.
+void set_boss_souls_listener(void (*fn)(int souls, int flag));
 // The host's world state was written in at once: the defeat flags read next are a new baseline.
 void defeat_rebase();
 

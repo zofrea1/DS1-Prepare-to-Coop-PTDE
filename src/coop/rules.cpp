@@ -1511,21 +1511,17 @@ void* g_clear_bonus_orig = nullptr;
 
 bool invader_here() { return g_state.active && g_state.invader; }
 
-void (*g_clear_bonus_fn)(int souls) = nullptr;
-
 void __stdcall hk_clear_bonus(int arg) {
     const uint32_t pgd0 = game::player_game_data();
     float due = 0;
     if (pgd0) read32(pgd0 + 0xF0, reinterpret_cast<uint32_t*>(&due));
     if (!invader_here() && g_state.active && due >= 1.0f) {
-        if (world::boss_souls_paid_here()) {
-            // Another game's amount came first (world.cpp): ours would pay the same boss twice.
+        if (!world::own_boss_souls(static_cast<int>(due))) {
+            // This boss's souls were paid here from another game's amount already (world.cpp): only this late
+            // payment of the same boss is skipped.
             *ptr<float>(pgd0 + 0xF0) = 0.0f;
-            LOG_INFO("[coop] A boss's %.0f souls: paid here already from another player's game", due);
             return;
         }
-        world::note_boss_souls(static_cast<int>(due));
-        if (g_clear_bonus_fn) g_clear_bonus_fn(static_cast<int>(due));
         LOG_INFO("[coop] A boss's %.0f souls: paid by our game (the others are told)", due);
     }
     if (invader_here()) {
@@ -3856,8 +3852,6 @@ int end_disasters(bool cursed_here) {
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
 
 void hold_event_runs(bool on) { g_hold_runs = on ? 1 : 0; }
-
-void set_clear_bonus_listener(void (*fn)(int souls)) { g_clear_bonus_fn = fn; }
 
 uint32_t take_held_runs() {
     const uint32_t n = g_held_runs;
@@ -6218,6 +6212,9 @@ void tick() {
     if (game::loading() && !g_host_killed.empty()) g_host_killed.clear();
     if (game::loading() && !g_gains.empty()) g_gains.clear();  // a load frees the characters
     if (game::loading() && !g_mirroring_events.empty()) g_mirroring_events.clear();
+    // The same for the events whose NPC step did not line up: a load frees them, and a later run at the same address
+    // would be taken for one (its end not marked done at home; Grok d6d05cb9). Nor are they kept past the session.
+    if ((game::loading() || !g_state.guest) && !g_unaligned_events.empty()) g_unaligned_events.clear();
     if (!g_state.active && !g_flag_churn.empty()) {
         g_flag_churn.clear();
         g_contested.clear();

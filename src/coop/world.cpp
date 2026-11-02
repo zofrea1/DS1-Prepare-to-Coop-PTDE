@@ -6,6 +6,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "netrate.h"
 #include "motion.h"
 #include "rules.h"
 #include "session.h"
@@ -1077,6 +1078,48 @@ void watch_low_hp(uint32_t chr, int h, int m, bool was_up) {
              session::guest() ? rules::host_hp_report(chr) : -2, f1fc, static_cast<int>(rate));
 }
 
+// The copies of enemies other games move, near us, every 30 s: their updates, stalls (an update that came after the copy
+// had covered the one before, so it stood until it came) and the longest gap. The players' copies stalled once or twice
+// a second on a good link until their smoothing covered the late tail (netrate.cpp, 2026-11-01); this says whether the
+// enemies' do too. Bosses are left to their own lines (rules.cpp, boss_copy_tick reads their counts).
+void enemy_stall_tick() {
+    static double last = 0;
+    static int lines = 0;
+    static std::map<uint32_t, double> read_at;  // a copy's manipulator -> when its counts were last read
+    if (!g_active || game::loading() || lines >= 120 || now() - last < 30.0) return;
+    const double window = last > 0 ? now() - last : 0;
+    last = now();
+    if (read_at.size() > 1024) read_at.clear();
+    int copies = 0, updates = 0, stalls = 0, longest = 0, smooth = 0, stalling = 0;
+    each_enemy([&](uint32_t chr) {
+        uint32_t current = 0, net_ai = 0, team = 0;
+        if (!read32(chr + 0x2C, &current) || !read32(chr + 0x414, &net_ai) || !current || current != net_ai) return;
+        if (read32(chr + 0x74, &team) && static_cast<int>(team) == kBossTeam) return;
+        game::Vec3 at{}, me{};
+        if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return;
+        const float dx = at.x - me.x, dy = at.y - me.y, dz = at.z - me.z;
+        if (dx * dx + dy * dy + dz * dz > 40.0f * 40.0f) return;
+        netrate::CopyStats st;
+        if (!netrate::copy_stats(net_ai, &st)) return;
+        double& r = read_at[net_ai];
+        const bool counted = window > 0 && now() - r <= window + 1.0;  // read last time too: these are this window's
+        r = now();
+        if (!counted || st.updates == 0) return;
+        ++copies;
+        updates += st.updates;
+        stalls += st.stalls;
+        if (st.stalls > 0) ++stalling;
+        if (st.max_gap_ms > longest) longest = st.max_gap_ms;
+        smooth += st.smoothing_ms;
+    });
+    if (!copies) return;
+    ++lines;
+    LOG_INFO("[coop] Enemy copies other games move, within 40 m, last %.0f s: %d copies, %.1f updates a second each, "
+             "%d stalls (%.1f a copy every 10 s, %d copies with any), longest gap %d ms, smoothing %d ms on average",
+             window, copies, updates / window / copies, stalls, stalls * 10.0 / window / copies, stalling, longest,
+             smooth / copies);
+}
+
 void enemy_hp_tick() {
     static double last = 0;
     if (!g_active || now() - last < 0.1) return;
@@ -1186,6 +1229,7 @@ bool keep_share(uint32_t chr, const Fill& f) {
 
 void scale_tick() {
     enemy_hp_tick();
+    enemy_stall_tick();
     if (now() - g_last_scale < 0.5) return;
     g_last_scale = now();
     int level = g_active ? g_players - 1 : 0;

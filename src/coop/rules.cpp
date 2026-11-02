@@ -4636,12 +4636,15 @@ void boss_copy_tick() {
         r = t;
         if (!recent || st.updates == 0) continue;
         double& q = quiet[chr];
-        if (st.jumps == 0 && t - q < 10.0) continue;
-        if (st.jumps == 0) q = t;
+        // (Stalls: an update that came after the copy had covered the one before, so it stood until it came; a second
+        // with three or more is logged as one with a jump is, to see whether enemies want the players' late tail.)
+        const bool notable = st.jumps > 0 || st.stalls >= 3;
+        if (!notable && t - q < 10.0) continue;
+        if (!notable) q = t;
         ++lines;
-        LOG_INFO("[coop] Boss %d's copy: %d update(s) and %d jump(s) in the last second, smoothing %d ms (jitter %d "
-                 "ms, gap %d ms), speed %.1f m/s, animation %d", e, st.updates, st.jumps, st.smoothing_ms,
-                 st.jitter_ms, st.gap_ms, st.speed, action_of(chr));
+        LOG_INFO("[coop] Boss %d's copy: %d update(s), %d jump(s) and %d stall(s) in the last second (longest gap %d "
+                 "ms), smoothing %d ms (jitter %d ms, gap %d ms), speed %.1f m/s, animation %d", e, st.updates, st.jumps,
+                 st.stalls, st.max_gap_ms, st.smoothing_ms, st.jitter_ms, st.gap_ms, st.speed, action_of(chr));
     }
 }
 

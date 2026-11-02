@@ -36,8 +36,10 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    The items are used like any other item (quick slot, the item animation); when one cannot be used it is
    refused the way the game refuses any item. Keyboard shortcuts do the same (`CoopHotkeys`): **Ctrl+F1**
    host, **Ctrl+F2** join, **Ctrl+F3** leave, **Ctrl+F4** invade. Each press is written to the log.
-3. Another player's floating health bar shows their character's name with their soul level and ping, or
-   ping, soul level or deaths alone (`OverheadPlayerDisplay`). Everyone sees everyone's, invaders included (the
+3. Another player's floating health bar shows their character's name with their soul level, ping and "lerp"
+   (the smoothing their character is drawn with), or less (`OverheadPlayerDisplay`). The ping is this game's own
+   round trip to that player, four times a second (1.4.0; before, a guest timed its host every 2 s and every other
+   bar showed that player's own ping to their host). Everyone sees everyone's, invaders included (the
    game hides an invader's from the host and guests), except a player under Chameleon (SpEffect 1500), who has none. Joins, departures, deaths and changes to the
    world rules are told at the bottom of the screen, with character names (the game's own records of other
    players hold their Steam names). The bar is matched to its player by that record's name: by the Steam name, or by

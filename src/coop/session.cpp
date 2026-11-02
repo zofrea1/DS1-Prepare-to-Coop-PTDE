@@ -553,8 +553,21 @@ std::map<uint64_t, double> g_p2p_failed;  // when Steam last reported the link t
 std::vector<uint64_t> g_lost;             // host: dropped players, until they ask to join again (kDropped)
 double g_host_heard = 0;                  // guest: the last message from the host (not counting kPong)
 double g_quiet_grace_until = 0;           // no drops before this (we were not running)
-int g_ping_ms = -1;
-int64_t g_ping_qpc = 0;  // guest: counter when the last ping was sent (0 none)
+int g_ping_ms = -1;  // guest: our own round trip to the host (what our Info reports)
+// Our round trips. Every kPingEvery s each player times each other player of the session (kPing, answered by kPong
+// with the ping's number, which every version sends back as it came), and their floating health bar shows the newest.
+// Until 1.4.0 a guest timed its host alone, every 2 s with one ping in flight, and every other bar showed that
+// player's own ping to their host from its Info, sent once a second: a figure 2 to 3 s old on the host's screen, and
+// between two guests not the round trip between them at all (each game sends its player's updates to every other).
+constexpr double kPingEvery = 0.25;
+struct PingOut {
+    uint32_t seq = 0;
+    uint64_t to = 0;
+    int64_t qpc = 0;
+};
+constexpr uint32_t kPingSlots = 128;  // 7 other players at 4 a second: an answer up to 4.5 s late still matches
+PingOut g_pings[kPingSlots];
+uint32_t g_ping_seq = 0;
 std::vector<std::pair<int, bool>> g_flag_queue;
 int g_host_coop_players = 1;
 RestPoint g_rest;
@@ -3466,6 +3479,9 @@ std::string describe(const CopyLook& c) {
 // smoothing, and whether their gait (walk, run, sprint) is fresh. For the 2026-11-01 report of a guest who rejoined
 // after two invasions: on every other screen they walked or ran, stopped and went on, over and over (not the sliding of
 // before: their body could not be pushed through).
+// The smoothing, and the two things it follows (the jitter, and the late tail: the latest an update came lately),
+// with our round trips to the player over the same 15 s: until the 2026-11-02 test the line came only above 60 ms, and
+// a minute after the Asylum Demon with the smoothing up on a guest's screen and the ping low left nothing in the log.
 void player_net_watch() {
     static double last = 0;
     static int lines = 0;
@@ -3477,18 +3493,23 @@ void player_net_watch() {
         uint32_t manip = 0;
         netrate::CopyStats st;
         if (!read32(chr + 0x2C, &manip) || !manip || !netrate::copy_stats(manip, &st)) continue;
-        const PeerInfo* p = nullptr;
-        for (const auto& q : g_peers) p = q.id == id ? &q : p;
+        PeerInfo* p = nullptr;
+        for (auto& q : g_peers) p = q.id == id ? &q : p;
         if (!p) continue;
+        const int rtt_min = p->rtt_min, rtt_max = p->rtt_max;
+        p->rtt_min = p->rtt_max = -1;
         const bool gait_fresh = p->gait >= 0 && now() - p->gait_at < 1.5;
         const double rate = st.updates / window;
-        const bool uneven = st.stalls >= 8 || st.smoothing_ms > 60 || st.jitter_ms > 15 || st.max_gap_ms > 250 ||
+        const bool uneven = st.stalls >= 8 || st.smoothing_ms > 35 || st.jitter_ms > 15 || st.max_gap_ms > 250 ||
                             (!gait_fresh && p->gait_at > 0);
         if (!uneven) continue;
         ++lines;
+        char rtt[48] = "none answered";
+        if (rtt_min > 0) std::snprintf(rtt, sizeof(rtt), "%d to %d ms", rtt_min, rtt_max);
         LOG_INFO("[coop] %s's character here, last %.0f s: %.1f updates a second (mean gap %d ms, longest %d ms), %d "
-                 "stalls (%d in a slow frame of ours), jitter %d ms, smoothing %d ms, gait %d %s", p->name.c_str(), window,
-                 rate, st.gap_ms, st.max_gap_ms, st.stalls, st.stalls_slow, st.jitter_ms, st.smoothing_ms, p->gait,
+                 "stalls (%d in a slow frame of ours), smoothing %d ms (jitter %d ms, late tail %d ms), round trip %s, "
+                 "gait %d %s", p->name.c_str(), window, rate, st.gap_ms, st.max_gap_ms, st.stalls, st.stalls_slow,
+                 st.smoothing_ms, st.jitter_ms, st.tail_ms, rtt, p->gait,
                  gait_fresh ? "(fresh)" : p->gait_at > 0 ? "(stale: the game's own guess)" : "(never heard)");
     }
 }
@@ -4276,18 +4297,27 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kPong: {
             Simple m;
-            if (!as(&m) || from != g_host || g_ping_qpc == 0) return;
-            // GetTickCount jumps by about 15 ms, so a fast reply was stored as 0 and both nameplates
-            // showed 0ms until the next sample. The counter here is the guest's own round trip.
+            if (!as(&m) || m.value == 0) return;
+            PingOut& out = g_pings[m.value % kPingSlots];
+            if (out.seq != m.value || out.to != from) return;  // not ours, or answered already
+            // Timed with the performance counter: GetTickCount jumps by about 15 ms, so a fast reply read as 0.
             LARGE_INTEGER now_q{}, freq{};
             QueryPerformanceCounter(&now_q);
             QueryPerformanceFrequency(&freq);
-            const int64_t delta = now_q.QuadPart - g_ping_qpc;
-            g_ping_qpc = 0;
+            const int64_t delta = now_q.QuadPart - out.qpc;
+            out = PingOut{};
             if (delta <= 0 || freq.QuadPart <= 0) return;
-            const int64_t ms = (delta * 1000) / freq.QuadPart;
-            if (ms >= 10000) return;
-            g_ping_ms = ms < 1 ? 1 : static_cast<int>(ms);
+            const int64_t ms64 = (delta * 1000) / freq.QuadPart;
+            if (ms64 >= 10000) return;
+            const int ms = ms64 < 1 ? 1 : static_cast<int>(ms64);
+            if (g_role == Role::Guest && from == g_host) g_ping_ms = ms;
+            for (auto& p : g_peers) {
+                if (p.id != from) continue;
+                p.rtt_ms = ms;
+                p.rtt_at = now();
+                if (p.rtt_min < 0 || ms < p.rtt_min) p.rtt_min = ms;
+                if (ms > p.rtt_max) p.rtt_max = ms;
+            }
             break;
         }
         default:
@@ -5359,15 +5389,21 @@ void tick() {
             g_last_info = now();
             send_info();
         }
-        if (g_role == Role::Guest && g_host && now() - g_last_ping > 2.0) {
+        if (now() - g_last_ping >= kPingEvery) {
             g_last_ping = now();
             LARGE_INTEGER qpc{};
             QueryPerformanceCounter(&qpc);
-            g_ping_qpc = qpc.QuadPart;
-            Simple p{};
-            fill_header(&p, kPing);
-            p.value = GetTickCount();
-            send_to(g_host, p, false);
+            const uint64_t me = steam::self();
+            for (uint64_t to : steam::lobby_members(g_lobby)) {
+                // (A host answers only the players it let in, and so times only those.)
+                if (to == me || is_lost(to) || (g_role == Role::Host && !admitted(to))) continue;
+                if (++g_ping_seq == 0) ++g_ping_seq;  // 0 is no ping
+                g_pings[g_ping_seq % kPingSlots] = PingOut{g_ping_seq, to, qpc.QuadPart};
+                Simple p{};
+                fill_header(&p, kPing);
+                p.value = g_ping_seq;
+                send_to(to, p, false);
+            }
         }
     }
 }
@@ -5961,14 +5997,20 @@ int chr_smoothing(uint32_t chr) {
     return chr && read32(chr + 0x2C, &manip) ? netrate::smoothing_ms(manip) : -1;
 }
 
+// The round trip shown for player `p`: our own to them, when one came in the last 3 s; else (a player whose answers do
+// not come) a guest's own to its host, or the one `p` reports, theirs to their host.
+int shown_ping(const PeerInfo& p) {
+    if (p.rtt_ms > 0 && now() - p.rtt_at < 3.0) return p.rtt_ms;
+    if (g_role == Role::Guest && p.id == g_host) return g_ping_ms;
+    return p.ping_ms;
+}
+
 // The text for player `p`'s floating bar; `mine` picks its buffers, `chr` is their character here (0 unknown).
 const wchar_t* plate_text(const PeerInfo& p, int mine, uint32_t chr) {
     const int mode = g_cfg.overhead_display;
     const std::wstring shown_as = shown_name(p).substr(0, 16);
     const wchar_t* who = shown_as.c_str();
-    int ping = p.ping_ms;
-    // The host does not measure a round trip. A guest's own measurement is the host's ping.
-    if (g_role == Role::Guest && p.id == g_host) ping = g_ping_ms;
+    const int ping = shown_ping(p);
     wchar_t ms[16] = L"--ms";
     if (ping > 0) swprintf_s(ms, L"%dms", ping);
     const int side = g_nameplate_n[mine] % 3;
@@ -6230,7 +6272,7 @@ std::vector<std::wstring> panel_lines(int mode) {
         std::wstring line = shown_name(p);
         if (p.invader) line += L" (invader)";
         if (p.dead) line += L" (dead)";
-        line += detail(p.soul_level, p.deaths, p.id == g_host || g_role == Role::Host ? p.ping_ms : -1);
+        line += detail(p.soul_level, p.deaths, shown_ping(p));
         out.push_back(line);
     }
     return out;

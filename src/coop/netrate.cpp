@@ -702,6 +702,7 @@ bool copy_stats(uint32_t manip, CopyStats* out) {
     out->stalls = t->stalls;
     out->stalls_slow = t->stalls_slow;
     out->max_gap_ms = static_cast<int>(t->max_gap * 1000.0f + 0.5f);
+    out->tail_ms = static_cast<int>(t->tail * 1000.0 + 0.5);
     t->updates = 0;
     t->jumps = 0;
     t->stalls = 0;

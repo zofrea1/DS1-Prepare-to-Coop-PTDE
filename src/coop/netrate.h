@@ -48,6 +48,7 @@ struct CopyStats {
     int stalls = 0;      // updates that came only after the copy had covered the one before (it stood meanwhile)
     int stalls_slow = 0; // of them, taken in a slow frame of ours (the stand was inside our own hitch)
     int max_gap_ms = 0;  // the longest gap since the last read
+    int tail_ms = 0;     // a player's late tail now (the latest an update came lately, decaying)
 };
 bool copy_stats(uint32_t manip, CopyStats* out);
 // Seconds since a copy's network manipulator last took an update, -1 when it has taken none we know of.

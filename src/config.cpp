@@ -34,6 +34,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.guest_world_events = settings_parse_bool(val);
         } else if (key == "bonfireanimations") {
             c.bonfire_animations = settings_parse_bool(val);
+        } else if (key == "sharedroppeditems") {
+            c.share_items = settings_parse_bool(val);
         } else if (key == "overheadplayerdisplay") {
             c.overhead_display = std::atoi(val.c_str());
         } else if (key == "networktickrate") {

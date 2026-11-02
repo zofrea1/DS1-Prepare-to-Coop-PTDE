@@ -45,6 +45,8 @@ struct CopyStats {
     int jitter_ms = 0;
     int gap_ms = 0;
     float speed = 0;
+    int stalls = 0;      // updates that came only after the copy had covered the one before (it stood meanwhile)
+    int max_gap_ms = 0;  // the longest gap since the last read
 };
 bool copy_stats(uint32_t manip, CopyStats* out);
 // Seconds since a copy's network manipulator last took an update, -1 when it has taken none we know of.

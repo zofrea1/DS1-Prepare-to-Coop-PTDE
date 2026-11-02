@@ -26,3 +26,4 @@ src\coop\netrate.cpp
 src\coop\players.cpp
 src\coop\partylist.cpp
 src\coop\updates.cpp
+src\coop\itemshare.cpp

@@ -15,6 +15,7 @@
 #include "rules.h"
 #include "spectate.h"
 #include "steam.h"
+#include "itemshare.h"
 #include "summons.h"
 #include "talk.h"
 #include "text.h"
@@ -109,6 +110,10 @@ enum MsgType : uint8_t {
     kNpcSummons = 35,    // 1.4.0, co-op guest -> host: the NPC phantoms my own game summoned (NpcPhantomsMsg); the
                          // host takes each into its party as its own (the world's) once that NPC is in its world, and
                          // names them in its list (kNpcPhantoms) meanwhile
+    kItemDrop = 36,      // 1.4.0, co-op player -> all (through the host): an item I dropped lies on your floor too
+                         // (ItemDropMsg; itemshare.cpp), and the host's list to a guest who arrives
+    kItemClaim = 37,     // 1.4.0, co-op guest -> host: I would pick up this shared drop (ItemKeyMsg)
+    kItemTaken = 38,     // 1.4.0, host -> co-op guests: this shared drop is that player's (ItemTakenMsg); off the floor
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -328,6 +333,24 @@ struct EventLeadMsg {
     uint8_t start;    // 1 the move began, 0 it is over
     uint64_t leader;  // the game that moves it (Steam id); the host relays it
 };
+struct ItemDropMsg {
+    Header h;
+    uint64_t origin;  // who dropped it: the drop is (origin, seq) in every game
+    uint32_t seq;
+    int32_t map;      // where it lies (area << 24 | block << 16)
+    uint8_t entry[itemshare::kEntryBytes];  // the item manager's entry (the item, its count and durability, the spot)
+};
+struct ItemKeyMsg {
+    Header h;
+    uint64_t origin;
+    uint32_t seq;
+};
+struct ItemTakenMsg {
+    Header h;
+    uint64_t origin;
+    uint32_t seq;
+    uint64_t taker;  // the player who has it now
+};
 struct NpcTalkMsg {
     Header h;
     int32_t talk;    // the NPC's talk id (its MSB part's; not its entity id)
@@ -501,6 +524,7 @@ struct Refusals {
 Refusals g_refusals;
 // Guest: this world's join has had its one retry (retry_join).
 bool g_join_retried = false;
+bool g_join_seen = false;  // the game's session left state 0 since our join was handed to it (Step::Joining)
 std::vector<Pending> g_pending;
 std::vector<PeerInfo> g_peers;
 // Host: the players it let in (a Welcome with kOk). Steam passes on packets from anyone in the lobby, so the host
@@ -1519,6 +1543,7 @@ void host_open_lobby() {
         steam::set_lobby_data(lobby, "ptdesc_taunt", "0");  // stays 0: see kFingersWeight
         steam::set_lobby_data(lobby, "ptdesc_fingers", "0");
         steam::set_lobby_data(lobby, "ptdesc_boss", "0");
+        steam::set_lobby_data(lobby, "ptdesc_items", g_cfg.share_items ? "1" : "0");
         steam::set_lobby_joinable(lobby, true);
         publish_cooldown();  // a cooldown from our last session goes on
         g_away_since = 0;
@@ -1631,6 +1656,7 @@ bool invader_arrival(game::InvasionPoint* ip) {
 }
 
 void send_world_globals(uint64_t to);
+void send_live_drops(uint64_t to);
 
 void host_answer(const Pending& p) {
     Welcome w{};
@@ -1733,8 +1759,24 @@ void host_answer(const Pending& p) {
     if (w.status == kOk && !p.invade) send_world_globals(p.from);
     const PeerInfo* who = nullptr;
     for (const auto& q : g_peers) who = q.id == p.from ? &q : who;
-    LOG_INFO("[coop] Answered %s (%s, character '%s'): status %u", steam::persona(p.from).c_str(),
-             p.invade ? "invader" : "guest", who ? utf8(who->char_name).c_str() : "", w.status);
+    // Why, in words: an older player's game holds four (1.3.0 and before), so it is told "full" by a session of four
+    // players, or of four and an invader (2026-11-01: an invader of 1.3.0 knocked seven times on a session of five,
+    // each time answered full and gone from the lobby within a second, as its game then looks for another world).
+    char why[96] = "";
+    switch (w.status) {
+        case kOk: std::snprintf(why, sizeof(why), "welcome"); break;
+        case kFull:
+            std::snprintf(why, sizeof(why), "full: %d player(s) here, room for %d (their game holds %d)", in_session,
+                          room, p.max_players);
+            break;
+        case kBusy: std::snprintf(why, sizeof(why), "busy (a load, the title screen, or our player is down)"); break;
+        case kRefused: std::snprintf(why, sizeof(why), "refused"); break;
+        case kBossFight: std::snprintf(why, sizeof(why), "a boss fight"); break;
+        case kCooldown: std::snprintf(why, sizeof(why), "invasion cooldown, %u s left", wait); break;
+        default: break;
+    }
+    LOG_INFO("[coop] Answered %s (%s, character '%s'): status %u, %s", steam::persona(p.from).c_str(),
+             p.invade ? "invader" : "guest", who ? utf8(who->char_name).c_str() : "", w.status, why);
 }
 
 // The party counts the game keeps beside the session (PartyMemberInfo +0x10/+0x14, slot +0x7C). The game
@@ -2777,6 +2819,7 @@ void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
     }
     // Deaths in the host's world respawn at the host's last bonfire (until the guest rests at one there).
     if (w.bonfire >= 0 && !g_invade) *ptr<int>(game::game_man() + game::kGmLastBonfire) = w.bonfire;
+    g_join_seen = false;
     set_step(Step::Joining);
     say(g_invade ? kMsgBreakInStart : kMsgGuestStart);
     LOG_INFO("[coop] Joining %s: map %08X bonfire %d, own type %d, home bonfire %d",
@@ -2839,6 +2882,15 @@ void guest_go_home(const std::wstring& why, const char* reason) {
     } else {
         finish(L"");
     }
+}
+
+// What guest_on_welcome set up for a join that did not happen, taken back: our own last bonfire (a co-op guest's death
+// respawns at the host's), the join step and the guest's or invader's rules. Until 1.4.0 a join that ran out of time
+// left the host's bonfire as our own last one.
+void undo_join_setup() {
+    if (!g_invade && g_home_bonfire >= 0) *ptr<int>(game::game_man() + game::kGmLastBonfire) = g_home_bonfire;
+    game::set_join_step(0);
+    reset_rules();
 }
 
 // The game session of our join ended before its load, with us still at home: we knock once more. In the 2026-10-25
@@ -3079,11 +3131,23 @@ void guest_tick() {
             break;
         case Step::Joining: {
             const int s = game::session_state();
+            if (s != 0) g_join_seen = true;
             if (s == 6) {
                 set_step(Step::Loading);
+            } else if (s == 0 && g_join_seen) {
+                // The game's own join began and ended again before its move into the other world (its idle timer
+                // gave up on a host who fell as we came: 2026-11-01, an invasion that then waited out the 40 s below
+                // with nothing left to wait for). Ask that world once more (it says if its player is down), else the
+                // next world, else we are done.
+                LOG_INFO("[coop] The game ended our join before its load (join step %d)", game::join_step());
+                if (!retry_join()) {
+                    undo_join_setup();
+                    if (!try_next_world("the join fell through")) finish(kMsgConnectTimeout);
+                }
             } else if (s == 5 || in_step > 40.0) {
                 rules::state().leaving = true;
                 if (s != 0) game::leave_session();
+                undo_join_setup();
                 finish(kMsgConnectTimeout);
             }
             break;
@@ -3365,6 +3429,38 @@ std::string describe(const CopyLook& c) {
                   static_cast<int32_t>(c.ent_state), c.ent_flags, c.f1fd, c.f1fe, c.f3c4, c.rate, c.hp,
                   c.floor ? "yes" : "none", c.phys ? "yes" : "none", c.held);
     return buf;
+}
+
+// How another player's character is drawn here, every 15 s, when it looks uneven: the updates taken, the longest gap,
+// the "stalls" (an update that came only after the copy had covered the one before, so it stood until it came), the
+// smoothing, and whether their gait (walk, run, sprint) is fresh. For the 2026-11-01 report of a guest who rejoined
+// after two invasions: on every other screen they walked or ran, stopped and went on, over and over (not the sliding of
+// before: their body could not be pushed through).
+void player_net_watch() {
+    static double last = 0;
+    static int lines = 0;
+    if (now() - last < 15.0 || lines >= 150 || g_role == Role::None || game::loading()) return;
+    const double window = last > 0 ? now() - last : 0;
+    last = now();
+    if (window <= 0) return;
+    for (const auto& [chr, id] : g_chr_peer) {
+        uint32_t manip = 0;
+        netrate::CopyStats st;
+        if (!read32(chr + 0x2C, &manip) || !manip || !netrate::copy_stats(manip, &st)) continue;
+        const PeerInfo* p = nullptr;
+        for (const auto& q : g_peers) p = q.id == id ? &q : p;
+        if (!p) continue;
+        const bool gait_fresh = p->gait >= 0 && now() - p->gait_at < 1.5;
+        const double rate = st.updates / window;
+        const bool uneven = st.stalls >= 8 || st.smoothing_ms > 60 || st.jitter_ms > 15 || st.max_gap_ms > 250 ||
+                            (!gait_fresh && p->gait_at > 0);
+        if (!uneven) continue;
+        ++lines;
+        LOG_INFO("[coop] %s's character here, last %.0f s: %.1f updates a second (mean gap %d ms, longest %d ms), %d "
+                 "stalls, jitter %d ms, smoothing %d ms, gait %d %s", p->name.c_str(), window, rate, st.gap_ms,
+                 st.max_gap_ms, st.stalls, st.jitter_ms, st.smoothing_ms, p->gait,
+                 gait_fresh ? "(fresh)" : p->gait_at > 0 ? "(stale: the game's own guess)" : "(never heard)");
+    }
 }
 
 // The other players' characters are updated every frame wherever they stand, as the event command "Set Network
@@ -3673,6 +3769,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 if (!m.invader) {
                     send_world_globals(from);
                     send_world_flags(from);
+                    send_live_drops(from);
                     g_world_sent.clear();  // what our world has, to the newcomer (and again to the others)
                     g_world_polled = 0;
                 } else if (std::find(g_invaders_in.begin(), g_invaders_in.end(), from) == g_invaders_in.end()) {
@@ -3954,6 +4051,35 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!g_invade) rules::remote_anim_done(m.entity, m.anim);
             break;
         }
+        case kItemDrop: {
+            ItemDropMsg m;
+            if (!as(&m) || peer(from)->invader || g_invade) return;
+            if (g_role == Role::Host) {
+                if (m.origin != from || !admitted(from)) return;
+                broadcast(m, true, from);
+            } else if (from != g_host || g_step != Step::InWorld) {
+                return;
+            }
+            itemshare::Drop d;
+            d.origin = m.origin;
+            d.seq = m.seq;
+            d.map = m.map;
+            std::memcpy(d.entry, m.entry, sizeof(d.entry));
+            itemshare::remote_drop(d);
+            break;
+        }
+        case kItemClaim: {
+            ItemKeyMsg m;
+            if (!as(&m) || g_role != Role::Host || peer(from)->invader || !admitted(from)) return;
+            itemshare::remote_claim(from, m.origin, m.seq);
+            break;
+        }
+        case kItemTaken: {
+            ItemTakenMsg m;
+            if (!as(&m) || g_role != Role::Guest || from != g_host || g_invade) return;
+            itemshare::remote_taken(m.origin, m.seq, m.taker);
+            break;
+        }
         case kEventLead: {
             EventLeadMsg m;
             if (!as(&m) || peer(from)->invader) return;
@@ -4226,6 +4352,70 @@ void send_event_lead(uint32_t handle, int entity, int anim, bool start) {
     } else if (g_host && g_step == Step::InWorld && !g_invade) {
         send_to(g_host, m);
     }
+}
+
+// ---------------------------------------------------------------- shared drops (itemshare.cpp)
+// A drop of ours, or one the host passes on (relayed in on_message): through the host, as the other world news.
+void send_item_drop(const itemshare::Drop& d) {
+    if (g_role == Role::None || !g_lobby || g_invade) return;
+    ItemDropMsg m{};
+    fill_header(&m, kItemDrop);
+    m.origin = d.origin;
+    m.seq = d.seq;
+    m.map = d.map;
+    std::memcpy(m.entry, d.entry, sizeof(m.entry));
+    if (g_role == Role::Host) {
+        broadcast(m);
+    } else if (g_host && g_step == Step::InWorld) {
+        send_to(g_host, m);
+    }
+}
+
+void send_item_claim(uint64_t origin, uint32_t seq) {
+    if (g_role != Role::Guest || !g_host || g_step != Step::InWorld || g_invade) return;
+    ItemKeyMsg m{};
+    fill_header(&m, kItemClaim);
+    m.origin = origin;
+    m.seq = seq;
+    send_to(g_host, m);
+}
+
+void send_item_taken(uint64_t origin, uint32_t seq, uint64_t taker) {
+    if (g_role != Role::Host || !g_lobby) return;
+    ItemTakenMsg m{};
+    fill_header(&m, kItemTaken);
+    m.origin = origin;
+    m.seq = seq;
+    m.taker = taker;
+    broadcast(m);
+}
+
+// The host: what still lies on the floor, to a co-op guest who arrived.
+void send_live_drops(uint64_t to) {
+    for (const itemshare::Drop& d : itemshare::live()) {
+        ItemDropMsg m{};
+        fill_header(&m, kItemDrop);
+        m.origin = d.origin;
+        m.seq = d.seq;
+        m.map = d.map;
+        std::memcpy(m.entry, d.entry, sizeof(m.entry));
+        send_to(to, m);
+    }
+}
+
+// Whether we share drops now: a host in its own session, or a co-op guest in the world of a host whose lobby says it
+// shares them (ptdesc_items; a host before 1.4.0, or with ShareDroppedItems off, would never answer a request).
+void itemshare_tick() {
+    static double asked = 0;
+    static bool host_shares = false;
+    if (g_role == Role::Guest && g_lobby && now() - asked >= 2.0) {
+        asked = now();
+        host_shares = steam::lobby_data(g_lobby, "ptdesc_items") == "1";
+    }
+    const bool host = g_role == Role::Host && g_lobby && g_cfg.share_items;
+    const bool guest = g_role == Role::Guest && g_lobby && g_step == Step::InWorld && !g_invade && host_shares;
+    itemshare::set_session(host || guest, host, steam::self());
+    itemshare::tick();
 }
 
 // An NPC's line in our game, for the players near that NPC in theirs (talk.cpp). Invaders hear them too.
@@ -4746,6 +4936,7 @@ void set_callbacks() {
     rules::set_anim_done_listener(&send_anim_done);
     rules::set_event_lead_listener(&send_event_lead);
     talk::set_listener(&send_npc_talk);
+    itemshare::set_out(&send_item_drop, &send_item_claim, &send_item_taken);
     rules::set_cutscene_listener(&on_cutscene);
     rules::set_separation_listener([](bool host) { g_separation = host ? 2 : 1; });
     steam::on_lobby_member([](uint64_t lobby, uint64_t user, bool entered) {
@@ -4997,6 +5188,8 @@ void tick() {
     }
     reconcile_ceremonies();
     remote_characters_upkeep();
+    player_net_watch();
+    itemshare_tick();
     rules::tick();
     {
         const auto& st = rules::state();
@@ -5805,6 +5998,16 @@ int __stdcall bar_answer(uint32_t rec) {
             if (p.id == it->second && p.disguised) return 2;
         }
     }
+    // A character just made holds anything where its effect list goes until its first updates: each frame's look
+    // into it faulted (first-chance, handled) hundreds of times as players came back after a load (2026-11-01, every
+    // game, XINPUT1_3+0x1F36D from find_effect). Its effects are read from its second second on.
+    // (No bars are asked for during a load: a gap in the calls starts the list over, as a load frees every character.)
+    static std::map<uint32_t, double> first_seen;
+    static double last_call = 0;
+    if (now() - last_call > 0.5 || first_seen.size() > 64) first_seen.clear();
+    last_call = now();
+    const auto seen = first_seen.emplace(chr, now()).first;
+    if (now() - seen->second < 1.0) return 0;
     if (world::has_effect(chr, kChameleonEffect)) return 2;
     uint8_t dark = 0;
     return read8(rec + 0x1C, &dark) && dark ? 1 : 0;

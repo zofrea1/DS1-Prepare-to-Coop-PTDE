@@ -15,6 +15,7 @@
 #include "session.h"
 #include "spectate.h"
 #include "steam.h"
+#include "itemshare.h"
 #include "summons.h"
 #include "talk.h"
 #include "text.h"
@@ -409,6 +410,11 @@ void coop_install(const CoopConfig& config) {
     coop::deathtext::install();
     coop::drops::install();
     coop::talk::install();
+    if (coop::itemshare::install()) {
+        coop::itemshare::set_enabled(g_cfg.share_items);
+        LOG_INFO("[coop] Dropped items are shared with the co-op players: %s (ShareDroppedItems)",
+                 g_cfg.share_items ? "yes" : "no");
+    }
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");
@@ -442,6 +448,7 @@ void coop_install(const CoopConfig& config) {
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
+    cfg.share_items = g_cfg.share_items;
     // MaxPlayers is the session's limit (2 .. 8); the game's structures hold at least four, and more only when the
     // patches went in (players::max_players()), so a session never admits more than they hold.
     cfg.max_players = std::min(std::max(2, std::min(coop::players::kMaxPlayers, g_cfg.max_players)),

@@ -17,6 +17,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -323,6 +324,11 @@ bool apply(uint32_t chr, int id) {
 // 2026-10-31 and 2026-11-01 tests: our own character's checks, the Crimson Blossoms' debuff and Chameleon, in its
 // first frames, before any other player's character was back): only the game's own object is read.
 constexpr uint32_t kSpecialEffectVtable = 0x011932B8;
+// That vtable test still reads the pointer there, and in the first frames after a load it pointed at freed memory: the
+// guarded read faulted (first-chance, handled) hundreds of times in every game of the 2026-11-01 test. The checks
+// that run on their own (the debuff, Chameleon) wait until 1.5 s after a load (tick).
+double g_settled_at = 0;  // when the last load ended (0 while loading)
+bool settled() { return g_settled_at > 0 && now() - g_settled_at >= 1.5; }
 
 uint32_t find_effect(uint32_t chr, int id, uint32_t* ctrl_out) {
     uint32_t ctrl = 0, node = 0, vt = 0;
@@ -921,8 +927,50 @@ struct LowHp {
 };
 std::map<uint32_t, LowHp> g_low_hp;
 int g_low_hp_lines = 0;
+std::set<uint32_t> g_seen_up;  // enemies seen with more than 1 HP since the last load
 
-void watch_low_hp(uint32_t chr, int h, int m) {
+// An enemy that keeps changing hands between games: its AI starts over in each, so it turns, stops and walks off again.
+// For the 2026-11-01 report of a hollow that moved oddly near the Undead Burg's bonfire while two players stood there
+// for a long while. Logged once per enemy when it changed hands six times within 30 s, with how far we are from it.
+struct Hands {
+    int mover = -1;
+    std::vector<double> changes;
+    bool told = false;
+};
+std::map<uint32_t, Hands> g_hands;
+int g_hands_lines = 0;
+
+void watch_hands(uint32_t chr) {
+    uint32_t current = 0, own_ai = 0, net_ai = 0;
+    if (!read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai)) return;
+    const int mover = current && current == own_ai ? 1 : current && current == net_ai ? 2 : 0;
+    if (g_hands.size() > 1024) g_hands.clear();
+    Hands& h = g_hands[chr];
+    if (h.mover == mover) return;
+    const bool first = h.mover < 0;
+    h.mover = mover;
+    if (first || h.told) return;
+    const double t = now();
+    h.changes.push_back(t);
+    h.changes.erase(std::remove_if(h.changes.begin(), h.changes.end(), [t](double c) { return t - c > 30.0; }),
+                    h.changes.end());
+    if (h.changes.size() < 6 || g_hands_lines >= 30) return;
+    h.told = true;
+    ++g_hands_lines;
+    uint32_t entity = 0;
+    read32(chr + 0x208, &entity);
+    game::Vec3 at{}, me{};
+    const bool where = game::chr_position(chr, &at) && game::position(&me, nullptr);
+    const float dx = at.x - me.x, dy = at.y - me.y, dz = at.z - me.z;
+    LOG_INFO("[coop] Enemy %08X (entity %d) changed hands %zu times in 30 s here (now moved by %s); at (%.1f, %.1f, "
+             "%.1f), %.0f m from us", chr, static_cast<int>(entity), h.changes.size(),
+             mover == 1 ? "this game" : mover == 2 ? "another game" : "neither", at.x, at.y, at.z,
+             where ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0f);
+}
+
+// `was_up`: we saw it with more than 1 HP at the last look. One already dead when we first saw it (the dead of a load,
+// inactive here: rate -1) is not watched: in the 2026-11-01 test such enemies used up each game's 20 lines.
+void watch_low_hp(uint32_t chr, int h, int m, bool was_up) {
     if (h > 1 || m <= 0) {
         g_low_hp.erase(chr);
         return;
@@ -931,7 +979,7 @@ void watch_low_hp(uint32_t chr, int h, int m) {
     uint32_t ctrl = 0, action = 0xFFFFFFFF;
     if (read32(chr + 0x28, &ctrl) && ctrl) read32(ctrl + 0x350, &action);
     LowHp& w = g_low_hp[chr];
-    if (w.since == 0) w = LowHp{t, static_cast<int>(action), t, false};
+    if (w.since == 0) w = LowHp{t, static_cast<int>(action), t, !was_up};
     if (static_cast<int>(action) != w.action) {
         w.action = static_cast<int>(action);
         w.action_at = t;
@@ -966,8 +1014,11 @@ void enemy_hp_tick() {
     std::set<uint32_t> seen;
     each_enemy([&](uint32_t chr) {
         const int h = hp(chr), m = max_hp(chr);
-        watch_low_hp(chr, h, m);
         auto it = g_enemy_hp.find(chr);
+        const bool was_up = g_seen_up.count(chr) > 0;
+        if (h > 1 && g_seen_up.size() < 4096) g_seen_up.insert(chr);
+        watch_low_hp(chr, h, m, was_up);
+        watch_hands(chr);
         if (h <= 0) {
             if (it != g_enemy_hp.end() && it->second.second > 0 && it->second.first * 10 > it->second.second &&
                 ++g_hp_left_logs <= 40) {
@@ -1696,6 +1747,11 @@ void set_host_scaling(const int* s) {
 }
 
 void tick() {
+    if (game::loading()) {
+        g_settled_at = 0;
+    } else if (g_settled_at == 0) {
+        g_settled_at = now();
+    }
     bonfire_tick();
     pos_drain_tick();
     const uint32_t me = game::player();
@@ -1708,7 +1764,7 @@ void tick() {
     if (g_wither_pending && me && !game::loading()) wither_blossoms(g_wither_pending, g_wither_tell);
     // The debuff follows the Crimson Blossoms in the inventory (effects do not survive a map load).
     if (me && alive && !game::loading()) {
-        debuff_tick(me);
+        if (settled()) debuff_tick(me);
     } else if (!me) {
         g_debuff_applied = 0;
     }
@@ -1787,6 +1843,8 @@ void tick() {
         g_base_max.clear();
         g_scaled_at.clear();
         g_low_hp.clear();
+        g_seen_up.clear();
+        g_hands.clear();
         g_forced_max.clear();
     }
 }
@@ -1891,7 +1949,7 @@ bool local_dead() {
     return me && hp(me) <= 0;
 }
 
-bool has_effect(uint32_t chr, int id) { return find_effect(chr, id, nullptr) != 0; }
+bool has_effect(uint32_t chr, int id) { return settled() && find_effect(chr, id, nullptr) != 0; }
 
 bool in_limbo() { return g_limbo; }
 

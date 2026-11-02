@@ -31,6 +31,9 @@ struct CoopConfig {
     bool guest_world_events = true;
     // The other players see your bonfire animations (sitting, kindling, Reverse Hollowing).
     bool bonfire_animations = true;
+    // An item a co-op player drops lies on every co-op player's floor; the first to pick it up has it (itemshare.cpp).
+    // The host's decides for its session.
+    bool share_items = true;
     // Text over other players: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul level,
     // ping and the smoothing their character is drawn with.
     int overhead_display = 5;

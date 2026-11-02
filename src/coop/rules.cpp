@@ -2739,7 +2739,17 @@ void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t ty
         }
         return;
     }
-    if ((static_cast<uint32_t>(theirs) & 0xFFFF0000) == static_cast<uint32_t>(map)) return;
+    if ((static_cast<uint32_t>(theirs) & 0xFFFF0000) == static_cast<uint32_t>(map)) {
+        // Taken: this game's copy of the event goes on from the line that game reached, its conditions testing that
+        // player from now on. Logged the first two times for each event (the sleeping ambush, track_sleepers).
+        static std::map<int, int> taken;
+        static int lines = 0;
+        if (taken.size() < 200 && ++taken[id] <= 2 && ++lines <= 100) {
+            LOG_INFO("[coop] Event %d: a run from player %d (in its map) taken here: line %u -> %u", id, by, at,
+                     *ptr<uint16_t>(pc));
+        }
+        return;
+    }
     *ptr<uint16_t>(pc) = at;
     *ptr<uint32_t>(e + 0x44) = who;
     *ptr<uint32_t>(e + 0x38) = seq;
@@ -3984,12 +3994,15 @@ uint32_t net_priority(uint32_t chr) {
     return bid;
 }
 
+void note_sleeper_bid(uint32_t chr, uint32_t bid);
+
 uint32_t __stdcall hk_net_priority(uint32_t chr) {
     const uint32_t bid = net_priority(chr);
     if (chr == g_watch_chr) {
         g_watch_bid = bid;
         g_watch_bid_at = seconds();
     }
+    note_sleeper_bid(chr, bid);
     return bid;
 }
 
@@ -4023,6 +4036,166 @@ void track_watched_enemies() {
         LOG_INFO("[coop] Enemy %d: moved by %s, at (%.1f, %.1f, %.1f), %.0f m from us%s", entity,
                  control == 1 ? "this game (own AI)" : control == 2 ? "another game (network)" : "neither (?)", at.x,
                  at.y, at.z, dist3(me, at), (no_sync & 0xFF) ? ", no net sync" : "");
+    }
+}
+
+// ---------------------------------------------------------------- enemies an event keeps asleep
+// An ambush is a map event that switches an enemy's AI off at load and on again when its condition passes: the Undead
+// Burg's hollow behind the crates (11015110: 1010102, attack 3000 once the player is within 5 m, then AI on). In the
+// 2026-11-01 test it never jumped in any game, host or guest, alone or not: it stood a few seconds and then fought as a
+// plain hollow, and no game logged its event's animation or its AI being switched on. So for each enemy whose AI an
+// event switched off here: once we come within kSleeperNear, where that event stands (its line, the player its
+// conditions test: 10000 ours, 10001 on another player's), the distance as its test takes it (EcTestDistance 0xBB6740 ->
+// 0xD71480: four components, w included), our bid and who moves it; then any change of mover or AI while we are near.
+constexpr float kSleeperNear = 8.0f;
+struct Sleeper {
+    uint32_t chr = 0;
+    uint32_t ev = 0;  // the event instance that switched it off (alive while it runs; read guarded)
+    int event = 0;
+    double since = 0;
+    bool told = false;
+    int mover = -1;  // 1 this game, 2 another, 0 neither
+    bool ai = false;
+    uint32_t bid = 0;
+    double bid_at = -100;
+};
+std::map<int, Sleeper> g_sleepers;  // entity -> sleeper
+int g_sleeper_lines = 0;
+
+// The position a distance test reads (chr+0x28 -> +0x1C -> +0x10: x, y, z, w).
+bool test_position(uint32_t chr, float out[4]) {
+    uint32_t a = 0, b = 0;
+    if (!chr || !read32(chr + 0x28, &a) || !a || !read32(a + 0x1C, &b) || !b) return false;
+    for (int i = 0; i < 4; ++i) {
+        uint32_t v = 0;
+        if (!read32(b + 0x10 + i * 4, &v)) return false;
+        std::memcpy(&out[i], &v, 4);
+    }
+    return true;
+}
+
+int mover_kind(uint32_t chr) {
+    uint32_t current = 0, own_ai = 0, net_ai = 0;
+    if (!read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai)) return 0;
+    return current == own_ai ? 1 : current == net_ai ? 2 : 0;
+}
+
+void note_sleeper(int entity, uint32_t chr, int state) {
+    if (!state) {
+        if (!g_cur_event || g_sleepers.size() >= 64) return;
+        uint32_t id = 0;
+        read32(g_cur_event + 0x28, &id);
+        Sleeper s;
+        s.chr = chr;
+        s.ev = g_cur_event;
+        s.event = static_cast<int>(id);
+        s.since = seconds();
+        g_sleepers[entity] = s;
+        return;
+    }
+    const auto it = g_sleepers.find(entity);
+    if (it == g_sleepers.end()) return;
+    if (it->second.told && ++g_sleeper_lines <= 120) {
+        LOG_INFO("[coop] Enemy %d: its AI is on again after %.1f s asleep", entity, seconds() - it->second.since);
+    }
+    g_sleepers.erase(it);
+}
+
+void note_sleeper_bid(uint32_t chr, uint32_t bid) {
+    if (g_sleepers.empty()) return;
+    for (auto& [entity, s] : g_sleepers) {
+        if (s.chr != chr) continue;
+        s.bid = bid;
+        s.bid_at = seconds();
+        return;
+    }
+}
+
+// The ambush of the 2026-11-01 report, looked at 3 s after every load: whether its event is already done here (its own
+// flag, 11015110, a temporary one: a load at home clears it, but a guest takes the host's temporary flags with the
+// host's map flags on arrival, and an event that finds it on ends at once with the crates broken and the hollow awake),
+// and the hollow's AI.
+struct Ambush {
+    int event;
+    int enemy;
+};
+constexpr Ambush kWatchedAmbushes[] = {{11015110, 1010102}};
+
+void look_at_ambushes(const char* when) {
+    static int lines = 0;
+    for (const Ambush& a : kWatchedAmbushes) {
+        const uint32_t chr = chr_by_entity(a.enemy);
+        if (!chr || lines >= 40) continue;
+        ++lines;
+        const int mover = mover_kind(chr);
+        LOG_INFO("[coop] Ambush %d, %s: its event's flag is %s here; enemy %d's AI %s, moved by %s", a.event, when,
+                 game::flag(a.event) ? "on (done: no ambush on this load)" : "off", a.enemy,
+                 ai_off_here(chr) ? "off (waiting)" : "on", mover == 1 ? "this game" : mover == 2 ? "another game" : "neither");
+    }
+}
+
+void track_sleepers() {
+    static double last = 0;
+    static bool was_loading = false;
+    static double loaded_at = 0;
+    const double t = seconds();
+    // A load frees the characters and the events; the new map's events switch theirs off during or right after it.
+    const bool loading = game::loading();
+    if (loading && !was_loading) g_sleepers.clear();
+    if (!loading && was_loading) {
+        loaded_at = t;
+        if (g_state.active) look_at_ambushes("as the load ended");
+    }
+    was_loading = loading;
+    if (!loading && loaded_at > 0 && t - loaded_at >= 3.0) {
+        loaded_at = 0;
+        if (g_state.active) look_at_ambushes("3 s after the load");
+    }
+    if (loading || t - last < 0.5 || g_sleepers.empty() || !g_state.active) return;
+    last = t;
+    float me[4] = {};
+    if (!test_position(game::player(), me)) return;
+    for (auto it = g_sleepers.begin(); it != g_sleepers.end();) {
+        Sleeper& s = it->second;
+        if (chr_by_entity(it->first) != s.chr) {
+            it = g_sleepers.erase(it);
+            continue;
+        }
+        float at[4] = {};
+        if (!test_position(s.chr, at)) {
+            ++it;
+            continue;
+        }
+        const float dx = me[0] - at[0], dy = me[1] - at[1], dz = me[2] - at[2], dw = me[3] - at[3];
+        const float d3 = std::sqrt(dx * dx + dy * dy + dz * dz), d4 = std::sqrt(dx * dx + dy * dy + dz * dz + dw * dw);
+        const int mover = mover_kind(s.chr);
+        const bool ai = !ai_off_here(s.chr);
+        char bid[24] = "none lately";
+        if (t - s.bid_at <= 1.0) sprintf_s(bid, "%u", s.bid);
+        if (d3 <= kSleeperNear && !s.told) {
+            s.told = true;
+            uint32_t pc = 0, player = 0;
+            uint16_t line = 0xFFFF;
+            if (read32(s.ev + 0x20, &pc) && pc >= 0x10000) {
+                uint32_t v = 0;
+                if (read32(pc, &v)) line = static_cast<uint16_t>(v & 0xFFFF);
+            }
+            read32(s.ev + 0x44, &player);
+            if (++g_sleeper_lines <= 120) {
+                LOG_INFO("[coop] Enemy %d, asleep %.0f s (its AI switched off by event %d): we are %.1f m from it (%.2f as "
+                         "the event's test counts, w %.2f / %.2f); the event is at line %d, testing player %d; AI here %s, "
+                         "moved by %s, our bid %s", it->first, t - s.since, s.event, d3, d4, me[3], at[3],
+                         line == 0xFFFF ? -1 : static_cast<int>(line), static_cast<int>(player), ai ? "on" : "off",
+                         mover == 1 ? "this game" : mover == 2 ? "another game" : "neither", bid);
+            }
+        } else if (s.told && d3 <= 3 * kSleeperNear && (mover != s.mover || ai != s.ai) && ++g_sleeper_lines <= 120) {
+            LOG_INFO("[coop] Enemy %d (asleep by event %d): now moved by %s, AI here %s; we are %.1f m from it, our bid %s",
+                     it->first, s.event, mover == 1 ? "this game" : mover == 2 ? "another game" : "neither",
+                     ai ? "on" : "off", d3, bid);
+        }
+        s.mover = mover;
+        s.ai = ai;
+        ++it;
     }
 }
 
@@ -5181,6 +5354,7 @@ void __stdcall note_ai_state(int entity, int state) {
     uint32_t team = 0;
     if (!chr || !read32(chr + 0x74, &team)) return;
     if (team != kBossTeam) {
+        note_sleeper(entity, chr, state);
         // Other enemies an event wakes (the Undead Burg's ambushes: a hollow behind crates that jumps at the player
         // within 5 m, 11015110; one that drops in, 11015111), for the 2026-11-01 report of one that seemed to wake as
         // a plain enemy: which run woke it and which game moves it then. The switches off (every load) are not logged.
@@ -5760,6 +5934,7 @@ void tick() {
     track_bloodstain();
     if (local_alive()) g_stain_this_death = false;
     track_watched_enemies();
+    track_sleepers();
     track_boss_control();
     own_gauge_tick();
     boss_handover_tick();

@@ -29,6 +29,7 @@ struct Config {
     int overhead_display = 5;
     int max_players = 4;  // MaxPlayers (2 .. kMaxSessionPlayers), no more than the game holds (players.cpp)
     int net_rate = 6;     // NetworkTickRate: the session's updates a second (netrate.h), sent to the others
+    bool share_items = true;  // ShareDroppedItems (itemshare.cpp): the host's decides for its session
     // Hidden test keys: pretend to speak another protocol / be another version (0 / empty: the real ones).
     int test_protocol = 0;
     std::string test_version;

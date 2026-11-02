@@ -174,6 +174,8 @@ struct Track {
     // For the boss lines (rules.cpp): updates and jumps since they were last read, the enemy's last speed.
     uint16_t updates = 0;
     uint16_t jumps = 0;
+    uint16_t stalls = 0;  // updates that came after the one before was covered: the copy stood until this one came
+    float max_gap = 0;
     float speed = 0;
 };
 constexpr int kTracks = 512;
@@ -215,6 +217,9 @@ Track* note_update(uint32_t manip, double gap, double slack, bool enemy) {
     if (!t) return nullptr;
     t->enemy = enemy;
     const double g = gap > 0 && gap < 2.0 ? gap : 0.0;
+    // The update before this one was covered in t->cover: a gap beyond that (and a frame) left the copy standing.
+    if (g > 0 && t->cover > 0 && g > t->cover + 0.004 && t->stalls < 0xFFFF) ++t->stalls;
+    if (g > t->max_gap) t->max_gap = static_cast<float>(g);
     // The frame this update was taken in: the one our last tick ended, or the time since it, whichever is longer (the
     // tick and the game's character updates come in some order within a frame).
     const double since_tick = g_frame_clock > 0 ? g_clock - g_frame_clock : 0.0;
@@ -593,8 +598,12 @@ bool copy_stats(uint32_t manip, CopyStats* out) {
     out->jitter_ms = static_cast<int>(t->jitter * 1000.0 + 0.5);
     out->gap_ms = static_cast<int>(t->mean * 1000.0 + 0.5);
     out->speed = t->speed;
+    out->stalls = t->stalls;
+    out->max_gap_ms = static_cast<int>(t->max_gap * 1000.0f + 0.5f);
     t->updates = 0;
     t->jumps = 0;
+    t->stalls = 0;
+    t->max_gap = 0;
     return true;
 }
 

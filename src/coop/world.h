@@ -25,6 +25,8 @@ void configure(const Config& cfg);
 // enemy health, damage, posture, then boss health, damage, posture, in percent per extra player.
 void set_host_scaling(const int* scaling);
 void tick();
+// A boss's defeat flag (every common event 970's first parameter).
+bool boss_defeat_flag(int id);
 
 // Session state the rules depend on.
 void set_session(bool active, bool invader, bool invader_present);

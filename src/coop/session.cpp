@@ -733,6 +733,16 @@ double g_settle_until = 0;
 // Guest: waiting for the host's map flags since this time (0 not waiting), and the flags we changed meanwhile,
 // which the snapshot (taken before the host heard of them) would otherwise undo here.
 double g_world_wait = 0;
+// Guest: from the welcome until our copy of the host's world is the host's, our game sends the others nothing of
+// what it does there: no flag (queue_flag) and no run of a map event (rules::hold_event_runs). That copy is the
+// host's from the host's map flags on arrival, 2 s on (kSettle) for what the load still had in flight; without
+// them (a host before 1.4.0 sends them only then, after 1.2.0 always) 10 s after arrival. The bulk goes one way:
+// the host's world into the guest's copy, never the guest's into the host's (2026-11-02, Darksim's arrival).
+double g_copy_settles_at = 0;  // when our copy is the host's (0: not yet known)
+bool g_copy_hold = false;      // our game's runs and flags are held back now
+int g_held_flags = 0;
+constexpr double kCopySettle = 2.0;
+constexpr double kCopyFallback = 10.0;
 std::vector<std::pair<int, bool>> g_world_ours;
 
 void set_step(Step s) {
@@ -3002,6 +3012,7 @@ void guest_arrived() {
         g_world_wait = now();
         g_world_ours.clear();
     }
+    g_copy_settles_at = now() + kCopyFallback;
 }
 
 // Host: the world's map flags for a co-op guest who has just arrived (see rules::world_flag_snapshot).
@@ -3058,6 +3069,7 @@ void on_world_globals(const uint8_t* data, uint32_t size) {
 void on_world_flags(const uint8_t* data, uint32_t size) {
     const int written = rules::apply_world_flag_snapshot(data, size);
     drops::flags_rewritten();
+    if (g_step == Step::InWorld && written >= 0) g_copy_settles_at = now() + kCopySettle;
     if (written < 0) {
         LOG_ERROR("[coop] The host's map flags did not fit our copy of their world (%u bytes); kept ours", size);
     } else {
@@ -3829,6 +3841,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 if (m.who != from) return;
                 name_event(&m);
                 broadcast(m, true, from);  // tell the other guests
+                peer(from)->arrived_at = now();
                 if (!m.invader) {
                     send_world_globals(from);
                     send_world_flags(from);
@@ -3926,6 +3939,20 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             const int n = std::min<int>(m.count, kFlagsPerMsg);
             const bool from_guest = g_role == Role::Host;
             if (!from_guest && from != g_host) return;
+            // A guest's first seconds in our world: what its game set then it judged on its own copy, not yet ours
+            // (a guest of 1.4.0 holds that back itself; an older one sends it).
+            if (from_guest) {
+                const PeerInfo* p = nullptr;
+                for (const auto& q : g_peers) p = q.id == from ? &q : p;
+                if (p && p->arrived_at > 0 && now() - p->arrived_at < 3.0) {
+                    static int early = 0;
+                    if (++early <= 20) {
+                        LOG_INFO("[coop] %d flag change(s) from %s not taken: sent in their first 3 s in our world",
+                                 n, steam::persona(from).c_str());
+                    }
+                    return;
+                }
+            }
             static int flag_lines = 0;
             for (int i = 0; i < n; ++i) {
                 if (++flag_lines <= 300) {
@@ -4558,10 +4585,37 @@ void send_npc_talk(int talk, int line, int row, int a2, int a3, talk::Kind kind)
 void queue_flag(int id, bool on) {
     if (g_role == Role::None || !g_lobby) return;
     if (g_role == Role::Guest && (g_step != Step::InWorld || g_invade)) return;
+    if (g_role == Role::Guest && g_copy_hold) {
+        // Judged on a copy of the host's world that is not the host's yet: not the host world's progress, and not
+        // set again once the host's map flags came (on_world_flags' "flags of ours", which this keeps empty).
+        if (++g_held_flags <= 20) LOG_INFO("[coop] flag %d %s: not sent (our copy of the host's world is not the host's yet)", id, on ? "on" : "off");
+        return;
+    }
     if (g_flag_queue.size() < 4096) g_flag_queue.push_back({id, on});
-    if (g_world_wait > 0 && g_world_ours.size() < 4096) g_world_ours.push_back({id, on});
     static int lines = 0;
     if (++lines <= 300) LOG_INFO("[coop] flag %d %s: sent", id, on ? "on" : "off");
+}
+
+// Guest: our runs and flags held back while our copy of the host's world is not the host's (g_copy_settles_at).
+void copy_hold_tick() {
+    const bool joining = g_role == Role::Guest && !g_invade &&
+                         (g_step == Step::Joining || g_step == Step::Loading || g_step == Step::InWorld);
+    const bool settled = g_step == Step::InWorld && g_copy_settles_at > 0 && now() >= g_copy_settles_at;
+    const bool hold = joining && !settled;
+    if (!joining) g_copy_settles_at = 0;
+    if (hold == g_copy_hold) return;
+    g_copy_hold = hold;
+    rules::hold_event_runs(hold);
+    const uint32_t runs = rules::take_held_runs();
+    if (hold) {
+        g_held_flags = 0;
+        LOG_INFO("[coop] Our game's event runs and flags are held back until our copy of the host's world is the "
+                 "host's");
+    } else {
+        LOG_INFO("[coop] Our copy of the host's world is the host's%s: our game's runs and flags go out again (held "
+                 "back: %u run(s), %d flag change(s))", joining ? "" : " no longer needed (we left)", runs,
+                 g_held_flags);
+    }
 }
 
 void flush_flags() {
@@ -5396,6 +5450,7 @@ void tick() {
             world::share_lights(lights);
         }
     }
+    copy_hold_tick();
     if (!g_flag_queue.empty()) flush_flags();
     if (g_role != Role::None && g_lobby) {
         if (now() - g_last_info > 1.0) {

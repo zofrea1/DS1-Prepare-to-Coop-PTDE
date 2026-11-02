@@ -72,6 +72,7 @@ struct PeerInfo {
     int bones = -1;               // the Homeward Bones they hold, as they report it (1.3.0), -1 not reported
     bool disguised = false;       // Chameleon is on them (1.3.0): their floating health bar is hidden
     int max_players = 0;          // the players their game can hold (1.4.0, MaxPlayers), 0 not reported (4)
+    double arrived_at = 0;        // host: when they last arrived in our world (kArrived), 0 not yet
     std::string mod;              // their Prepare to Co-op version, from their hello (a host's guests and invaders)
 };
 

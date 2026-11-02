@@ -997,53 +997,14 @@ bool local_working_flag(int id) {
 // drops.cpp whoever made them: our own scripts or another player's, applied here.
 int g_drop_old = -1;
 
-// The NPCs' states (flags 1000-1999: who stands where, who is alive, how far their story is) are the host's world's,
-// and the host's game moves them: its own map events decide from its own world, a talk (or Lua) from any player's
-// game still counts. Two map-event sets are refused:
-//  * in a co-op guest's game, any: it runs the host's world's events on a copy of that world that is not all the
-//    host's (the flags of its player, personal_flag, and anything else it held before the host's state came), and
-//    the host's game takes its runs (hk_event_sync, and the game's own type-1 sync, whose player is out of 10001..
-//    10010 and so taken unchecked);
-//  * in the host's game, on a run another player's game started: the event's player (+0x44) is 10000 for a run of
-//    our own (0xBC41AF, and 0xBBF440 each time our game passes a condition), another player's otherwise.
-// On 2026-11-02 Darksim's game ran Firelink's events while it loaded into damn_vix's world: Lautrec left his cell
-// (1570 -> 1577, 11010552) and went on to kill the Firekeeper (1577 -> 1578, 11020410; her 1140 -> 1141, 11020555;
-// both bells or Sen's gate open, 11500200, in its copy), and the host's and angeline's games took the runs and set
-// the flags in damn_vix's world: the Firekeeper dead, the Firelink bonfire out. Four minutes later his own flag 810
-// (personal) moved her on again (1141 -> 1146, 11020556). In 6700k's world (12:49) his game set them directly.
-// Refused, the event goes on without that flag; the host's own events set it when the host's world calls for it.
-bool npc_state_refused(int id) {
-    if (id < 1000 || id > 1999 || !g_cur_event || g_applying_remote || !seamless_rules()) return false;
-    if (GetCurrentThreadId() != g_main_thread) return false;
-    uint32_t event_id = 0, by = 10000;
-    read32(g_cur_event + 0x28, &event_id);
-    read32(g_cur_event + 0x44, &by);
-    const char* why = nullptr;
-    if (g_state.guest) {
-        why = "in our guest's game: the host's game moves the host's world's NPCs";
-    } else if (g_state.host && by != 10000 && by != 0) {
-        why = "on a run another player's game started";
-    }
-    if (!why) return false;
-    static int lines = 0;
-    if (++lines <= 60) {
-        LOG_INFO("[coop] Flag %d (an NPC's state) not set by event %d %s (player %u)", id,
-                 static_cast<int>(event_id), why, by);
-    }
-    return true;
-}
-
-// Nonzero: the set is refused (npc_state_refused), and neither the game's setter nor after_set_flag runs.
-int __stdcall before_set_flag(int id) {
+void __stdcall before_set_flag(int id) {
     g_old_value = -1;
     g_drop_old = -1;
-    if (g_flag_quiet) return 0;
-    if (npc_state_refused(id)) return 1;
+    if (g_flag_quiet) return;
     if (GetCurrentThreadId() == g_main_thread && drops::watched(id)) g_drop_old = game::flag(id) ? 1 : 0;
-    if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return 0;
-    if (!seamless_rules() || !shared_flag(id) || local_working_flag(id)) return 0;
+    if (GetCurrentThreadId() != g_main_thread || !g_flag_listener || g_applying_remote) return;
+    if (!seamless_rules() || !shared_flag(id) || local_working_flag(id)) return;
     g_old_value = game::flag(id) ? 1 : 0;
-    return 0;
 }
 
 void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
@@ -1062,6 +1023,12 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
         if (!g_contested.count(id)) g_flag_listener(id, on);
     }
     if (!g_state.guest || host_disaster_flag(id)) return;
+    // Home keeps what our own game did in the host's world: our map events (also on a run another player's game
+    // started in a map we were in), our talks, our pickups. A change another player's game made and only sent us
+    // (applied here, apply_remote_flag) stays in the host's world, but for a boss's defeat: the team's kill. Until
+    // 1.4.0 every change of the session went home, and with it what our game merely heard of: angeline's own world
+    // took Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
+    if (g_applying_remote && !world::boss_defeat_flag(id)) return;
     uint32_t active = 0;
     if (!read32(efm + 0x10C, &active) || active != efm + 0x90) return;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
@@ -1077,8 +1044,6 @@ __declspec(naked) void hk_set_flag() {
         pushad
         push dword ptr [ebp + 8]
         call before_set_flag
-        test eax, eax
-        jnz refused
         push dword ptr [ebp + 12]
         push dword ptr [ebp + 8]
         mov eax, [ebp - 4]
@@ -1088,7 +1053,6 @@ __declspec(naked) void hk_set_flag() {
         push dword ptr [ebp + 8]
         push dword ptr [ebp - 4]
         call after_set_flag
-    refused:
         popad
         pop ebp
         ret 8
@@ -2827,6 +2791,29 @@ void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t ty
     }
 }
 
+// Our game passed a map event's condition and tells the other players (0xBC42D0, eax = the event, from 0xBBF447 only:
+// packet 0x2F to every session member, sync type 1). A co-op guest's game holds these back from its join until its
+// copy of the host's world is the host's (session.cpp hold_event_runs): until then its events judge the host's world
+// from what the guest brought (its own progress, or another world it visited), and the others' games take the runs
+// as the host's world's. On 2026-11-02 Darksim's game, joining, passed Firelink's Lautrec and Firekeeper events, and
+// every game of both sessions took the runs: the Firekeeper dead in two hosts' worlds and in two guests' own. A held
+// run stays in our game (its event goes on here; what it changes there is replaced by the host's state).
+constexpr uint32_t kRunSend = 0x00BC42D0;
+void* g_run_send_orig = nullptr;
+uint8_t g_hold_runs = 0;
+uint32_t g_held_runs = 0;
+
+__declspec(naked) void hk_run_send() {
+    __asm {
+        cmp byte ptr [g_hold_runs], 0
+        jne held
+        jmp dword ptr [g_run_send_orig]
+    held:
+        inc dword ptr [g_held_runs]
+        ret
+    }
+}
+
 // Randomly Set Event Flag In Range (2003[17]: 0xD6C9C0 called from 0xBC1FA6, stdcall(proxy, on), eax = last
 // flag, edi = first, esi = the event). In the game's co-op it runs on the host only (a "SKIP IF client" before
 // it), so one game picks and the pick reaches the others with the run's other flags. In seamless co-op the run
@@ -3733,6 +3720,14 @@ int end_disasters(bool cursed_here) {
 }
 
 void set_flag_listener(void (*fn)(int id, bool on)) { g_flag_listener = fn; }
+
+void hold_event_runs(bool on) { g_hold_runs = on ? 1 : 0; }
+
+uint32_t take_held_runs() {
+    const uint32_t n = g_held_runs;
+    g_held_runs = 0;
+    return n;
+}
 void set_cutscene_listener(void (*fn)(int map, int point)) { g_cutscene_fn = fn; }
 bool take_failed_cutscene(int* map, int* point) {
     if (!g_cut_failed.pending) return false;
@@ -5860,6 +5855,12 @@ int install() {
         static const uint8_t k[6] = {0x51, 0x8B, 0x48, 0x78, 0x8B, 0x09};
         g_event_step_orig = detour(kEventStep, k, sizeof(k), reinterpret_cast<void*>(&hk_event_step));
         failed += install_one("map event working flags stay local", g_event_step_orig != nullptr);
+    }
+    {
+        // sub esp,1Ch ; cmp byte ptr [eax+50h],0
+        static const uint8_t k[7] = {0x83, 0xEC, 0x1C, 0x80, 0x78, 0x50, 0x00};
+        g_run_send_orig = detour(kRunSend, k, sizeof(k), reinterpret_cast<void*>(&hk_run_send));
+        failed += install_one("a joining guest's event runs held", g_run_send_orig != nullptr);
     }
     failed += install_one("map event runs from another map",
                           swap_pointer(kEmkEventVtable + 4 * 4, kEventSync, reinterpret_cast<void*>(&hk_event_sync),

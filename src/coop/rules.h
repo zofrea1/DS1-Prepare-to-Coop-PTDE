@@ -52,6 +52,11 @@ void remote_anim_done(int entity, int anim);
 void tick();
 // Flags that change in a session's world while seamless rules apply (game thread, value really changed).
 void set_flag_listener(void (*fn)(int id, bool on));
+// Our game's runs of map events are not sent to the other players while on (a co-op guest whose copy of the host's
+// world is not the host's yet; session.cpp).
+void hold_event_runs(bool on);
+// The runs held back since the last call.
+uint32_t take_held_runs();
 // A rest (ours or another player's) is about to reset the world's characters.
 void note_world_reset();
 // A cutscene is about to move our player into another map (map id, the cutscene's point entity).

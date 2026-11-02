@@ -772,6 +772,14 @@ bool g_was_fight = false;
 
 uint32_t boss_handle(int slot);
 
+}  // namespace
+
+bool boss_defeat_flag(int id) {
+    return std::find(std::begin(kBossDefeatFlags), std::end(kBossDefeatFlags), id) != std::end(kBossDefeatFlags);
+}
+
+namespace {
+
 void defeat_tick() {
     const uint32_t me = game::player();
     if (game::loading() || !me) {

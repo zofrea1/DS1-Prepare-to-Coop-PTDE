@@ -157,6 +157,14 @@ constexpr double kRiseRate = 0.08;  // seconds of smoothing a second
 constexpr double kFallRate = 0.025;
 constexpr double kOutlier = 0.25;   // a gap this far off the mean counts as only this far
 constexpr double kHitchMin = 0.04;
+// The late tail. J is a mean, and on a good link most updates come on time: at 60 a second (a 17 ms gap) J read 2 to
+// 4 ms and the smoothing stayed at 16 ms, so the copy covered each update in 33 ms; the gaps of 35 to 46 ms that come
+// once or twice a second on any Steam link left it standing until the next one, 9 to 34 times in 15 s (the 2026-11-01
+// host on a guest's screen, at home; the guest who walked, stopped and walked on in every other game, earlier that day,
+// was the same thing on a worse link). The smoothing also covers the latest update of the last few seconds, up to twice
+// the mean gap (50 ms at least: a single long hiccup is J's to answer). Players' characters only.
+constexpr double kTailHalfLife = 4.0;
+constexpr double kTailCapMin = 0.05;
 constexpr double kHitchRatio = 2.5;
 bool g_dynamic = true;
 double g_frame_clock = 0;  // clock_now() at our last tick (once a frame)
@@ -177,6 +185,7 @@ struct Track {
     double last = 0;       // when its last update was taken (g_clock)
     double mean = 0;       // the mean gap
     double jitter = 0;     // J
+    double tail = 0;       // the late tail: the latest an update came lately (past the mean gap), decaying
     double smooth = 0;     // the smoothing in use
     double cover = 0;      // this update's time to cover (gap + smoothing, or the game's slack)
     float target[3] = {};  // an enemy's last update (NetAIManipulator +0x240)
@@ -246,12 +255,19 @@ Track* note_update(uint32_t manip, double gap, double slack, bool enemy) {
             if (late < 0) late = 0;
             t->jitter += (late - t->jitter) / 16.0;
             t->mean += d / 16.0;
+            double over = d - 0.5 * frame;  // later than the mean gap only
+            const double tail_cap = 2.0 * t->mean > kTailCapMin ? 2.0 * t->mean : kTailCapMin;
+            if (over > tail_cap) over = tail_cap;
+            t->tail *= std::exp(-g * 0.6931471805599453 / kTailHalfLife);
+            if (over > t->tail) t->tail = over;
         }
     }
     if (!g_dynamic || !g_receiving) {
         t->smooth = g_smooth;
     } else {
         double want = kJitterGain * t->jitter + kJitterFloor;
+        // (Players' copies: the enemies' rounds have uneven gaps of their own, and their smoothing was tuned on its own.)
+        if (!enemy && t->tail + kJitterFloor > want) want = t->tail + kJitterFloor;
         const double cap = kMaxSmoothing / 1000.0;
         want = want < kDynMin ? kDynMin : want > cap ? cap : want;
         const double dt = g < 0.5 ? g : 0.5;

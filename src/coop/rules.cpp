@@ -860,6 +860,7 @@ void call_set_flag(uint32_t efm, int id, uint32_t value) {
 }
 
 bool host_disaster_flag(int id);  // a flag of the host's world's disaster (see kDisasterFlags)
+uint8_t g_hold_runs = 0;          // a co-op guest's copy of the host's world is not the host's yet (hold_event_runs)
 
 // Shared progress: flags changed in the host's world travel to the other players (guest -> host -> guests).
 void (*g_flag_listener)(int, bool) = nullptr;
@@ -1029,6 +1030,9 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     // 1.4.0 every change of the session went home, and with it what our game merely heard of: angeline's own world
     // took Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
     if (g_applying_remote && !world::boss_defeat_flag(id)) return;
+    // Nor what our game did while its copy of the host's world was not the host's yet (hold_event_runs): judged on
+    // what we brought, it is neither the host's world's progress nor ours.
+    if (g_hold_runs) return;
     uint32_t active = 0;
     if (!read32(efm + 0x10C, &active) || active != efm + 0x90) return;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
@@ -2800,7 +2804,6 @@ void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t ty
 // run stays in our game (its event goes on here; what it changes there is replaced by the host's state).
 constexpr uint32_t kRunSend = 0x00BC42D0;
 void* g_run_send_orig = nullptr;
-uint8_t g_hold_runs = 0;
 uint32_t g_held_runs = 0;
 
 __declspec(naked) void hk_run_send() {

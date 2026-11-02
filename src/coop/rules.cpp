@@ -2230,7 +2230,8 @@ int wanted_team(uint32_t chr) {
         if (r.chr != chr || !r.known) continue;
         if (g_state.invader) return -1;  // we invade: everyone else keeps a player team, hostile to ours
         if (r.invader) return kTeamInvader;
-        if (g_state.world_rules == 1) return kTeamEveryone;  // allies hostile: everyone fights everyone
+        // Allies hostile, or free for all: everyone fights everyone.
+        if (g_state.world_rules == 1 || g_state.world_rules == 3) return kTeamEveryone;
         if (g_state.world_rules == 2) {
             // Teams: the host against the guests.
             if (g_state.host) return kTeamEveryone;
@@ -2297,7 +2298,8 @@ void apply_teams() {
 
 // Friendly fire (Ominous Tome, world rules 1) puts allies on team 13 so they can hurt each other. Lock-on and the
 // bonfire's "an enemy is here" check are not part of that: they run with the teams the game gave the characters.
-// Teams mode (world rules 2) keeps team 13 for those checks, so opponents lock on and a nearby opponent blocks a rest.
+// Teams mode (world rules 2) keeps team 13 for those checks, so opponents lock on and a nearby opponent blocks a rest,
+// and so does free for all (world rules 3, 1.4.0): the same teams as friendly fire, with every ally to lock on to.
 bool friendly_fire_only() { return g_state.active && g_state.world_rules == 1; }
 
 void __cdecl teams_neutral() {

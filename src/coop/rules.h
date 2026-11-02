@@ -24,7 +24,8 @@ struct State {
     bool team_invasion = false;  // we invade, undecided, another invader stands: our fall waits (spectate.cpp)
     int own_chr_type = -1;    // guest: our chr type at home (0 human, 8 hollow)
     // The host's world rules (the host decides, guests mirror them).
-    int world_rules = 0;      // Ominous Tome: 0 none, 1 allies are hostile, 2 allies fight in teams
+    int world_rules = 0;      // Ominous Tome: 0 none, 1 allies are hostile, 2 allies fight in teams, 3 free for all
+                              // (1.4.0: allies hostile and locked on to)
     bool taunt = false;       // Dried Fingers: invaders find this world first
     bool infection = false;   // Cursed Pendant: the world we are in counts as pure black World Tendency
     int host_map = -1;        // guest: the host's map as last reported (kept while the host's game loads)

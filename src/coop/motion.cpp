@@ -31,6 +31,9 @@ namespace {
 // thought to reach 5.3 that was the end of a sprint.)
 constexpr uint32_t kGaitSite = 0x00E1E935;    // movss xmm0, dword ptr [ecx+2C0h]       (8 bytes)
 constexpr uint32_t kSprintSite = 0x00E1E924;  // movss xmm2, dword ptr [011603ACh] (6.0) (8 bytes)
+// The guess's run line, 2 m/s (the shared 2.0 at 0x115F588, read here only for this): a walk goes up to 2.2 and showed
+// as a run; ours is 3, between a walk and a jog's 4.0, as for our own gait (kRunFrom).
+constexpr uint32_t kRunSite = 0x00E1E913;     // movss xmm2, dword ptr [0115F588h] (2.0) (8 bytes)
 constexpr uint32_t kNetworkManipulatorVtable = 0x0118DDEC;
 
 struct GaitEntry {
@@ -42,6 +45,7 @@ constexpr int kGaitEntries = players::kMaxPlayers - 1;
 static_assert(kGaitEntries == 7, "gait_stub compares with 7");
 GaitEntry g_gaits[kGaitEntries] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}};
 alignas(4) float g_sprint_speed = 4.5f;  // Remastered's fallback threshold (PTDE 6.0)
+alignas(4) float g_run_speed = 3.0f;     // (PTDE 2.0)
 
 __declspec(naked) void gait_stub() {
     __asm {
@@ -260,6 +264,14 @@ bool install() {
         const uint32_t operand = reinterpret_cast<uint32_t>(&g_sprint_speed);
         std::memcpy(code + 4, &operand, 4);
         if (!patch(kSprintSite, k, code, sizeof(code))) ++failed;
+    }
+    {
+        static const uint8_t k[8] = {0xF3, 0x0F, 0x10, 0x15, 0x88, 0xF5, 0x15, 0x01};
+        uint8_t code[8];
+        std::memcpy(code, k, 4);
+        const uint32_t operand = reinterpret_cast<uint32_t>(&g_run_speed);
+        std::memcpy(code + 4, &operand, 4);
+        if (!patch(kRunSite, k, code, sizeof(code))) ++failed;
     }
     {
         // mov ecx,[esi+28h] ; fld dword ptr [011E7CA0h]

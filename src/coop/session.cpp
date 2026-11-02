@@ -406,6 +406,10 @@ constexpr const wchar_t* kMsgHostLost = L"Lost the connection to the host. Retur
 constexpr const wchar_t* kMsgRulesNone = L"World rules: allies cannot harm each other";
 constexpr const wchar_t* kMsgRulesHostile = L"World rules: allies can harm each other";
 constexpr const wchar_t* kMsgRulesTeams = L"World rules: the host against the guests";
+constexpr const wchar_t* kMsgRulesFreeForAll = L"World rules: free for all";
+constexpr const wchar_t* kMsgRulesNeedsNew = L"Free for all needs every player on 1.4.0 or newer";
+// The first version that knows free for all (world rules 3): an older game takes it for no rules at all.
+constexpr const char* kFreeForAllVersion = "1.4.0";
 constexpr const wchar_t* kMsgTaunt = L"Invaders are taunted into this world";
 constexpr const wchar_t* kMsgCursed = L"This world is cursed";
 constexpr const wchar_t* kMsgCurseLifted = L"The curse on this world is lifted";
@@ -1661,6 +1665,7 @@ bool invader_arrival(game::InvasionPoint* ip) {
 void send_world_globals(uint64_t to);
 void send_live_drops(uint64_t to);
 void send_bonfires(uint64_t to);
+bool guests_know_free_for_all();
 
 void host_answer(const Pending& p) {
     Welcome w{};
@@ -2729,7 +2734,10 @@ void guest_search() {
 }
 
 const wchar_t* rules_text(int world_rules) {
-    return world_rules == 1 ? kMsgRulesHostile : world_rules == 2 ? kMsgRulesTeams : kMsgRulesNone;
+    return world_rules == 1   ? kMsgRulesHostile
+           : world_rules == 2 ? kMsgRulesTeams
+           : world_rules == 3 ? kMsgRulesFreeForAll
+                              : kMsgRulesNone;
 }
 
 void apply_host_rules(int world_rules, bool infection, bool taunt) {
@@ -3650,6 +3658,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             }
             p->soul_level = m.soul_level;
             p->invader = m.invade != 0;
+            p->mod = them.mod;
             p->last_seen = now();
             g_pending.erase(std::remove_if(g_pending.begin(), g_pending.end(),
                                            [from](const Pending& q) { return q.from == from; }),
@@ -3780,6 +3789,14 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                     send_world_flags(from);
                     send_live_drops(from);
                     send_bonfires(from);
+                    // A guest of a version before free for all came into a world with it: back to no rules for all.
+                    if (rules::state().world_rules == 3 && !guests_know_free_for_all()) {
+                        rules::state().world_rules = 0;
+                        say(kMsgRulesNeedsNew);
+                        say(rules_text(0));
+                        LOG_INFO("[coop] World rules back to 0: a guest who does not know free for all arrived");
+                        g_last_state = 0;
+                    }
                     g_world_sent.clear();  // what our world has, to the newcomer (and again to the others)
                     g_world_polled = 0;
                 } else if (std::find(g_invaders_in.begin(), g_invaders_in.end(), from) == g_invaders_in.end()) {
@@ -5194,15 +5211,20 @@ void tick() {
     {
         const int gait = motion::local_gait();
         const std::vector<motion::Anim> anims = motion::take_local_anims();
+        // Our gait goes to every player in the lobby, invaders and the players they invade included (1.4.0). Until
+        // then invasions were left out with the rest of the world rules ("invaders keep the game's own rules", round
+        // 5), and their characters walked, ran and sprinted by the receiving game's guess from their speed: a walk
+        // showed as a run, a roll as a sprint, and an uneven link switched between them. The gait is only the
+        // animation the copy plays; positions, attacks and rolls come as before.
+        if (g_role != Role::None && g_lobby && (gait != g_sent_gait || now() - g_last_gait > 0.5)) {
+            g_sent_gait = gait;
+            g_last_gait = now();
+            GaitMsg m{};
+            fill_header(&m, kGait);
+            m.gait = static_cast<int8_t>(gait);
+            broadcast(m, false);
+        }
         if (g_role != Role::None && g_lobby && !g_invade) {
-            if (gait != g_sent_gait || now() - g_last_gait > 0.5) {
-                g_sent_gait = gait;
-                g_last_gait = now();
-                GaitMsg m{};
-                fill_header(&m, kGait);
-                m.gait = static_cast<int8_t>(gait);
-                broadcast(m, false);
-            }
             for (const motion::Anim& a : anims) {
                 AnimMsg m{};
                 fill_header(&m, kAnim);
@@ -5225,7 +5247,7 @@ void tick() {
             for (const auto& [chr, id] : g_chr_peer) {
                 if (std::find(live.begin(), live.end(), chr) == live.end()) continue;
                 for (const auto& p : g_peers) {
-                    if (p.id != id || p.invader) continue;
+                    if (p.id != id) continue;  // (an invader's too: see the gait above)
                     const bool fresh = p.gait >= 0 && now() - p.gait_at < 1.5;
                     motion::set_remote_gait(chr, fresh ? static_cast<motion::Gait>(p.gait) : motion::kUnknown);
                 }
@@ -5426,11 +5448,39 @@ void close_world() {
     leave();
 }
 
+namespace {
+
+// Every co-op guest in our lobby knows free for all. An older guest's game would take it for no rules at all: its
+// player could neither hurt nor lock on to the others, while their games would let them hurt that player.
+bool guests_know_free_for_all() {
+    if (!g_lobby) return true;
+    const uint64_t me = steam::self();
+    for (uint64_t m : steam::lobby_members(g_lobby)) {
+        if (m == me) continue;
+        const PeerInfo* p = peer(m);
+        if (p->invader) continue;
+        if (compare_versions(p->mod, kFreeForAllVersion) < 0) {
+            LOG_INFO("[coop] Free for all left out: %s has Prepare to Co-op %s", p->name.c_str(),
+                     p->mod.empty() ? "1.0.0" : p->mod.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+// The Ominous Tome: no rules, allies hostile (friendly fire without lock-on), the host against the guests, free for
+// all (1.4.0: friendly fire with lock-on on everyone), and round again.
 void cycle_rules() {
     if (!hosting()) return;
     auto& st = rules::state();
-    st.world_rules = (st.world_rules + 1) % 3;
-    LOG_INFO("[coop] World rules now %d (0 none, 1 allies hostile, 2 teams)", st.world_rules);
+    st.world_rules = (st.world_rules + 1) % 4;
+    if (st.world_rules == 3 && !guests_know_free_for_all()) {
+        say(kMsgRulesNeedsNew);
+        st.world_rules = 0;
+    }
+    LOG_INFO("[coop] World rules now %d (0 none, 1 allies hostile, 2 teams, 3 free for all)", st.world_rules);
     say(rules_text(st.world_rules));
     g_last_state = 0;  // tell the guests now
 }
@@ -6143,6 +6193,7 @@ std::vector<std::wstring> panel_lines(int mode) {
         std::wstring rules_line = L"  ";
         if (st.world_rules == 1) rules_line += L"Allies hostile  ";
         if (st.world_rules == 2) rules_line += L"Allies in teams  ";
+        if (st.world_rules == 3) rules_line += L"Free for all  ";
         if (st.infection) rules_line += L"Cursed world  ";
         if (st.taunt) rules_line += L"Invaders taunted";
         out.push_back(rules_line);

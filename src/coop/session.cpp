@@ -2919,6 +2919,11 @@ bool retry_join() {
 
 void guest_arrived() {
     set_step(Step::InWorld);
+    // Our respawn in the host's world: the host's bonfire (or our own rest there). A rest at home while the join loaded
+    // wrote our own bonfire into the game's last bonfire since guest_on_welcome set it.
+    if (!g_invade && g_guest_bonfire >= 0) {
+        if (const uint32_t gm = game::game_man()) *ptr<int>(gm + game::kGmLastBonfire) = g_guest_bonfire;
+    }
     if (!g_invade) {
         g_keys_arrival = items::key_items();
         g_keys_seen = g_keys_arrival;
@@ -5543,6 +5548,14 @@ void note_guest_respawn(int bonfire) {
 
 void note_guest_rest(int object_id) {
     if (g_role != Role::Guest || g_invade) return;
+    // Only a rest in the host's world: a rest at home while the join loads is our own world's (2026-11-01: a guest who
+    // sat down at the Undead Asylum's bonfire as the join went through had that bonfire as their respawn in the
+    // host's world, and their next death took them to the host's Asylum).
+    if (g_step != Step::InWorld || game::own_world()) {
+        LOG_INFO("[coop] Rest at object %d outside the host's world (our own, while joining): the respawn there is "
+                 "unchanged", object_id);
+        return;
+    }
     if (object_id <= 100000 || object_id >= 30000000) {
         LOG_INFO("[coop] Rest object %d is not a bonfire; respawn unchanged", object_id);
         return;

@@ -59,6 +59,17 @@ constexpr uint32_t kFrameStep = 0x011E7E90;
 alignas(8) volatile double g_enemy_steps = 30.0;  // frames per second of this frame
 constexpr uint32_t kRoundGap = 0x1BC;
 constexpr float kVanillaRoundGap = 0.25f;
+// Who moves each enemy: the session host's game hands them out every +0x19C (3 s, from 0x115FB9C; countdown +0x1A0,
+// 0xE57850 -> 0xE558F0), from the bids each guest's game reports every +0x1A4 (5 s, 0x115F58C; countdown +0x1A8) and
+// its own (both set by 0xE563D0). In vanilla co-op the phantoms stand by the host, whose game moves the area's enemies.
+// In ours a guest walks on alone while the host's game, far off, still has the area's enemies (not updating them): until
+// the guest's next report and the host's next hand-out (up to 8 s) they stood where they were, and once the guest's
+// game had them their AI started with the player already on top of them, so an ambusher (the Undead Burg's hollows by
+// the sewer from Firelink Shrine, no event of theirs, the jump their AI's own) skipped its jump as often as not
+// (2026-11-01). Above the game's rate both go every second.
+constexpr uint32_t kHandoutGap = 0x19C, kHandoutLeft = 0x1A0;
+constexpr uint32_t kReportGap = 0x1A4, kReportLeft = 0x1A8;
+constexpr float kVanillaHandout = 3.0f, kVanillaReport = 5.0f, kSessionHandout = 1.0f, kSessionReport = 1.0f;
 
 // Another player's character (NetworkManipulator update 0xE1F950, edi = manipulator) takes every update that came
 // for it, one after another, in the same frame (pop 0xD30140, esi = the manipulator's sample: it copies the update
@@ -523,6 +534,24 @@ void set_round_gap(float gap) {
     if (current != gap) *ptr<float>(table + kRoundGap) = gap;
 }
 
+// A period and its countdown in the table: the period set, the countdown no longer than it.
+void set_period(uint32_t table, uint32_t gap_at, uint32_t left_at, float gap) {
+    uint32_t g = 0, l = 0;
+    if (!read32(table + gap_at, &g) || !read32(table + left_at, &l)) return;
+    float now_gap = 0.0f, left = 0.0f;
+    std::memcpy(&now_gap, &g, 4);
+    std::memcpy(&left, &l, 4);
+    if (now_gap != gap) *ptr<float>(table + gap_at) = gap;
+    if (left > gap) *ptr<float>(table + left_at) = gap;
+}
+
+void set_handout(bool session) {
+    uint32_t wcm = 0, table = 0;
+    if (!read32(game::kWorldChrManVar, &wcm) || !wcm || !read32(wcm + kChrTable, &table) || !table) return;
+    set_period(table, kHandoutGap, kHandoutLeft, session ? kSessionHandout : kVanillaHandout);
+    set_period(table, kReportGap, kReportLeft, session ? kSessionReport : kVanillaReport);
+}
+
 // The receiving side follows the session's rate: the game's own at six a second, else newest updates, the turn in
 // the update's time and NetworkSmoothing (or each character's own, DynamicSmoothing).
 void set_receiving(bool on) {
@@ -629,6 +658,7 @@ void tick(int rate) {
     if (rate > kMax) rate = kMax;
     // The enemies' round, every frame: the table is made again with each map load.
     set_round_gap(kVanillaRoundGap * kVanilla / rate);
+    set_handout(rate > kVanilla);
     set_receiving(rate > kVanilla);
     if (rate == g_applied || g_reload_bad) return;
     if (!write_reload(rate)) {

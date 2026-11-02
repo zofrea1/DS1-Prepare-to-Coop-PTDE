@@ -781,6 +781,16 @@ game after a retry, stood idle once the guest's game took it over. The AI-off co
 copies all sleep is still some game's to move: at first such a game did not bid at all, and the sleeping demon on
 its perch was nobody's until the session host next handed enemies out.
 
+The host's game hands enemies out every 3 s (`WorldChrMan+0x2B4` table +0x19C, countdown +0x1A0) from the bids each
+guest's game reports every 5 s (+0x1A4, countdown +0x1A8; both set by `0xE563D0`). In vanilla co-op the phantoms
+stand by the host, whose game moves the area's enemies anyway. Here a guest walks on alone while the host's game, far
+off, still holds the area's enemies without updating them: they stood where they were until the guest's next report
+and the host's next hand-out (up to 8 s), and the guest's game then started their AI with the player already on top of
+them. The armored hollows by the sewer from Firelink Shrine into the Undead Burg (no entity id, so no event: their jump
+is their own AI's) skipped the jump about half the time (2026-11-01). Above the game's own network rate both periods
+are 1 s. Positions are compared only within an area (the map id's top byte): a player in the Undead Asylum stands in
+other coordinates and counts as near nothing in the Undead Burg.
+
 When an enemy changes hands, the game that takes it decides its next move at once: the move under way stops part way
 and another begins, in every game. Players saw the Asylum Demon break off attacks in all three 2026-10-29 tests,
 mostly in the wind-up but once in mid-air in its jumping slam: a second after it landed from its perch, when the guest

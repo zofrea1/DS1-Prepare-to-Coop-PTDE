@@ -3954,9 +3954,13 @@ uint32_t net_priority(uint32_t chr) {
     if (const int hold = attack_hold(chr)) return hold == 1 ? kBidCap : 0;
     game::Vec3 at{}, me{};
     if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return bid;
+    // Positions compare only within an area (the map id's top byte: the Undead Burg, Firelink Shrine and the Depths are
+    // one); a player in another area (the Undead Asylum) stands in other coordinates and is near nothing here.
+    const int area = (game::map_id() >> 24) & 0xFF;
+    auto elsewhere = [area](const PeerSpot& p) { return p.map == -1 || ((p.map >> 24) & 0xFF) != area; };
     if (world::local_dead()) {
         for (const PeerSpot& p : g_peer_spots) {
-            if (p.dead || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
+            if (p.dead || elsewhere(p) || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
             static std::set<uint32_t> logged;
             if (logged.size() < 30 && logged.insert(chr).second) {
                 LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): we fell; a low bid from here while a standing "
@@ -3967,7 +3971,7 @@ uint32_t net_priority(uint32_t chr) {
     }
     if (ai_off_here(chr)) {
         for (const PeerSpot& p : g_peer_spots) {
-            if (dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
+            if (elsewhere(p) || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
             static std::set<uint32_t> logged;
             if (logged.size() < 30 && logged.insert(chr).second) {
                 LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): its AI is off in this game; the lowest bid from here "
@@ -3979,7 +3983,7 @@ uint32_t net_priority(uint32_t chr) {
     const float mine = dist3(me, at);
     if (mine <= kBidReach) return bid;
     for (const PeerSpot& p : g_peer_spots) {
-        if (p.dead) continue;
+        if (p.dead || elsewhere(p)) continue;
         const float theirs = dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at);
         if (theirs < mine) {
             static std::set<uint32_t> logged;
@@ -5900,6 +5904,8 @@ void track_own_chr_type() {
 
 void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = players; }
 void set_peer_spots(const std::vector<PeerSpot>& spots) { g_peer_spots = spots; }
+uint32_t bid_for(uint32_t chr) { return chr ? net_priority(chr) : 0; }
+bool enemy_ai_off(uint32_t chr) { return chr && ai_off_here(chr); }
 
 void tick() {
     g_main_thread = GetCurrentThreadId();

@@ -354,8 +354,13 @@ bool install() {
     static const uint8_t kCreateCode[6] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};
     // sub esp,6Ch ; push ebx ; mov ebx,[esp+74h]
     static const uint8_t kPickupCode[8] = {0x83, 0xEC, 0x6C, 0x53, 0x8B, 0x5C, 0x24, 0x74};
+    // 0xDC76F0 is detoured by rules.cpp (per-player treasure, hk_item_remove) before we get here: its own bytes or that
+    // jump. Until this was seen the check refused, and no drop was ever shared (2026-11-01 test).
+    uint8_t first = 0;
+    const bool remove_ok = bytes_match(kRemove, "\x8B\x44\x24\x08\x8B\x4C\x24\x04", 8) ||
+                           (read8(kRemove, &first) && first == 0xE9);
     if (!bytes_match(kCreate, "\x56\x8B\x31\x83\xE6\x0F", 6) || !bytes_match(kFind, "\x56\x8B\x74\x24\x08", 5) ||
-        !bytes_match(kRemove, "\x8B\x44\x24\x08\x8B\x4C\x24\x04", 8)) {
+        !remove_ok) {
         LOG_ERROR("[coop] Shared drops: the item manager does not match this build; drops stay with their player");
         return false;
     }

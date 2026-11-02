@@ -940,6 +940,76 @@ struct Hands {
 std::map<uint32_t, Hands> g_hands;
 int g_hands_lines = 0;
 
+// The Undead Burg's first hollows, for the 2026-11-01 reports of an ambusher that hung back for seconds and then
+// fought without its jump: the four armored hollows by the sewer from Firelink Shrine (no entity id, so no event of
+// theirs: the jump is their AI's, think 254002 / 254006 / 254007) and the one behind the crates (1010102, event
+// 11015110). Each is taken by where it stands after a load; while we are within 15 m of it, who moves it, its AI, the
+// animation it plays and our bid are logged when they change.
+struct Spot {
+    float x, y, z;
+    const char* name;
+};
+constexpr Spot kWatchedSpots[] = {{-53.1f, -22.7f, -24.0f, "sewer hollow A"},
+                                  {-47.3f, -22.7f, -28.0f, "sewer hollow B"},
+                                  {-57.0f, -22.8f, -31.0f, "sewer hollow C"},
+                                  {-62.6f, -23.3f, -28.6f, "sewer hollow D"},
+                                  {-28.7f, -19.8f, -74.6f, "crate hollow 1010102"}};
+constexpr int kBurg = 0x0A010000;
+struct SpotWatch {
+    int spot = -1;
+    int mover = -1;
+    int ai = -1;
+    int anim = -2;
+    bool close = false;
+};
+std::map<uint32_t, SpotWatch> g_spot_watch;
+int g_spot_lines = 0;
+
+void watch_spot(uint32_t chr) {
+    if (g_spot_lines >= 200) return;
+    game::Vec3 at{}, me{};
+    if (!game::chr_position(chr, &at) || !game::position(&me, nullptr)) return;
+    auto it = g_spot_watch.find(chr);
+    if (it == g_spot_watch.end()) {
+        if (g_spot_watch.size() > 512) return;
+        SpotWatch w;
+        for (int i = 0; i < static_cast<int>(std::size(kWatchedSpots)); ++i) {
+            const Spot& s = kWatchedSpots[i];
+            const float dx = at.x - s.x, dy = at.y - s.y, dz = at.z - s.z;
+            if (dx * dx + dy * dy + dz * dz < 1.5f * 1.5f && game::map_id() >> 24 == kBurg >> 24) w.spot = i;
+        }
+        it = g_spot_watch.emplace(chr, w).first;
+    }
+    SpotWatch& w = it->second;
+    if (w.spot < 0) return;
+    const float dx = at.x - me.x, dy = at.y - me.y, dz = at.z - me.z;
+    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const bool is_close = d <= 15.0f;
+    uint32_t current = 0, own_ai = 0, net_ai = 0, ctrl = 0, anim = 0xFFFFFFFF;
+    read32(chr + 0x2C, &current);
+    read32(chr + 0x410, &own_ai);
+    read32(chr + 0x414, &net_ai);
+    if (read32(chr + 0x28, &ctrl) && ctrl) read32(ctrl + 0x350, &anim);
+    const int mover = current && current == own_ai ? 1 : current && current == net_ai ? 2 : 0;
+    const int ai = rules::enemy_ai_off(chr) ? 0 : 1;
+    const int a = static_cast<int>(anim);
+    if (is_close && (!w.close || mover != w.mover || ai != w.ai || a != w.anim)) {
+        ++g_spot_lines;
+        int32_t rate = 0;
+        read32(chr + 0xF4, reinterpret_cast<uint32_t*>(&rate));
+        LOG_INFO("[coop] %s (%08X): %.1f m from us, moved by %s, AI %s, animation %d, rate %d, our bid %u%s",
+                 kWatchedSpots[w.spot].name, chr, d,
+                 mover == 1 ? "this game" : mover == 2 ? "another game" : "neither", ai ? "on" : "off", a,
+                 static_cast<int>(rate), rules::bid_for(chr), w.close ? "" : " (we came near)");
+    } else if (!is_close && w.close && ++g_spot_lines <= 200) {
+        LOG_INFO("[coop] %s: we are past it (%.0f m)", kWatchedSpots[w.spot].name, d);
+    }
+    w.close = is_close;
+    w.mover = mover;
+    w.ai = ai;
+    w.anim = a;
+}
+
 void watch_hands(uint32_t chr) {
     uint32_t current = 0, own_ai = 0, net_ai = 0;
     if (!read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own_ai) || !read32(chr + 0x414, &net_ai)) return;
@@ -1019,6 +1089,7 @@ void enemy_hp_tick() {
         if (h > 1 && g_seen_up.size() < 4096) g_seen_up.insert(chr);
         watch_low_hp(chr, h, m, was_up);
         watch_hands(chr);
+        watch_spot(chr);
         if (h <= 0) {
             if (it != g_enemy_hp.end() && it->second.second > 0 && it->second.first * 10 > it->second.second &&
                 ++g_hp_left_logs <= 40) {
@@ -1845,6 +1916,7 @@ void tick() {
         g_low_hp.clear();
         g_seen_up.clear();
         g_hands.clear();
+        g_spot_watch.clear();
         g_forced_max.clear();
     }
 }

@@ -159,5 +159,9 @@ struct PeerSpot {
     bool dead = false;  // fallen (spectating, or on the way to their bonfire): their game still runs
 };
 void set_peer_spots(const std::vector<PeerSpot>& spots);
+// What this game bids for an enemy now (the game's bid with the session's rules on it), for the log.
+uint32_t bid_for(uint32_t chr);
+// The enemy's AI is off in this game (Set Character AI State, ChrCtrl+0xC0 bit 0).
+bool enemy_ai_off(uint32_t chr);
 
 }  // namespace coop::rules

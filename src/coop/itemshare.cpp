@@ -74,6 +74,11 @@ struct Shared {
     double claimed_at = 0;  // our request to pick it up went to the host then (a guest)
     bool loaded_since = false;  // a load came since our copy was made: a copy missing now went with it
     int remade = 0;             // times our copy was made again after the cap (or a block) took it
+    // The host gave it to us while our copy was gone from our floor (not by a load) and could not be made again then:
+    // the cap's 30 left no room, or the making failed. Made and taken by tick once there is room; the others took
+    // theirs off their floors on the host's word, so this is the only way it still comes to us.
+    bool granted = false;
+    int grant_tries = 0;  // makings that failed for it
 };
 std::vector<Shared> g_shared;
 
@@ -192,7 +197,7 @@ Shared* by_handle(uint32_t man, uint32_t handle) {
 Shared& add(const Drop& d) {
     if (g_shared.size() >= kMaxDrops) {
         // The oldest taken one goes first, else the oldest.
-        auto it = std::find_if(g_shared.begin(), g_shared.end(), [](const Shared& s) { return s.taken; });
+        auto it = std::find_if(g_shared.begin(), g_shared.end(), [](const Shared& s) { return s.taken && !s.granted; });
         g_shared.erase(it != g_shared.end() ? it : g_shared.begin());
     }
     Shared s;
@@ -387,6 +392,12 @@ void set_session(bool coop, bool host, uint64_t self) {
     if (!on && g_coop && !g_shared.empty()) {
         // The session is over: what still lies on our floor stays as any item does; nobody else has it now.
         if (++g_lines <= 200) LOG_INFO("[coop] Shared drops: %zu forgotten (the session is over)", g_shared.size());
+        for (const Shared& s : g_shared) {
+            if (s.granted && ++g_lines <= 200) {
+                LOG_INFO("[coop] A shared drop the host gave us (%s) never found room on our floor: lost with the "
+                         "session", items_text(s.d.entry).c_str());
+            }
+        }
         g_shared.clear();
     }
     g_coop = on;
@@ -459,6 +470,19 @@ void remote_taken(uint64_t origin, uint32_t seq, uint64_t taker) {
             take_ours(*s, man);
             return;
         }
+        // Not now: most likely the cap itself took our copy (0xDC7B30 takes the oldest at 30 and counts the new one,
+        // so the count stays at 30 and there is no room). Ours all the same: tick makes and takes it once there is.
+        if (!s->loaded_since) {
+            s->taken = true;
+            s->taker = g_self;
+            s->granted = true;
+            s->handle = 0;
+            if (++g_lines <= 200) {
+                LOG_INFO("[coop] The host gave us the shared drop (%s), gone from our floor meanwhile and no room to "
+                         "make it again now: it comes once there is", items_text(s->d.entry).c_str());
+            }
+            return;
+        }
         // Gone from our floor meanwhile (a load): nobody has it, and nobody else will.
         if (++g_lines <= 200) LOG_INFO("[coop] The host gave us a shared drop that is no longer on our floor");
     }
@@ -515,6 +539,27 @@ void tick() {
                 LOG_INFO("[coop] A shared drop (%s) is gone from our floor (%s)", items_text(s.d.entry).c_str(),
                          by_load ? "a load" : obj ? "its handle is another item's" : "not picked up: made again later");
             }
+        }
+        // The host gave us these while our copy was gone and the floor full (remote_taken): made in its map, where the
+        // ones we have not picked up are made, and picked up at once.
+        for (Shared& s : g_shared) {
+            if (!s.granted || s.d.map != game::map_id() || !room(man)) continue;
+            if (!make_copy(s, man)) {
+                if (++s.grant_tries >= 5) {
+                    s.granted = false;
+                    if (++g_lines <= 200) {
+                        LOG_ERROR("[coop] A shared drop the host gave us (%s) could not be put on our floor: lost",
+                                  items_text(s.d.entry).c_str());
+                    }
+                }
+                continue;
+            }
+            s.granted = false;
+            if (++g_lines <= 200) {
+                LOG_INFO("[coop] The shared drop the host gave us (%s) is ours now: made and taken",
+                         items_text(s.d.entry).c_str());
+            }
+            take_ours(s, man);
         }
     }
     const int map = game::map_id();

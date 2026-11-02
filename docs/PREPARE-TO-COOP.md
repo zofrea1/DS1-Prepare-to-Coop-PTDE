@@ -933,7 +933,9 @@ review be211f6c). Every co-op game makes its own copy, without 0x80, with `0xDC7
 and within 60 m (two seconds after a load at the earliest), and only while the kind-1 list has room: `0xDC7B30` takes
 the oldest off the floor at 30. A copy a load took away is not made again (as a load takes the dropper's own); one
 that went otherwise (the cap, a block) is made again when there is room, three times at most, and a grant for a copy
-that went since the request makes it again and takes it. The host's list goes to a
+that went since the request (not by a load) makes it again and takes it. When the cap took that copy the list is still
+full (`0xDC7B30` removes the oldest and then counts the new one), so the grant waits, still ours, until the list has
+room with us in its map, and is made and taken then. The host's list goes to a
 guest who arrives. A pickup (`0xDC9460`, stdcall(manager, handle)) of a shared copy is decided by the host: the host
 takes it at once, a guest asks (message 37) and picks it up when the host says it is theirs (message 38, which every
 other game answers by removing its copy with `0xDC76F0`). A host whose lobby does not say `ptdesc_items` = 1 (before

@@ -265,13 +265,16 @@ Track* note_update(uint32_t manip, double gap, double slack, bool enemy) {
             if (late < 0) late = 0;
             t->jitter += (late - t->jitter) / 16.0;
             t->mean += d / 16.0;
-            double over = d - 0.5 * frame;  // later than the mean gap only
+            // Later than the mean gap only, and past what our own frame accounts for. In an ordinary frame that is half
+            // of it, as for the jitter. In a slow frame of ours, all of it: an update that came on time just after our
+            // last read waited the whole frame, and the copy stood inside our own hitch, which no smoothing can cover
+            // (a 45 ms gap in a 28 ms frame at 60 Hz is that and nothing more). What is later still is the sender's or
+            // the network's, and counts.
+            double over = d - (slow ? frame : 0.5 * frame);
             const double tail_cap = 2.0 * t->mean > kTailCapMin ? 2.0 * t->mean : kTailCapMin;
             if (over > tail_cap) over = tail_cap;
             t->tail *= std::exp(-g * 0.6931471805599453 / kTailHalfLife);
-            // An update taken in a slow frame of ours came late because we did: smoothing cannot cover that (the
-            // character stood inside our own hitch), so it does not count toward the tail.
-            if (over > t->tail && !slow) t->tail = over;
+            if (over > t->tail) t->tail = over;
         }
     }
     if (!g_dynamic || !g_receiving) {

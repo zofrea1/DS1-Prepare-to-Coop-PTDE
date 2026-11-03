@@ -2834,10 +2834,79 @@ __declspec(naked) void hk_sign_chr_type() {
     }
 }
 
+// Before the filter, the sign's maker (0xDB3800) asks which kinds of sign may stand now: the census 0xDB56D0 ->
+// 0xDB53C0 fills a table of 13 kinds on the stack (+4 + 12 k: 0 open, 3 closed, all closed to begin with), and
+// 0xDB4CF0 turns it into a mask; a sign whose kind (+0x22) is not in the mask is freed at 0xDB3A83 and the filter gets
+// none. The census opens nothing for a client (SessMan+0x90 == 6 at 0xDB53E6, or the scripted summon's slot): a
+// co-op guest's game ran Solaire's sign event with every test passed (human, the Gargoyles alive, his states off,
+// his summon loaded: 2026-11-02, Zofrea2, three tries) and no sign ever reached the filter. While a sign is being made
+// (0xDB3A48) and while the summon prompt picks a sign within reach (0xDB30E8: 0xDB4B30 reads the same table), a co-op
+// guest's census goes as the host's; the filter above still turns a guest's game away from every player's sign. The
+// network's player signs (0xDB43AF) keep the game's census.
+constexpr uint32_t kSignCensus = 0x00DB56D0;
+constexpr uint32_t kSignMakeCensus = 0x00DB3A48;
+constexpr uint32_t kSignTouchCensus = 0x00DB30E8;
+constexpr uint32_t kCensusClient = 0x00DB53E6;  // cmp dword ptr [eax+90h], 6 ; then je 0xDB5405 (client)
+uint8_t g_npc_census = 0;
+uint32_t g_census_ret = 0;
+
+bool __cdecl census_as_host() {
+    return g_npc_census && g_state.active && g_state.guest && !g_state.invader && seamless_rules();
+}
+
+// The census (thiscall, two arguments, ret 8) with g_npc_census set; neither site is reached from inside it.
+__declspec(naked) void hk_npc_census() {
+    __asm {
+        mov byte ptr [g_npc_census], 1
+        pop dword ptr [g_census_ret]
+        mov eax, kSignCensus
+        call eax
+        mov byte ptr [g_npc_census], 0
+        push dword ptr [g_census_ret]
+        ret
+    }
+}
+
+// The census's client test: ZF set for a client, as the cmp it replaces. A co-op guest during an NPC sign's census is
+// not one; the scripted summon's slot is tested after, as for the host.
+__declspec(naked) void hk_census_client() {
+    __asm {
+        cmp dword ptr [eax + 0x90], 6
+        jne done
+        push eax
+        push ecx
+        push edx
+        call census_as_host
+        test al, al
+        pop edx
+        pop ecx
+        pop eax
+        jz client
+        test esp, esp
+        ret
+    client:
+        cmp eax, eax
+    done:
+        ret
+    }
+}
+
 bool install_sign_filter() {
     static const uint8_t k1[7] = {0x83, 0x3D, 0x2C, 0xD8, 0x37, 0x01, 0x00};
     static const uint8_t k2[9] = {0x83, 0xF8, 0x08, 0x0F, 0x85, 0x82, 0x00, 0x00, 0x00};
-    if (!bytes_match(kSignSession, k1, sizeof(k1)) || !bytes_match(kSignChrType, k2, sizeof(k2))) return false;
+    static const uint8_t k3[7] = {0x83, 0xB8, 0x90, 0x00, 0x00, 0x00, 0x06};
+    if (!bytes_match(kSignSession, k1, sizeof(k1)) || !bytes_match(kSignChrType, k2, sizeof(k2)) ||
+        !bytes_match(kCensusClient, k3, sizeof(k3))) {
+        return false;
+    }
+    if (!redirect_call(kSignMakeCensus, kSignCensus, reinterpret_cast<void*>(&hk_npc_census)) ||
+        !redirect_call(kSignTouchCensus, kSignCensus, reinterpret_cast<void*>(&hk_npc_census))) {
+        return false;
+    }
+    uint8_t c3[7] = {0xE8, 0, 0, 0, 0, 0x90, 0x90};
+    const int32_t r3 = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_census_client) - (kCensusClient + 5));
+    std::memcpy(c3 + 1, &r3, 4);
+    if (!patch(kCensusClient, k3, c3, sizeof(c3))) return false;
     uint8_t c1[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
     const int32_t r1 = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_sign_session) - (kSignSession + 5));
     std::memcpy(c1 + 1, &r1, 4);

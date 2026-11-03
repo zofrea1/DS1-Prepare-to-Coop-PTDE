@@ -1940,11 +1940,18 @@ void mirror_event_done(uint32_t ev, bool was_on) {
 
 // A boss whose defeat flag is its event's end is set here straight in the store, so the flag sharing never saw it
 // either: the Stray Demon died in Darksim's game and a player elsewhere in that world never learned of it (no
-// rewards, no souls, alive in their world). Its defeat now goes to the others as a flag of ours.
-void share_boss_end(int flag, bool was_on) {
-    if (flag < 0 || was_on || !world::boss_defeat_flag(flag) || !seamless_rules() || !g_flag_listener) return;
+// rewards, no souls, alive in their world). Its defeat now goes to the others as a flag of ours. So does the death of
+// an enemy that never comes back (drops.cpp's rows: a crystal lizard, a Black Knight, Havel: "IF dead, Award Items,
+// END"): the games in its map take the run and end the event too, but a game elsewhere has no copy of the event and
+// never heard of it. On 2026-11-02 Darksim killed a crystal lizard and a Black Knight in Darkroot while the others
+// stood in Firelink and the Burg: the host's world kept both alive, and nobody else got their drops.
+void share_event_end(int flag, bool was_on) {
+    if (flag < 0 || was_on || !seamless_rules() || !g_flag_listener) return;
+    const bool boss = world::boss_defeat_flag(flag);
+    if (!boss && !drops::watched(flag)) return;
     if (!game::flag(flag) || g_contested.count(flag) || !shared_flag(flag)) return;
-    LOG_INFO("[coop] Boss defeat flag %d came on as its event ended: shared with the others", flag);
+    LOG_INFO("[coop] %s flag %d came on as its event ended: shared with the others",
+             boss ? "Boss defeat" : "One-time enemy's death", flag);
     g_flag_listener(flag, true);
 }
 
@@ -1954,7 +1961,7 @@ void __fastcall hk_event_done(uint32_t ev) {
     const int flag = event_done_flag(ev);
     const bool was_on = flag >= 0 && game::flag(flag);
     reinterpret_cast<void(__fastcall*)(uint32_t)>(g_event_done_orig)(ev);
-    if (GetCurrentThreadId() == g_main_thread) share_boss_end(end_flag, end_was_on);
+    if (GetCurrentThreadId() == g_main_thread) share_event_end(end_flag, end_was_on);
     mirror_event_done(ev, was_on);
 }
 
@@ -2768,6 +2775,11 @@ bool __cdecl sign_session_refused(uint32_t sign) {
     if (state != 6 && special == 0xFFFFFFFF && own) return false;
     if (special != 0xFFFFFFFF || !npc_sign(sign) || !g_state.active || !g_state.guest || g_state.invader ||
         !seamless_rules()) {
+        if (npc_sign(sign)) {
+            log_sign(special != 0xFFFFFFFF ? "not placed: a scripted summon holds the party's slot"
+                                           : "not placed: the game's session test (not a co-op guest of a session)",
+                     sign);
+        }
         return true;
     }
     log_sign("placed for us, a co-op guest, as in the host's game", sign);
@@ -2857,6 +2869,28 @@ int event_map(int id) {
     return ((id / 100000) % 100) << 24 | ((id / 10000) % 10) << 16;
 }
 
+// The lifts between two maps: the event is one map's, and its other end stands in the other one, where the rider who
+// calls it from there is. Firelink's lift up to the Undead Parish (11020301, m10_02, flag 11020302) and New Londo's
+// up to Firelink (11600200, m16_00, flag 11600201). A run from that end was put back as one from another map: the
+// rider's lift went, the others' stood where it was, and the lift's flag, which every game shares, said it had gone.
+// Their copy then answered calls for the other end only (its tests read that flag), or showed the lift up while it
+// was down (2026-11-02, both lifts). A run carries the conditions that passed (the bits under the event's +0x20), so
+// a game that takes it rides the lift the same way the rider's did.
+struct CrossLift {
+    int event;
+    int other_map;
+};
+constexpr CrossLift kCrossLifts[] = {{11020301, 0x0A010000}, {11600200, 0x0A020000}};
+
+bool lift_end_map(int event, int map) {
+    for (const CrossLift& l : kCrossLifts) {
+        if (l.event == event && (static_cast<uint32_t>(map) & 0xFFFF0000) == static_cast<uint32_t>(l.other_map)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // The map last reported by the player whose character is "the player" entity of a run (10001 + slot), -1 unknown.
 int remote_player_map(int entity) {
     const int slot = entity - 10001;
@@ -2900,14 +2934,14 @@ void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t ty
         }
         return;
     }
-    if ((static_cast<uint32_t>(theirs) & 0xFFFF0000) == static_cast<uint32_t>(map)) {
+    if ((static_cast<uint32_t>(theirs) & 0xFFFF0000) == static_cast<uint32_t>(map) || lift_end_map(id, theirs)) {
         // Taken: this game's copy of the event goes on from the line that game reached, its conditions testing that
         // player from now on. Logged the first two times for each event (the sleeping ambush, track_sleepers).
         static std::map<int, int> taken;
         static int lines = 0;
         if (taken.size() < 200 && ++taken[id] <= 2 && ++lines <= 100) {
-            LOG_INFO("[coop] Event %d: a run from player %d (in its map) taken here: line %u -> %u", id, by, at,
-                     *ptr<uint16_t>(pc));
+            LOG_INFO("[coop] Event %d: a run from player %d (%s) taken here: line %u -> %u", id, by,
+                     lift_end_map(id, theirs) ? "at the lift's other end" : "in its map", at, *ptr<uint16_t>(pc));
         }
         return;
     }
@@ -6201,8 +6235,39 @@ void set_peer_spots(const std::vector<PeerSpot>& spots) { g_peer_spots = spots; 
 uint32_t bid_for(uint32_t chr) { return chr ? net_priority(chr) : 0; }
 bool enemy_ai_off(uint32_t chr) { return chr && ai_off_here(chr); }
 
+namespace {
+
+// Solaire's sign before the Bell Gargoyles (m10_01 event 11015100) is placed once a load, for a human player (and a
+// host, which every game is here), while the Gargoyles live (flag 3), his summon character (6540) is loaded and none
+// of his states 1004 (hostile), 1005 (dead), 1006, 1010 and 1011 is on in the world's flags. It needs no talk with
+// him. On 2026-11-02 two human guests stood at that fog and no game placed the sign (the sign filter never saw it),
+// and the log had none of those flags. Logged once a load, 5 s into that map, in a session.
+void npc_sign_watch() {
+    static double in_map_since = 0;
+    static bool told = false;
+    const bool there = g_state.active && !game::loading() && game::player() &&
+                       (static_cast<uint32_t>(game::map_id()) & 0xFFFF0000) == 0x0A010000;
+    if (!there) {
+        in_map_since = 0;
+        if (game::loading()) told = false;
+        return;
+    }
+    const double t = GetTickCount64() / 1000.0;
+    if (in_map_since == 0) in_map_since = t;
+    if (told || t - in_map_since < 5.0) return;
+    told = true;
+    LOG_INFO("[coop] Solaire's sign at the Bell Gargoyles (event 11015100): Gargoyles %s, his summon %s, his states "
+             "1004 %d 1005 %d 1006 %d 1010 %d 1011 %d (any on: no sign), our character type %d (0 human)",
+             game::flag(3) ? "dead (no sign)" : "alive", chr_by_entity(6540) ? "loaded" : "not loaded (no sign)",
+             game::flag(1004) ? 1 : 0, game::flag(1005) ? 1 : 0, game::flag(1006) ? 1 : 0, game::flag(1010) ? 1 : 0,
+             game::flag(1011) ? 1 : 0, game::chr_type());
+}
+
+}  // namespace
+
 void tick() {
     g_main_thread = GetCurrentThreadId();
+    npc_sign_watch();
     // A co-op guest's loot and items follow the host's (single player) rules for as long as it is a guest, also
     // while it leaves (the area unload on the way home must clean up the same way the items were made).
     g_strict = (g_state.active && g_state.guest && !g_state.invader) ? 0 : 1;

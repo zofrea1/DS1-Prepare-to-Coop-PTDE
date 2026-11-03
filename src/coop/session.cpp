@@ -1970,8 +1970,8 @@ void probe_state(bool force) {
         put(" menu req %d open %02X", static_cast<int>(peek32(mm + 0x60)), open);
         const uint32_t dlg = peek32(mm + 0x9E8);
         if (dlg > 0x10000 && dlg != 0xFFFFFFFF) {
-            put(" dialog %d res %d/%d", static_cast<int>(peek32(dlg)), static_cast<int>(peek32(dlg + 0x18)),
-                static_cast<int>(peek32(dlg + 0x1C)));
+            put(" dialog %d res %d/%d kind %d", static_cast<int>(peek32(dlg)), static_cast<int>(peek32(dlg + 0x18)),
+                static_cast<int>(peek32(dlg + 0x1C)), static_cast<int>(peek32(dlg + 0xC)));
         }
         // The dialog slots (MenuMan+0x9EC: index at +4, five slots of 0x34 from +8, +0x24 = requested), where
         // the "items obtained" box waits to be shown.
@@ -3549,6 +3549,50 @@ void player_net_watch() {
     }
 }
 
+// A player's character here far from where their own game has them (their Info, every second), in our map, for a
+// while: on 2026-11-02 the laptop host in New Londo could not see mmamun, whose character there was made and alive
+// all along, after he rode the Firelink lift down while the host's game left its lift where it was (rules.cpp,
+// kCrossLifts). Logged once each time it begins, with where the character stands and where they are.
+void stray_copy_watch() {
+    struct Stray {
+        double since = 0;
+        bool told = false;
+    };
+    static std::map<uint64_t, Stray> strays;
+    static double last = 0;
+    static int lines = 0;
+    if (now() - last < 1.0) return;
+    last = now();
+    if (g_role == Role::None || game::loading()) {
+        strays.clear();
+        return;
+    }
+    constexpr float kFar = 30.0f;
+    constexpr double kFor = 6.0;
+    const int here = game::map_id();
+    std::map<uint64_t, Stray> seen;
+    for (const auto& [chr, id] : g_chr_peer) {
+        const PeerInfo* p = nullptr;
+        for (const auto& q : g_peers) p = q.id == id ? &q : p;
+        game::Vec3 at{};
+        if (!p || p->dead || p->map != here || now() - p->pos_at > 2.0 || !game::chr_position(chr, &at)) continue;
+        const float dx = at.x - p->pos[0], dy = at.y - p->pos[1], dz = at.z - p->pos[2];
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < kFar) continue;
+        Stray s = strays.count(id) ? strays[id] : Stray{};
+        if (s.since == 0) s.since = now();
+        if (!s.told && now() - s.since >= kFor && lines < 40) {
+            s.told = true;
+            ++lines;
+            LOG_INFO("[coop] %s's character here stands %.0f m from where their game has them, for %.0f s now: at "
+                     "(%.1f, %.1f, %.1f), they are at (%.1f, %.1f, %.1f) in map %08X", p->name.c_str(), d,
+                     now() - s.since, at.x, at.y, at.z, p->pos[0], p->pos[1], p->pos[2], static_cast<uint32_t>(here));
+        }
+        seen[id] = s;
+    }
+    strays.swap(seen);
+}
+
 // The other players' characters are updated every frame wherever they stand, as the event command "Set Network
 // Update Rate: Always" (2004[34], 0xD6D780) does for the Hellkite: chr+0x1FD bit 0 fixes the rate chr+0xF4 at 0.
 // Otherwise WorldChrMan's update (0xE3F7D7..0xE3F8D7) gives a character off screen a lower rate and one whose state
@@ -3801,6 +3845,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             p->deaths = m.deaths;
             p->map = m.map;
             std::memcpy(p->pos, m.pos, sizeof(p->pos));
+            p->pos_at = now();
             p->ping_ms = m.ping_ms;
             p->invader = m.invader != 0;
             const bool dead = m.dead != 0;
@@ -5412,6 +5457,7 @@ void tick() {
     reconcile_ceremonies();
     remote_characters_upkeep();
     player_net_watch();
+    stray_copy_watch();
     itemshare_tick();
     // The host: our bonfires' kindling to the guests whenever it changes (a light, a Kindle, a guest's Kindle).
     if (world::bonfires_changed() && g_role == Role::Host && g_lobby) send_bonfires(0);

@@ -522,8 +522,9 @@ bool in_control() {
         if (!read8(mm + off, &open) || open) return false;
     }
     if (read32(mm + 0x9E8, &dialog) && dialog > 0x10000) {
-        uint32_t text = 0;
-        if (read32(dialog, &text) && text != 0) return false;
+        // An event's message without buttons (+0xC = 9) leaves its text behind once shown (world::menu_open).
+        uint32_t text = 0, kind = 0;
+        if (read32(dialog, &text) && text != 0 && !(read32(dialog + 0xC, &kind) && kind == 9)) return false;
     }
     return true;
 }

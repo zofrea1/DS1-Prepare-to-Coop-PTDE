@@ -42,6 +42,7 @@ struct PeerInfo {
     int deaths = 0;
     int map = -1;
     float pos[3] = {};
+    double pos_at = 0;       // when pos and map last came (Info, every second)
     int ping_ms = -1;        // their own round trip to their host, as they report it (Info)
     int rtt_ms = -1;         // our own round trip to them (kPing / kPong, 1.4.0), -1 none yet
     double rtt_at = 0;       // when it was last measured

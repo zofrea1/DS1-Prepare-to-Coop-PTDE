@@ -54,13 +54,14 @@ constexpr int kRowCount = static_cast<int>(sizeof(kRows) / sizeof(kRows[0]));
 constexpr uint8_t kFloorBit = 1u << 3;  // bits 0-2: lots[0..2]
 
 // Our game's own roll can come a little after the flag: the floor drop waits for the death animation, an award for
-// our copy of the enemy to die, and common event 970's second and third lots for 5 s after the first.
+// our copy of the enemy to die, and common event 970's second and third lots for 5 s after the first. After this the
+// mod rolls it, also while our copy of the enemy still stands: a drop the mod gave is never given again by the game
+// (allow_award, floor_drop_here), so that copy dying here later gives nothing twice. Until 1.4.0 a standing copy
+// waited 90 s for its death here: on 2026-11-02 Darksim killed Havel and the players elsewhere in the Undead Burg,
+// whose Havel still stood, got his ring a minute and a half later (the Titanite Demon's drop the same).
 constexpr double kWait = 12.0;
-// An enemy still standing in our game may yet die here and drop for us: its drop waits for that, for a load (the
-// enemy's script then removes it: killed, or disabled with its health as it was, like the crystal lizards) or for
-// this long. A drop the mod gave is never given again by the game (allow_award, floor_drop_here), also after the
-// session while its flag is on.
-constexpr double kAliveWait = 90.0;
+// An enemy our game has not loaded at all cannot drop for us: rolled after this.
+constexpr double kNotLoadedWait = 2.0;
 constexpr double kForget = 120.0;    // a record without a drop of ours outlives its last change by this much
 constexpr double kRetry = 5.0;       // an item that did not fit in the inventory is tried again this often
 
@@ -694,9 +695,10 @@ void tick() {
     for (auto it = g_rows.begin(); it != g_rows.end();) {
         const Row& r = kRows[it->first];
         State& s = it->second;
-        if (act && s.armed_at > 0 && t - s.armed_at >= kWait) {
+        if (act && s.armed_at > 0) {
             const uint8_t missing = needs(r) & ~s.got;
-            if (missing && (enemy_gone(r.entity) || g_loads != s.loads || t - s.armed_at >= kAliveWait)) {
+            const double waited = t - s.armed_at;
+            if (missing && (waited >= kWait || (waited >= kNotLoadedWait && r.entity && !chr_by_entity(r.entity)))) {
                 claim(&s, r, missing, t, "");
             }
         }

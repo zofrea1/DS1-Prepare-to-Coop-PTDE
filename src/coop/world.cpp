@@ -1942,9 +1942,15 @@ static void finish_death(const char* why) {
 }
 
 // A menu or dialog is open (the indictment menu after an invader's kill holds the death until it closes; the same
-// checks as the co-op items' "in control").
+// checks as the co-op items' "in control"). The dialog ([MenuMan+0x9E8]: +0 its text) is opened by 0xC2B3B0, which
+// stores the menu request in +0xC as well (0xC7EE00): 7 or 8 for one with buttons, 9 for an event's message without
+// any ("Display Generic Dialog ... No Buttons": a locked door's, a key's). A message without buttons asks nothing and
+// holds nobody; it shows while its request is up, and its text then stays in the dialog until another dialog replaces
+// it. On 2026-11-02 a door's 10010883 stayed there for 34 minutes in damn_vix's game: every Homeward Bone and Darksign
+// trip of the party "waited for our menu" there and never came (his souls taken all the same), and mmamun's game the
+// same for 5 minutes. A dialog with buttons keeps its request up while it is open, and its text goes when answered.
 bool menu_open() {
-    uint32_t mm = 0, request = 0, dialog = 0, text = 0;
+    uint32_t mm = 0, request = 0, dialog = 0, text = 0, kind = 0;
     if (!read32(kMenuManVar, &mm) || mm < 0x10000) return false;
     if (read32(mm + 0x60, &request) && request != 0) return true;
     static const uint32_t kOpen[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC};
@@ -1952,7 +1958,8 @@ bool menu_open() {
         uint8_t open = 0;
         if (read8(mm + off, &open) && open) return true;
     }
-    return read32(mm + 0x9E8, &dialog) && dialog > 0x10000 && read32(dialog, &text) && text != 0;
+    if (!read32(mm + 0x9E8, &dialog) || dialog <= 0x10000 || !read32(dialog, &text) || text == 0) return false;
+    return !(read32(dialog + 0xC, &kind) && kind == 9);
 }
 
 static void death_watch_tick() {

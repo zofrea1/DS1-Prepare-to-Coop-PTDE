@@ -1334,39 +1334,65 @@ int scaled_max(int base, int id) {
     return static_cast<int>(static_cast<float>(base) * rate);
 }
 
+// `m` is the max HP one of our scaling rows other than `except` gives an enemy of max HP `base` (0: any of them): the
+// max the game worked out for it at another player count. Enemy and boss rows alike (an enemy can become a boss).
+bool other_level_max(int base, int m, int except) {
+    static const int kFirst[4] = {kScaleEnemy, kScaleBoss, kScaleEnemy2, kScaleBoss2};
+    static const int kCount[4] = {5, 5, 2, 2};
+    for (int k = 0; k < 4; ++k) {
+        for (int n = 0; n < kCount[k]; ++n) {
+            const int id = kFirst[k] + n;
+            if (id != except && std::abs(scaled_max(base, id) - m) <= 1) return true;
+        }
+    }
+    return false;
+}
+
 // The game works out an enemy's max HP from its effects only while it updates the enemy: one far from this game's
 // player (its update rate) keeps the max HP it had, with our scaling effect on it. HP and damage go between the
 // games as numbers, so that copy was hurt by the same amounts as a nearby, scaled one and died first: in the
 // 2026-10-23 test the host at Firelink saw a Burg hollow die at 14/85 HP while the guest's copy stood at 43/114,
 // each down 71, and a Black Knight died in the host's game part of the way through the guest's fight. Such a copy
 // gets the scaled max HP here (the damage it took kept), as the game itself gives it once the enemy updates again.
+// The health that goes with a new max HP `to` in place of `m`: a bigger max keeps the points lost (the damage taken
+// counts the same in every game), a smaller one the share of health (the points lost could leave nothing).
+int settled_hp(int h, int m, int to) {
+    if (to >= m) return std::max(1, std::min(to, h >= m ? to : to - (m - h)));
+    return std::max(1, std::min(to, static_cast<int>(static_cast<double>(h) * to / m + 0.5)));
+}
+
 void settle_max(uint32_t chr, int want) {
     const auto b = g_base_max.find(chr);
     if (b == g_base_max.end() || b->second <= 0) return;
     const int base = b->second, m = max_hp(chr), h = hp(chr);
     const auto f = g_forced_max.find(chr);
     if (!want) {
-        // Our scaling is off again: a max HP we wrote goes back, if the game has not changed it since.
-        if (f == g_forced_max.end()) return;
-        if (m == f->second && m > 0 && h > 0) {
+        // Our scaling is off again: a max HP we wrote goes back, if the game has not changed it since, and so does
+        // one the game worked out with our row on while it still updated the enemy (see below).
+        const bool ours = f != g_forced_max.end() && m == f->second;
+        if (f != g_forced_max.end()) g_forced_max.erase(f);
+        if ((ours || (m != base && other_level_max(base, m, 0))) && m > 0 && h > 0) {
             *ptr<int>(chr + 0x2D8) = base;
-            *ptr<int>(chr + 0x2D4) = std::max(1, std::min(base, h >= m ? base : base - (m - h)));
+            *ptr<int>(chr + 0x2D4) = settled_hp(h, m, base);
         }
-        g_forced_max.erase(f);
         return;
     }
     const auto at = g_scaled_at.find(chr);
     if (at == g_scaled_at.end() || now() - at->second < 1.5) return;
     const int expected = scaled_max(base, want);
-    const bool stale = m == base || (f != g_forced_max.end() && m == f->second);
+    // Stale: its own max (never scaled here), the one we wrote, or the one the game worked out itself at another
+    // player count while it still updated the enemy. The player count went down as players left and our row went down
+    // with it, but an enemy far from this game's player kept the max of more players until its player came near it
+    // again (the game works it out only then): the scaling seemed to go up as players joined and never come down.
+    const bool stale = m == base || (f != g_forced_max.end() && m == f->second) || other_level_max(base, m, want);
     if (!stale || std::abs(m - expected) <= 1 || h <= 0) return;
     *ptr<int>(chr + 0x2D8) = expected;
-    *ptr<int>(chr + 0x2D4) = std::max(1, std::min(expected, h >= m ? expected : expected - (m - h)));
+    *ptr<int>(chr + 0x2D4) = settled_hp(h, m, expected);
     g_forced_max[chr] = expected;
     static int lines = 0;
     if (++lines <= 20) {
-        LOG_INFO("[coop] An enemy this game does not update kept its own max HP: scaled here (%d/%d -> %d/%d)", h, m,
-                 hp(chr), expected);
+        LOG_INFO("[coop] An enemy this game does not update kept %s max HP: scaled here (%d/%d -> %d/%d)",
+                 m == base ? "its own" : "an older scaling's", h, m, hp(chr), expected);
     }
 }
 

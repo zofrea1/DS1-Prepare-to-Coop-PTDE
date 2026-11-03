@@ -27,8 +27,11 @@ void set_host_scaling(const int* scaling);
 void tick();
 // A boss's defeat flag (every common event 970's first parameter).
 bool boss_defeat_flag(int id);
-// Our game is about to pay a boss's souls (its clear bonus, rules.cpp hk_clear_bonus). False: that boss's souls were
-// paid here from another player's game already (this is our game's late payment of them): skip it.
+// Our game's scripts handle the defeat of the boss whose entity is `entity` (Handle Boss Defeat, 2003[12]): the souls
+// our game pays next are that boss's (own_boss_souls).
+void boss_defeat_handled(int entity);
+// Our game is about to pay a boss's souls (its clear bonus, rules.cpp clear_bonus_goes). False: that boss's souls
+// were paid here from another player's game already (this is our game's late payment of them): skip it.
 bool own_boss_souls(int souls);
 // Another player's game paid the souls of the boss whose defeat flag is `flag` (kBossSouls): ours if our game does
 // not pay them itself.

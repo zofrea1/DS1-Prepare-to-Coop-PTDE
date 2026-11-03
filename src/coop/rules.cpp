@@ -1504,34 +1504,67 @@ bool install_kill_reward() {
 // invader that arrived in a 1.2.0 host's world while a guest fought the Moonlight Butterfly was there when it died 8 s
 // later: sent home with 6500 of its souls (2026-10-26). In a session an invader takes neither: the souls of the
 // clear bonus go nowhere and the world's "every player" item awards pass it by. Being sent home stays.
+// The scripts have three ways to pay the bonus, each PGD+0xF0 to the player's souls and zeroed: GetClearBonus
+// (0xD5DEB0), GetSoloClearBonus (0xD5DE60) and AddBlockClearBonus (0xD5E480), the Lua functions registered at
+// 0x108CB40, 0x108CB70 and 0x108CBD0. Only the first was watched: no game of the 2026-11-02 tests logged a payment
+// of a boss's souls, the game that ran the Stray Demon's defeat (Darksim) and Taurus's (Zofrea2) included, so
+// none told the others, and every player elsewhere was left with "no player's game told us its souls".
 constexpr uint32_t kGetClearBonus = 0x00D5DEB0;
+constexpr uint32_t kGetSoloClearBonus = 0x00D5DE60;
+constexpr uint32_t kAddBlockClearBonus = 0x00D5E480;
 constexpr uint32_t kAwardAllSite = 0x00BC23C0;
 constexpr uint32_t kAwardAll = 0x00D66590;
 void* g_clear_bonus_orig = nullptr;
+void* g_solo_bonus_orig = nullptr;
+void* g_block_bonus_orig = nullptr;
+// Handle Boss Defeat (2003[12], 0xBC1E8C) asks the Lua event system for event 4050 with the boss's entity: thiscall
+// 0xD66240(4050, entity), ret 8. The boss our game's next payment is for (world.cpp own_boss_souls).
+constexpr uint32_t kBossDefeatSite = 0x00BC1EB2;
+constexpr uint32_t kLuaEventRequest = 0x00D66240;
 
 bool invader_here() { return g_state.active && g_state.invader; }
 
-void __stdcall hk_clear_bonus(int arg) {
-    const uint32_t pgd0 = game::player_game_data();
+char __fastcall hk_boss_defeat(void* lua, void* edx, int event, int entity) {
+    world::boss_defeat_handled(entity);
+    return reinterpret_cast<char(__fastcall*)(void*, void*, int, int)>(kLuaEventRequest)(lua, edx, event, entity);
+}
+
+// Whether our game's payment of the clear bonus goes ahead (false: zeroed here, the original not called).
+bool clear_bonus_goes(const char* via) {
+    const uint32_t pgd = game::player_game_data();
     float due = 0;
-    if (pgd0) read32(pgd0 + 0xF0, reinterpret_cast<uint32_t*>(&due));
-    if (!invader_here() && g_state.active && due >= 1.0f) {
-        if (!world::own_boss_souls(static_cast<int>(due))) {
-            // This boss's souls were paid here from another game's amount already (world.cpp): only this late
-            // payment of the same boss is skipped.
-            *ptr<float>(pgd0 + 0xF0) = 0.0f;
-            return;
-        }
-        LOG_INFO("[coop] A boss's %.0f souls: paid by our game (the others are told)", due);
-    }
+    if (pgd) read32(pgd + 0xF0, reinterpret_cast<uint32_t*>(&due));
     if (invader_here()) {
-        const uint32_t pgd = game::player_game_data();
-        float bonus = 0;
-        if (pgd && read32(pgd + 0xF0, reinterpret_cast<uint32_t*>(&bonus))) *ptr<float>(pgd + 0xF0) = 0.0f;
-        LOG_INFO("[coop] A boss died in the world we invade: its %.0f souls are not ours", bonus);
-        return;
+        if (pgd) *ptr<float>(pgd + 0xF0) = 0.0f;
+        LOG_INFO("[coop] A boss died in the world we invade: its %.0f souls are not ours (%s)", due, via);
+        return false;
     }
-    reinterpret_cast<void(__stdcall*)(int)>(g_clear_bonus_orig)(arg);
+    if (!g_state.active) return true;
+    if (due < 1.0f) {
+        static int told = 0;
+        if (++told <= 20) LOG_INFO("[coop] %s: no souls due", via);
+        return true;
+    }
+    LOG_INFO("[coop] %s pays our player %.0f souls", via, due);
+    if (!world::own_boss_souls(static_cast<int>(due))) {
+        // This boss's souls were paid here from another game's amount already (world.cpp): only this late payment
+        // of the same boss is skipped.
+        *ptr<float>(pgd + 0xF0) = 0.0f;
+        return false;
+    }
+    return true;
+}
+
+void __stdcall hk_clear_bonus(int arg) {
+    if (clear_bonus_goes("GetClearBonus")) reinterpret_cast<void(__stdcall*)(int)>(g_clear_bonus_orig)(arg);
+}
+
+void __stdcall hk_solo_clear_bonus(int arg) {
+    if (clear_bonus_goes("GetSoloClearBonus")) reinterpret_cast<void(__stdcall*)(int)>(g_solo_bonus_orig)(arg);
+}
+
+void __cdecl hk_block_clear_bonus() {
+    if (clear_bonus_goes("AddBlockClearBonus")) reinterpret_cast<void(__cdecl*)()>(g_block_bonus_orig)();
 }
 
 // A map script's award in our game, for the one-time drops (drops.cpp): the event running it (0xBC3AB0's eax:
@@ -2840,12 +2873,15 @@ __declspec(naked) void hk_sign_chr_type() {
 // none. The census opens nothing for a client (SessMan+0x90 == 6 at 0xDB53E6, or the scripted summon's slot): a
 // co-op guest's game ran Solaire's sign event with every test passed (human, the Gargoyles alive, his states off,
 // his summon loaded: 2026-11-02, Zofrea2, three tries) and no sign ever reached the filter. While a sign is being made
-// (0xDB3A48) and while the summon prompt picks a sign within reach (0xDB30E8: 0xDB4B30 reads the same table), a co-op
-// guest's census goes as the host's; the filter above still turns a guest's game away from every player's sign. The
-// network's player signs (0xDB43AF) keep the game's census.
+// (0xDB3A48), while the summon prompt picks a sign within reach (0xDB30E8: 0xDB4B30 reads the same table), and while
+// the sign manager's update (0xDB4250, every frame) works out whether each sign shows (0xDB42A6: 0xDB4B30 of its kind
+// into sign+0x23; 0 hides it at 0xDB1A58, Grok 825a68bd: the sign kept by the maker went out on the next frame), a
+// co-op guest's census goes as the host's; the filter above still turns a guest's game away from every player's sign.
+// The network's player signs (0xDB43AF, later in the same update) keep the game's census.
 constexpr uint32_t kSignCensus = 0x00DB56D0;
 constexpr uint32_t kSignMakeCensus = 0x00DB3A48;
 constexpr uint32_t kSignTouchCensus = 0x00DB30E8;
+constexpr uint32_t kSignUpdateCensus = 0x00DB42A6;
 constexpr uint32_t kCensusClient = 0x00DB53E6;  // cmp dword ptr [eax+90h], 6 ; then je 0xDB5405 (client)
 uint8_t g_npc_census = 0;
 uint32_t g_census_ret = 0;
@@ -2854,7 +2890,7 @@ bool __cdecl census_as_host() {
     return g_npc_census && g_state.active && g_state.guest && !g_state.invader && seamless_rules();
 }
 
-// The census (thiscall, two arguments, ret 8) with g_npc_census set; neither site is reached from inside it.
+// The census (thiscall, two arguments, ret 8) with g_npc_census set; none of the sites is reached from inside it.
 __declspec(naked) void hk_npc_census() {
     __asm {
         mov byte ptr [g_npc_census], 1
@@ -2900,7 +2936,8 @@ bool install_sign_filter() {
         return false;
     }
     if (!redirect_call(kSignMakeCensus, kSignCensus, reinterpret_cast<void*>(&hk_npc_census)) ||
-        !redirect_call(kSignTouchCensus, kSignCensus, reinterpret_cast<void*>(&hk_npc_census))) {
+        !redirect_call(kSignTouchCensus, kSignCensus, reinterpret_cast<void*>(&hk_npc_census)) ||
+        !redirect_call(kSignUpdateCensus, kSignCensus, reinterpret_cast<void*>(&hk_npc_census))) {
         return false;
     }
     uint8_t c3[7] = {0xE8, 0, 0, 0, 0, 0x90, 0x90};
@@ -2985,9 +3022,10 @@ void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t ty
     if (map == -1) return;
     const int theirs = remote_player_map(by);
     if (theirs == -1) {
-        // remote_player_map compares PlayerIns+0x410 with the run's slot, but +0x410 holds a player id in
-        // 10000000..10000039 (PlayerIns vt+0xA8, 0xE46E80), so it never matches and every run is taken (2026-10-17
-        // review). Logged a few times to learn how the run's player (10001 + slot) maps to those ids.
+        // No map for the run's player: no character here has the run's slot at +0x410, or their game has not told us
+        // its map yet. A remote player's +0x410 is its slot: 1..10 in the lines below (2026-11-02), and runs matched
+        // by it were logged "in its map", "at the lift's other end" and "not taken here" (Grok 825a68bd took it for a
+        // player id of 10000000..10000039, the range 0xE46E80 tests). Logged a few times.
         static int told = 0;
         if (told < 5) {
             ++told;
@@ -5956,7 +5994,14 @@ int install() {
     {
         static const uint8_t k[5] = {0xA1, 0x00, 0x87, 0x37, 0x01};  // mov eax,[01378700h]
         g_clear_bonus_orig = detour(kGetClearBonus, k, sizeof(k), reinterpret_cast<void*>(&hk_clear_bonus));
-        failed += install_one("boss clear bonus (invaders)", g_clear_bonus_orig != nullptr);
+        failed += install_one("boss clear bonus", g_clear_bonus_orig != nullptr);
+        static const uint8_t k2[7] = {0x83, 0x3D, 0x90, 0xD7, 0x37, 0x01, 0x00};  // cmp dword ptr [0137D790h],0
+        g_solo_bonus_orig = detour(kGetSoloClearBonus, k2, sizeof(k2), reinterpret_cast<void*>(&hk_solo_clear_bonus));
+        failed += install_one("boss solo clear bonus", g_solo_bonus_orig != nullptr);
+        g_block_bonus_orig = detour(kAddBlockClearBonus, k, sizeof(k), reinterpret_cast<void*>(&hk_block_clear_bonus));
+        failed += install_one("block clear bonus", g_block_bonus_orig != nullptr);
+        failed += install_one("boss defeat (souls)", redirect_call(kBossDefeatSite, kLuaEventRequest,
+                                                                   reinterpret_cast<void*>(&hk_boss_defeat)));
         failed += install_one("event item awards (invaders)",
                               redirect_call(kAwardAllSite, kAwardAll, reinterpret_cast<void*>(&hk_award_all)));
         failed += install_one("event item lot awards",

@@ -8,8 +8,8 @@ which it includes: its `xinput1_3.dll` is the FPS Unlock plus the co-op, switche
 It is inspired by Yui's **Seamless Co-op** mod for Dark Souls Remastered (`ds1sc.dll`, called ds1sc
 below), which only exists for Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and written again
 for PTDE's engine. The goal of this first stage is a faithful port: the same items, the same rules, the same
-session behaviour. Where PTDE's engine sets a hard limit (four players instead of six), the port keeps the
-engine's limit.
+session behaviour. Where PTDE's engine sets a hard limit, the port keeps the engine's limit; its four players were
+raised to eight in 1.4.0 (`MaxPlayers`, docs/MORE-PLAYERS.md).
 
 **Status:** release candidate for 1.0.0. Tested with up to three players on two PCs and a Steam Deck:
 joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, leaving and lost connections.
@@ -168,8 +168,8 @@ Players need the same co-op protocol: 1.0.0 and 1.1.0 both speak 8. Lobbies and 
 to Co-op version, which a later release can compare; when the protocol changes, both sides are told who needs
 to update.
 
-The Steam lobby has room for 16 members, while the game keeps four players (the host and three others, guests
-and invaders together), which the host enforces when it answers. Players of other games that use Spacewar, or
+The Steam lobby has room for 16 members, while a session keeps `MaxPlayers` players (8 by default since 1.4.0; the
+game's own 4 before; the host and the others, guests and invaders together), which the host enforces when it answers. Players of other games that use Spacewar, or
 knocks that never get through, can sit in a lobby but cannot fill it. Steam lobbies cannot remove a member.
 
 An invader picks at random among the worlds that allow invaders. Dried Fingers make a world 1.65 times as likely
@@ -1111,7 +1111,8 @@ is not in the table.
 
 ## Differences from the Remastered mod
 
-- **Four players, not six:** PTDE's engine keeps three remote players in a world.
+- **Eight players, not six:** PTDE's engine keeps three remote players in a world; 1.4.0 widens it to seven
+  (`MaxPlayers`, docs/MORE-PLAYERS.md).
 - **Party HP across areas** (ds1sc shows the HP of players in other areas) is not implemented yet.
 - **Invasion rewards:** the Remastered mod's covenant reward for a winning invader is not reproduced; the side that
   wins an invasion gets Humanity instead (`InvasionRewards`).

@@ -1,7 +1,8 @@
 # More than four players (MaxPlayers)
 
-Status in 1.4.0: **experimental, off by default** (`MaxPlayers = 4`). Stages 1 and 2 are built and checked against
-the game's own code, and ran with five players on 2026-10-31 (below: what that test found).
+Status in 1.4.0: **on by default** (`MaxPlayers = 8`). Stages 1 and 2 are built and checked against the game's own
+code, ran with five players on 2026-10-31 (below: what that test found), and with eight on 2026-11-02. `MaxPlayers = 4`
+keeps the game's own number.
 
 ## Is eight harder than six?
 

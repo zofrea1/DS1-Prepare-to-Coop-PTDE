@@ -1,6 +1,6 @@
 # Prepare to Co-op Edition
 
-Play all of **Dark Souls: Prepare to Die Edition** together with up to three friends (seven with the experimental `MaxPlayers`), from the Undead Asylum to the Kiln, without the limits of the game's own co-op. Guests keep their own body and progress, deaths respawn at a bonfire without bringing back the enemies the team has killed, a player who falls during a boss fight or an invasion spectates the others until the team wins or wipes (a wipe respawns everyone together in a world that starts over), boss kills and area changes no longer end the session, multiplayer fog walls are gone, a bonfire rest resets everyone's world (never in the middle of a teammate's boss fight), progress made together carries home, and enemies scale with the number of players. Evil spirits can invade a session too.
+Play all of **Dark Souls: Prepare to Die Edition** together with up to seven friends, from the Undead Asylum to the Kiln, without the limits of the game's own co-op. Guests keep their own body and progress, deaths respawn at a bonfire without bringing back the enemies the team has killed, a player who falls during a boss fight or an invasion spectates the others until the team wins or wipes (a wipe respawns everyone together in a world that starts over), boss kills and area changes no longer end the session, multiplayer fog walls are gone, a bonfire rest resets everyone's world (never in the middle of a teammate's boss fight), progress made together carries home, and enemies scale with the number of players. Evil spirits can invade a session too.
 
 It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of that mod is used: its behaviour was studied and written again for Prepare to Die Edition's engine, with the same items, rules and session behaviour wherever the engine allows.
 
@@ -16,7 +16,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 ## What's new in 1.4.0
 
-- **Up to eight players** (`MaxPlayers`, experimental, 4 by default; every player needs 1.4.0 above four). See [docs/MORE-PLAYERS.md](docs/MORE-PLAYERS.md).
+- **Up to eight players** in a session, the host, guests and invaders together (`MaxPlayers`, 8 by default; above four, every player needs 1.4.0). See [docs/MORE-PLAYERS.md](docs/MORE-PLAYERS.md).
 - **Give each other items**: an item you drop lies on every co-op player's floor, and the first to pick it up has it (`ShareDroppedItems`).
 - **Guests can summon NPCs** (Solaire and the other signs), the NPC invaders come to guests too, and **NPC summons belong to the world**: they stay through deaths, rests, travel and their summoner leaving.
 - **Dynamic smoothing** (`DynamicSmoothing`): each player and enemy is smoothed by how evenly its own updates arrive, shown as "lerp" on the health bars, with a fresh ping to every player.
@@ -114,7 +114,7 @@ In the `[PrepareToCoop]` section of `PTDE-Coop-FPS-Unlock.ini` (the FPS Unlock's
 | `GuestWorldEvents` | `true` | Guests run the world's scripted events in their own game, as the host does (bosses, lifts, cutscenes, the Hellkite). |
 | `BonfireAnimations` | `true` | The others see you sit, rest and stand at a bonfire. |
 | `ShareDroppedItems` | `true` | An item a co-op player drops lies on every co-op player's floor, and the first to pick it up has it. The host's setting decides for the session. |
-| `MaxPlayers` | `4` | How many players a session holds, the host, guests and invaders together, 2 to 8 (NPC summons do not count). Above the game's own 4 is experimental: a host lets a fifth player in only when every game in the session, the joiner's too, runs 1.4.0 and is set high enough. See [docs/MORE-PLAYERS.md](docs/MORE-PLAYERS.md). |
+| `MaxPlayers` | `8` | How many players a session holds, the host, guests and invaders together, 2 to 8 (NPC summons do not count; 4 is the game's own number). A host lets a fifth player in only when every game in the session, the joiner's too, runs 1.4.0 and is set high enough. See [docs/MORE-PLAYERS.md](docs/MORE-PLAYERS.md). |
 | `OverheadPlayerDisplay` | `5` | Another player's health bar: their character's name, with 0 nothing more, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul level, ping and "lerp" (the smoothing their character is drawn with in your game; see `DynamicSmoothing`). The ping is your own round trip to that player, measured four times a second. |
 | `NetworkTickRate` | `30` | How many times a second every game of your session sends where its player is (and the enemies it moves): 6, the game's own, up to 60. 30 is the default and a big improvement over the game's 6; 60 is viable and recommended when everyone in the session has a low-latency or excellent connection. Higher draws the others closer to where they really are, for more upload (about 2 KB a second to each other player at 30, twice that at 60). On an uneven connection raise `NetworkSmoothing` rather than lowering this. The host's setting is used by the whole session (players of 1.2.0 or older still send 6). |
 | `NetworkSmoothing` | `33` | Above 6 updates a second, how many ms other players' characters (and enemies other games move) stay behind their updates, as a margin for late ones: they are drawn about one update interval plus this behind, plus the ping (about 66 ms at 30 a second, 50 ms at 60, 100 ms at 15; 6 a second stays the game's 200 ms). 33 ms is about one frame at 30 FPS or two at 60 FPS, enough to hide most ping spikes. Each player's own, 0 to 200; raise it if others move in jerks. With `DynamicSmoothing` on, this is only where each character's smoothing starts. |
@@ -127,7 +127,7 @@ In the `[PrepareToCoop]` section of `PTDE-Coop-FPS-Unlock.ini` (the FPS Unlock's
 
 ## Notes and known limits
 
-- Four players by default, the game's own number. Up to eight with `MaxPlayers` is experimental: every player needs 1.4.0 and the setting high enough, each sends to every other (more upload), and with seven others on the health bars (the HUD has seven) an NPC summon has none.
+- Up to eight players (`MaxPlayers`). Above four, every player in the session needs 1.4.0 and the setting high enough; each game sends to every other, so a full session takes more upload; with seven others on the health bars (the HUD has seven) an NPC summon has none.
 - **Online play: no guarantees, use at your own risk.** The mod changes the game in memory while it runs and runs the game under Spacewar. No responsibility is accepted for bans, lost progress or anything else that results from using it.
 - Some cutscenes that move a player into another map have only been checked for the common ones (the Undead Asylum's crow, the Painted World).
 - An enemy killed in the last moment of a fallen player's load can come back in that player's game.

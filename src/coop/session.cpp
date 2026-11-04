@@ -757,6 +757,7 @@ bool g_bloody_on = true;
 void bloody_add(const char* who) {
     if (!g_bloody_on || g_bloody >= kMaxBloody) return;
     ++g_bloody;
+    g_last_state = 0;  // the guests hear it now, so their enemies grow when the host's do
     LOG_INFO("[coop] Bloody Mary: %s fell; the session has %d", who, g_bloody);
 }
 
@@ -764,6 +765,7 @@ void bloody_reset(const char* why) {
     if (g_bloody == 0) return;
     LOG_INFO("[coop] Bloody Mary: none any more (%s; there were %d)", why, g_bloody);
     g_bloody = 0;
+    g_last_state = 0;
 }
 // After a session ends, the party is put back to solo for a while (see settle_after_session).
 double g_settle_until = 0;

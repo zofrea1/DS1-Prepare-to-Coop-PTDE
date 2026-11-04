@@ -201,6 +201,11 @@ struct StateMore4 {
     StateMore3 more3;
     uint8_t guest_homeward;
 };
+// 1.5.0, behind StateMore4: the session's Bloody Marys (0..5), the host's count. An older host leaves it 0.
+struct StateMore5 {
+    StateMore4 more4;
+    uint8_t bloody;
+};
 struct Info {
     Header h;
     int32_t soul_level;
@@ -739,6 +744,27 @@ bool g_game_session_lost = false;
 uint8_t g_invader_bars = 0;
 
 double now() { return GetTickCount64() / 1000.0; }
+
+// ---------------------------------------------------------------- the Bloody Mary (1.5.0)
+// The host counts the session's co-op deaths (its own and its co-op guests', up to five) while BloodyMary is on, and
+// says the count in every State; any rest and a team wipe set it back to none. world.cpp raises the enemies' health
+// with it and coop.cpp keeps the Bloody Mary items in step.
+constexpr int kMaxBloody = 5;
+int g_bloody = 0;       // host: the count
+int g_host_bloody = 0;  // guest: the host's
+bool g_bloody_on = true;
+
+void bloody_add(const char* who) {
+    if (!g_bloody_on || g_bloody >= kMaxBloody) return;
+    ++g_bloody;
+    LOG_INFO("[coop] Bloody Mary: %s fell; the session has %d", who, g_bloody);
+}
+
+void bloody_reset(const char* why) {
+    if (g_bloody == 0) return;
+    LOG_INFO("[coop] Bloody Mary: none any more (%s; there were %d)", why, g_bloody);
+    g_bloody = 0;
+}
 // After a session ends, the party is put back to solo for a while (see settle_after_session).
 double g_settle_until = 0;
 // Guest: waiting for the host's map flags since this time (0 not waiting), and the flags we changed meanwhile,
@@ -2499,7 +2525,8 @@ void host_tick() {
     if (now() - g_last_state > 1.0) {
         g_last_state = now();
         const auto& st = rules::state();
-        StateMore4 more4{};
+        StateMore5 more5{};
+        StateMore4& more4 = more5.more4;
         StateMore3& more3 = more4.more3;
         StateMore2& more2 = more3.more2;
         StateMore& more = more2.more;
@@ -2524,9 +2551,10 @@ void host_tick() {
             more3.scaling[i] = static_cast<int16_t>(std::max(-1000, std::min(1000, g_cfg.scaling[i])));
         }
         more4.guest_homeward = 1;
+        more5.bloody = static_cast<uint8_t>(g_bloody);
         rules::state().invader_present = invader;
         g_host_coop_players = coop;
-        broadcast(more4);
+        broadcast(more5);
     }
 }
 
@@ -3826,6 +3854,12 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 world::set_host_scaling(scaling);
                 g_host_scaling = true;
             }
+            StateMore5 more5{};
+            const int bloody = as(&more5) ? std::min<int>(more5.bloody, kMaxBloody) : 0;
+            if (bloody != g_host_bloody) {
+                LOG_INFO("[coop] The host's Bloody Marys: %d -> %d", g_host_bloody, bloody);
+                g_host_bloody = bloody;
+            }
             StateMore4 more4{};
             const bool takes = as(&more4) && more4.guest_homeward != 0;
             if (takes != g_host_homeward) {
@@ -3972,6 +4006,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (g_role == Role::None || !as(&m)) return;
             if (g_role == Role::Host) {
                 // a guest rested: reset here and tell the other guests (with the rest's id)
+                bloody_reset("a guest rested");
                 Simple r{};
                 fill_header(&r, kRest);
                 r.value = m.value;
@@ -4046,6 +4081,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 }
                 break;
             }
+            if (g_role == Role::Host && !m.invader) bloody_add(utf8(event_name(m)).c_str());
             if (PeerInfo* p = peer(m.who)) {
                 p->dead = true;
                 p->respawn = kRespawnNone;  // a new death: its respawn has not reached the warp yet
@@ -4441,6 +4477,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
 }
 
 void send_rest() {
+    if (g_role == Role::Host) bloody_reset("we rested");
     if (g_role == Role::None || !g_lobby) return;
     static uint32_t n = 0;
     g_rest_id = static_cast<uint32_t>(GetTickCount64()) * 2654435761u ^ static_cast<uint32_t>(steam::self()) ^ ++n;
@@ -4457,6 +4494,7 @@ void send_rest() {
 
 void send_death() {
     g_respawn = kRespawnNone;
+    if (g_role == Role::Host && !g_invade) bloody_add("we");
     if (g_role == Role::None || !g_lobby) return;
     const bool undecided = invasion_undecided();
     const bool team_waits = undecided && team_invasion_host() && invader_teammate_standing();
@@ -5256,6 +5294,7 @@ std::string game_tag(const std::string& password) { return "g" + password_key(pa
 
 void configure(const Config& cfg) {
     g_cfg = cfg;
+    g_bloody_on = cfg.bloody_mary;
     g_cfg.max_players = std::max(2, std::min(kMaxSessionPlayers, g_cfg.max_players));
     g_cfg.net_rate = std::max(netrate::kVanilla, std::min(netrate::kMax, g_cfg.net_rate));
     g_cfg.invasion_cooldown_s = std::max(0, std::min(10 * 60, g_cfg.invasion_cooldown_s));
@@ -5514,6 +5553,14 @@ void tick() {
             }
             spectate::set_teammates(team);
             world::set_everyone_dead(!team.empty() && all_dead);
+            // A team wipe takes every Bloody Mary away (the host's count; its guests follow).
+            if (g_role == Role::Host && g_bloody > 0 && world::local_dead() && (team.empty() || all_dead)) {
+                bloody_reset("the whole team fell");
+            }
+            int bloody = 0;
+            if (g_role == Role::Host) bloody = g_bloody;
+            if (g_role == Role::Guest && !g_invade && g_step == Step::InWorld) bloody = g_host_bloody;
+            world::set_bloody(bloody);
             if (!game::loading()) {
                 auto& st = rules::state();
                 if (boss_mate && !st.teammate_boss_fight) {

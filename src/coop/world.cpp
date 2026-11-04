@@ -53,9 +53,13 @@ constexpr int kScaleBoss = 2147418005;    // + (players - 1), 0..4
 constexpr int kScaleEnemy2 = 2147418010;  // + (players - 7), 0..1
 constexpr int kScaleBoss2 = 2147418012;   // + (players - 7), 0..1
 constexpr int kDebuff = 2147419000;       // + (blossoms - 1), 0..4
+// 1.5.0: no other co-op player in the world but Bloody Marys held (only their part of the health).
+constexpr int kScaleEnemy0 = 2147418014;
+constexpr int kScaleBoss0 = 2147418015;
 constexpr int kRow = 0x170;               // SP_EFFECT_PARAM_ST
 constexpr int kMaxLevel = 7;              // extra players
-constexpr int kRows = 19;
+constexpr int kRows = 21;
+constexpr int kMaxBloody = 5;
 
 Config g_cfg;
 uint8_t g_rows[kRows][kRow];
@@ -66,8 +70,23 @@ int row_index(int id) {
     if (id >= kScaleEnemy && id < kScaleEnemy + 10) return id - kScaleEnemy;
     if (id >= kDebuff && id < kDebuff + 5) return 10 + (id - kDebuff);
     if (id >= kScaleEnemy2 && id < kScaleEnemy2 + 4) return 15 + (id - kScaleEnemy2);
+    if (id == kScaleEnemy0) return 19;
+    if (id == kScaleBoss0) return 20;
     return -1;
 }
+
+// ---------------------------------------------------------------- the Bloody Mary (1.5.0)
+// The second death debuff: every co-op player's death in the session gives everyone a Bloody Mary (up to five; the
+// host counts them and tells its guests, session.cpp), and each raises the health of the world's enemies by a third
+// of the per-player enemy health scaling and the bosses' by an eighth of the per-player boss scaling, on top of the
+// scaling for the players present. It is part of our scaling rows' maxHpRate (1 + players x scaling + Marys x share),
+// so it reaches every enemy as the scaling does. When the count changes the rows change in place and each enemy's row
+// is applied again: the game works its max HP out anew and adds the growth to its health as well (a buff, not a
+// heal: a wounded enemy keeps its wounds). Any rest or a team wipe takes them all away.
+int g_bloody = 0;
+int g_rows_gen = 0;                    // bumped whenever the rows' health changes under enemies that have them
+std::map<uint32_t, int> g_scaled_gen;  // EnemyIns -> the rows' generation its effect was applied in
+std::set<uint32_t> g_regrown;          // applied again for a new count: its max is the game's to redo (settle_max)
 
 // ---------------------------------------------------------------- state
 bool g_active = false, g_invader = false, g_invader_present = false;
@@ -166,14 +185,16 @@ void base_row(uint8_t* r) {
     put_s(r, 0x163, -1);
 }
 
-void scale_row(uint8_t* r, int n, int health, int damage, int posture) {
+void scale_row(uint8_t* r, int n, int health, int damage, int posture, int bloody_share) {
     base_row(r);
-    const float hp = n * (health / 100.0f) + 1.0f;
+    // The Bloody Marys' part: `bloody_share` is the divisor of the per-player health percent (3 enemies, 8 bosses).
+    const float hp = n * (health / 100.0f) + 1.0f + g_bloody * (health / 100.0f) / bloody_share;
     const float dmg = n * (damage / 100.0f) + 1.0f;
     put_f(r, 0x10, hp);                                  // maxHpRate
     for (int off = 0x38; off <= 0x44; off += 4) put_f(r, off, dmg);   // physics/magic/fire/thunder attack rate
     for (int off = 0x48; off <= 0x54; off += 4) put_f(r, off, 1.0f);  // attack power rates
-    for (int off = 0x108; off <= 0x114; off += 4) put_f(r, off, hp);  // poison/toxic/bleed/curse resist rate
+    const float resist = n * (health / 100.0f) + 1.0f;  // the players' part only
+    for (int off = 0x108; off <= 0x114; off += 4) put_f(r, off, resist);  // poison/toxic/bleed/curse resist rate
     // changeSuperArmorPoint as Remastered writes it; unread with stateInfo 0 (the posture is poise_sum's, below).
     put_s(r, 0x13A, static_cast<int16_t>(static_cast<int>(n * (posture / 100.0f) + 1.0f)));
 }
@@ -188,14 +209,16 @@ void debuff_row(uint8_t* r, int n) {
 
 void build_rows() {
     for (int k = 0; k < 5; ++k) {
-        scale_row(g_rows[k], k + 1, g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture);
-        scale_row(g_rows[5 + k], k + 1, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture);
+        scale_row(g_rows[k], k + 1, g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture, 3);
+        scale_row(g_rows[5 + k], k + 1, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture, 8);
         debuff_row(g_rows[10 + k], k + 1);
     }
     for (int k = 0; k < 2; ++k) {
-        scale_row(g_rows[15 + k], 6 + k, g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture);
-        scale_row(g_rows[17 + k], 6 + k, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture);
+        scale_row(g_rows[15 + k], 6 + k, g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture, 3);
+        scale_row(g_rows[17 + k], 6 + k, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture, 8);
     }
+    scale_row(g_rows[19], 0, g_cfg.enemy_health, 0, 0, 3);
+    scale_row(g_rows[20], 0, g_cfg.boss_health, 0, 0, 8);
     g_rows_ready = true;
 }
 
@@ -211,8 +234,9 @@ float posture_rate(uint32_t row) {
     const auto* r = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(row));
     if (r < g_rows[0] || r >= g_rows[kRows]) return 0;
     const int i = static_cast<int>((r - g_rows[0]) / kRow);
-    // The enemy rows 0..4 (levels 1..5) and 15..16 (6..7), the boss rows 5..9 and 17..18; 10..14 are the debuff's.
-    if (i >= 10 && i < 15) return 0;
+    // The enemy rows 0..4 (levels 1..5) and 15..16 (6..7), the boss rows 5..9 and 17..18; 10..14 are the debuff's,
+    // 19..20 the Bloody Marys' alone (no extra player: no posture).
+    if ((i >= 10 && i < 15) || i >= 19) return 0;
     const bool boss = (i >= 5 && i < 10) || i >= 17;
     const int level = i < 10 ? i % 5 + 1 : 6 + (i - 15) % 2;
     const int percent = boss ? g_cfg.boss_posture : g_cfg.enemy_posture;
@@ -1402,8 +1426,12 @@ void settle_max(uint32_t chr, int want) {
     // player count while it still updated the enemy. The player count went down as players left and our row went down
     // with it, but an enemy far from this game's player kept the max of more players until its player came near it
     // again (the game works it out only then): the scaling seemed to go up as players joined and never come down.
-    const bool stale = m == base || (f != g_forced_max.end() && m == f->second) || other_level_max(base, m, want);
+    const bool regrown = g_regrown.count(chr) != 0;
+    if (regrown && std::abs(m - expected) <= 1) g_regrown.erase(chr);
+    const bool stale = m == base || (f != g_forced_max.end() && m == f->second) || other_level_max(base, m, want) ||
+                       regrown;
     if (!stale || std::abs(m - expected) <= 1 || h <= 0) return;
+    if (regrown) g_regrown.erase(chr);
     *ptr<int>(chr + 0x2D8) = expected;
     *ptr<int>(chr + 0x2D4) = settled_hp(h, m, expected);
     g_forced_max[chr] = expected;
@@ -1451,7 +1479,8 @@ void scale_tick() {
     level = std::max(0, std::min(kMaxLevel, level));
     if (level != g_logged_level) {
         LOG_INFO("[coop] Enemy scaling level %d (%d co-op player(s)): health x%.2f, bosses x%.2f", level, level + 1,
-                 level * (g_cfg.enemy_health / 100.0f) + 1.0f, level * (g_cfg.boss_health / 100.0f) + 1.0f);
+                 level * (g_cfg.enemy_health / 100.0f) + 1.0f + g_bloody * (g_cfg.enemy_health / 100.0f) / 3,
+                 level * (g_cfg.boss_health / 100.0f) + 1.0f + g_bloody * (g_cfg.boss_health / 100.0f) / 8);
         g_logged_level = level;
     }
     std::set<uint32_t> seen;
@@ -1463,7 +1492,7 @@ void scale_tick() {
         read32(chr + 0x74, &team);
         const bool boss = static_cast<int>(team) == kBossTeam ||
                           std::find(gauge_bosses.begin(), gauge_bosses.end(), chr) != gauge_bosses.end();
-        const int want = !level      ? 0
+        const int want = !level      ? (g_active && g_bloody > 0 ? (boss ? kScaleBoss0 : kScaleEnemy0) : 0)
                          : level <= 5 ? (boss ? kScaleBoss : kScaleEnemy) + level - 1
                                       : (boss ? kScaleBoss2 : kScaleEnemy2) + level - 6;
         auto it = g_scaled.find(chr);
@@ -1471,6 +1500,13 @@ void scale_tick() {
         const auto fill = g_fill_hp.find(chr);
         if (fill != g_fill_hp.end() && keep_share(chr, fill->second)) g_fill_hp.erase(fill);
         if (hp(chr) <= 0) return;
+        // A new Bloody Mary count changed the row under it: applied again, so the game works its max HP out anew and
+        // adds the growth to its health (the wounds it had stay; no keep_share here).
+        if (want && want == have && g_scaled_gen[chr] != g_rows_gen && find_effect(chr, want, nullptr)) {
+            remove(chr, have);
+            if (apply(chr, want)) g_regrown.insert(chr);
+            g_scaled_gen[chr] = g_rows_gen;
+        }
         // Applied once is not enough: an effect the game has since taken off the enemy is applied again.
         if (!(want == have && (!want || find_effect(chr, want, nullptr)))) {
             const int before = max_hp(chr);
@@ -1482,6 +1518,7 @@ void scale_tick() {
                     g_scaled_at[chr] = now();
                 }
                 g_scaled[chr] = want;
+                g_scaled_gen[chr] = g_rows_gen;
                 if (!g_fill_hp.count(chr)) g_fill_hp[chr] = was;
             } else {
                 g_scaled.erase(chr);
@@ -1511,6 +1548,12 @@ void scale_tick() {
     }
     for (auto it = g_forced_max.begin(); it != g_forced_max.end();) {
         it = seen.count(it->first) ? std::next(it) : g_forced_max.erase(it);
+    }
+    for (auto it = g_scaled_gen.begin(); it != g_scaled_gen.end();) {
+        it = seen.count(it->first) ? std::next(it) : g_scaled_gen.erase(it);
+    }
+    for (auto it = g_regrown.begin(); it != g_regrown.end();) {
+        it = seen.count(*it) ? std::next(it) : g_regrown.erase(it);
     }
 }
 
@@ -2526,5 +2569,19 @@ void warp_now(int map, int point) {
 }
 
 void bypass_limbo(bool on) { g_bypass = on; }
+
+void set_bloody(int count) {
+    count = std::max(0, std::min(kMaxBloody, count));
+    if (count == g_bloody) return;
+    const int was = g_bloody;
+    g_bloody = count;
+    build_rows();  // in place: the effects already on enemies point at these rows
+    ++g_rows_gen;
+    g_logged_level = -1;
+    LOG_INFO("[coop] Bloody Mary: %d -> %d (enemies +%.0f%% health, bosses +%.0f%%)", was, count,
+             count * g_cfg.enemy_health / 3.0, count * g_cfg.boss_health / 8.0);
+}
+
+int bloody() { return g_bloody; }
 
 }  // namespace coop::world

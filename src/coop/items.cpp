@@ -119,6 +119,11 @@ const Def kDefs[kCount] = {
      L"and closeness to those we most yearn for. The bell\nlongs to answer your wish, but not without a price.\n\n"
      L"Use in a co-operative session to find and summon\nyourself to one's position. But did it have to be\n"
      L"this way?"},
+    // 1.5.0: the Crimson Blossom's icon, a key item as it is.
+    {0, 0, 2033, L"Bloody Mary", L"Strengthens the world's enemies",
+     L"A blood-red flower that drinks from every death in the\nworld it grows in.\n\nOne blooms for everyone in the "
+     L"session with each\ndeath, and the world's enemies grow hardier. They\nwither when anyone rests at a bonfire, "
+     L"or when the\nwhole party has fallen."},
 };
 
 void put32(uint8_t* r, int off, int32_t v) { std::memcpy(r + off, &v, 4); }
@@ -142,7 +147,7 @@ void build_rows() {
         put16(r, 0x36, 1);          // maxNum
         r[0x39] = 50;               // overDexterity
         r[0x46] = 0x08;             // disableMultiDropShare
-        if (kFirst + i == kBlossom) {
+        if (kFirst + i == kBlossom || kFirst + i == kBloody) {
             put16(r, 0x36, 5);      // up to five, one per death
             r[0x3A] = 1;            // goodsType: key item (the game never lets it be used)
             continue;
@@ -170,7 +175,7 @@ __declspec(naked) void hk_goods_row() {
     __asm {
         cmp edi, 389000
         jl orig
-        cmp edi, 389009  // kLast
+        cmp edi, 389010  // kLast
         jg orig
         push edi
         call our_row
@@ -727,7 +732,7 @@ void grant_missing() {
     if (!game::in_game()) return;
     int given = 0;
     for (int32_t id = kFirst; id <= kLast; ++id) {
-        if (id == kBlossom || count(id) > 0) continue;
+        if (id == kBlossom || id == kBloody || count(id) > 0) continue;
         give(id, 1);
         if (count(id) <= 0) continue;
         LOG_INFO("[coop] Gave co-op item %d", id);

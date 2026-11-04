@@ -152,6 +152,7 @@ int can_use(int32_t id) {
         case items::kInfection:  // our own world, with or without a session, but not while joining another
             return (host || !session::active()) && game::own_world() && area_allows(id) ? 1 : 0;
         case items::kBlossom:
+        case items::kBloody:
             return 0;
         case items::kKnell:  // a co-op player in a session, standing, out of a boss fight, with a teammate standing
             return knell::can_use() ? 1 : 0;
@@ -236,6 +237,34 @@ bool give_blossom() {
     g_blossoms_kept = held + 1;
     coop::items::announce(coop::items::kGoodsCategory, coop::items::kBlossom, 1);
     return true;
+}
+
+// The Bloody Marys in the inventory follow the session's count (world::bloody(), the host's): one more for everyone
+// with each death, all gone with a rest, a team wipe or the session's end. A load in another player's world empties
+// that world's key array; the count is put back, without a new notice.
+int g_bloody_told = 0;  // the count last announced
+void bloody_items_tick() {
+    static ULONGLONG last = 0;
+    if (GetTickCount64() - last < 500) return;
+    last = GetTickCount64();
+    using namespace coop;
+    if (!session::active()) world::set_bloody(0);
+    if (!game::player() || game::loading()) return;
+    const int want = world::bloody();
+    int have = items::count(items::kBloody);
+    if (have != want) {
+        if (have > want) {
+            items::remove_all(items::kBloody);
+            have = 0;
+        }
+        if (want > have) items::give(items::kBloody, want - have);
+        LOG_INFO("[coop] Bloody Marys in the inventory: %d -> %d", have, items::count(items::kBloody));
+    }
+    if (want > g_bloody_told) {
+        items::announce(items::kGoodsCategory, items::kBloody, want - g_bloody_told);
+        text::show(L"A Bloody Mary blooms: the world's enemies grow stronger");
+    }
+    g_bloody_told = want;
 }
 
 void blossom_keep_tick() {
@@ -351,6 +380,7 @@ void tick_body() {
         coop::items::tick();
         homeward_miracle_tick();
         blossom_keep_tick();
+        bloody_items_tick();
     }
     if (g_cfg.hotkeys) hotkeys();
     static ULONGLONG last_beat = 0;
@@ -455,6 +485,7 @@ void coop_install(const CoopConfig& config) {
     cfg.invasion_cooldown_s = g_cfg.invasion_cooldown_s;
     cfg.seal_boss_fogs = g_cfg.seal_boss_fogs;
     cfg.death_debuffs = g_cfg.death_debuffs;
+    cfg.bloody_mary = g_cfg.bloody_mary;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
     cfg.share_items = g_cfg.share_items;

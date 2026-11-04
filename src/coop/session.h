@@ -24,6 +24,7 @@ struct Config {
     // go to its guests (world::set_host_scaling).
     int scaling[6] = {40, 0, 25, 115, 0, 40};
     bool death_debuffs = false;  // each death in a session adds a Crimson Blossom (up to five)
+    bool bloody_mary = true;     // 1.5.0: each co-op death gives everyone a Bloody Mary (the host's setting decides)
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul
     // level, ping and the smoothing their character is drawn with.
     int overhead_display = 5;

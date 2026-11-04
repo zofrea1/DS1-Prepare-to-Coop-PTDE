@@ -25,8 +25,9 @@ enum Id : int32_t {
     kBlossom = 389007,    // Crimson Blossom: death debuff counter (key item, never used)
     kParchment = 389008,  // Parchment of Deliverance: revive certain NPCs
     kKnell = 389009,      // Death Knell (1.5.0): go to another co-op player, for a soul level (knell.cpp)
+    kBloody = 389010,     // Bloody Mary (1.5.0): the session's deaths strengthen its enemies (key item, never used)
     kFirst = kHost,
-    kLast = kKnell,
+    kLast = kBloody,
 };
 
 // The Parchment's yes/no dialog (event text FMG id), answered with the soul cost.

@@ -28,6 +28,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.invasion_cooldown_s = minutes <= 0 ? 0 : minutes >= 10 ? 600 : static_cast<int>(minutes * 60 + 0.5);
         } else if (key == "sealbossfogsduringinvasions") {
             c.seal_boss_fogs = settings_parse_bool(val);
+        } else if (key == "bloodymary") {
+            c.bloody_mary = settings_parse_bool(val);
         } else if (key == "deathdebuffs") {
             c.death_debuffs = settings_parse_bool(val);
         } else if (key == "guestworldevents") {

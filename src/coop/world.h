@@ -21,6 +21,10 @@ struct Config {
 
 bool install();
 void configure(const Config& cfg);
+// The Bloody Marys of the session (0..5; the host's count, session.cpp): each raises the enemies' health by a third of
+// the per-player enemy health scaling, the bosses' by an eighth of the boss scaling, on top of the players' scaling.
+void set_bloody(int count);
+int bloody();
 // A guest in a host's world scales the enemies with the host's settings (null: our own INI's again). The six are
 // enemy health, damage, posture, then boss health, damage, posture, in percent per extra player.
 void set_host_scaling(const int* scaling);

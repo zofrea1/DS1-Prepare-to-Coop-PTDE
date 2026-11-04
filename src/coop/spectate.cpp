@@ -105,6 +105,13 @@ bool g_streaming = true;      // SpectateStreaming
 bool g_origin_patched = false;
 volatile uint32_t g_pass_origin = 0;  // the character WorldChrMan's pass takes instead of ours (0: ours)
 int g_view_map = -1;          // the followed teammate's map kept loaded for the view (-1 none)
+// Their floor, found by a cast (rules::find_floor) where their character never touches the collision: in a map loaded
+// for the view, their character had no floor at all (2026-11-04). The character given one, to take it back from when
+// the view lets that map go.
+uint32_t g_cast_chr = 0;
+double g_cast_at = 0;
+const char* g_cast_why = "";
+constexpr double kCastEvery = 0.2;
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -336,6 +343,15 @@ void view_extras() {
             if (t.chr == chr) map = t.map;
         }
     }
+    // The floor we gave a character goes again before the view lets its map go (the game unloads a block nobody wants
+    // two frames later), as the game takes the party's floors at a map switch (0xDE36E0): nothing else would.
+    if (g_cast_chr && (g_cast_chr != chr || map != g_view_map)) {
+        if (player_character(g_cast_chr) && rules::view_only_floor(g_cast_chr)) {
+            rules::clear_floor(g_cast_chr);
+            LOG_INFO("[coop] Spectating: the floor given to the character we followed taken back (its map is let go)");
+        }
+        g_cast_chr = 0;
+    }
     if (map != g_view_map || map >= 0) {
         g_view_map = map;
         rules::view_map(map);
@@ -346,6 +362,27 @@ void view_extras() {
         return;
     }
     const char* why = rules::draw_from(chr);
+    // No floor of theirs here, or one in the view's own map (their character never touches its collision, so the floor
+    // does not follow them there): the one under them, by a cast.
+    if (g_streaming && (why || rules::view_only_floor(chr)) && now() - g_cast_at >= kCastEvery) {
+        g_cast_at = now();
+        bool changed = false;
+        const char* cast_why = rules::find_floor(chr, &changed);
+        if (changed) {
+            g_cast_chr = chr;
+            g_cast_why = "";
+            const char* was = why;
+            why = rules::draw_from(chr);
+            static int lines = 0;
+            if (was && ++lines <= 40) {
+                LOG_INFO("[coop] Spectating: the floor under the followed teammate found by a cast (%s)",
+                         why ? why : "the world is drawn from it");
+            }
+        } else if (why && cast_why && std::strcmp(cast_why, g_cast_why) != 0) {
+            g_cast_why = cast_why;
+            LOG_INFO("[coop] Spectating: no floor found under the followed teammate (%s)", cast_why);
+        }
+    }
     // Only from a floor of theirs that is loaded here: their draw groups come from it.
     g_pass_origin = g_streaming && g_origin_patched && !why ? chr : 0;
     if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why)) {

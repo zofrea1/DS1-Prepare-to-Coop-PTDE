@@ -3305,6 +3305,96 @@ uint32_t loaded_floor(uint32_t chr, const char** why) {
     return 0;
 }
 
+// The floor under a character, found as the game finds the local player's when it has none (0xDE8280): a shape cast
+// in the physics world ([0x137D5DC]+0x14, filter 0x28) from 0.5 m above its physics position straight down for 0.5 m
+// into an hkpAllCdPointCollector, the contacts sorted (0x7E0FA0), and the first whose body's owner belongs to a
+// HitIns. Another player's character in a block our game loaded for the spectating view never touched that block's
+// collision and so never had a floor there (2026-11-04: their map loaded in 0.3 s, and "no floor under them" all
+// along): the view finds it this way (1.5.0).
+constexpr uint32_t kPhysWorldVar = 0x0137D5DC;
+constexpr uint32_t kShapeCast = 0x00ECC030;      // ecx = collector, edx = start; stdcall(world, filter, &dir, length)
+constexpr uint32_t kCollectorSort = 0x007E0FA0;  // ecx = collector
+constexpr uint32_t kCollectorFree = 0x00456AA0;  // ecx = collector (frees a buffer it grew into)
+constexpr uint32_t kAllCdPointCollectorVt = 0x01126630;
+constexpr uint32_t kSetFloorFn = 0x00E6E580;     // thiscall(chr), push floor; ret 4
+
+struct alignas(16) CastCollector {
+    uint32_t vt;
+    float early_out;
+    uint32_t pad[2];
+    uint32_t data;       // hkArray of hkpRootCdPoint (0x30 each)
+    int32_t size;
+    uint32_t cap;        // 0x80000008: eight inline, not to be freed
+    uint32_t pad2;
+    uint8_t inline_hits[8 * 0x30];
+};
+static_assert(sizeof(CastCollector) == 0x1A0, "hkpAllCdPointCollector as 0xDE8280 lays it out");
+alignas(16) CastCollector g_cast;
+alignas(16) float g_cast_start[4];
+alignas(16) float g_cast_dir[4] = {0.0f, -1.0f, 0.0f, 0.0f};
+
+uint32_t cast_hit_floor(int i) {
+    const uint32_t rec = g_cast.data + static_cast<uint32_t>(i) * 0x30;
+    uint32_t a = 0, key_a = 0, b = 0, ud_ptr = 0, ud = 0, hit = 0;
+    if (!read32(rec + 0x20, &a) || !read32(rec + 0x24, &key_a) || !read32(rec + 0x28, &b)) return 0;
+    const uint32_t coll = key_a == 0xFFFFFFFF ? b : a;
+    uint8_t type = 0, off = 0;
+    if (!coll || !read8(coll + 0x18, &type) || (type != 1 && type != 2) || !read8(coll + 0x10, &off)) return 0;
+    const uint32_t owner = coll + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(off)));
+    if (!owner || !read32(owner + 0xC, &ud_ptr) || !ud_ptr || !read32(ud_ptr, &ud) || !ud) return 0;
+    uint32_t kind = 0;
+    if (!read32(ud + 4, &kind) || (kind & 0xFFFF) != 0 || !read32(ud + 8, &hit)) return 0;
+    return hit;
+}
+
+uint32_t floor_cast(uint32_t chr) {
+    uint32_t pw = 0, world = 0, ctrl = 0, phys = 0;
+    if (!read32(kPhysWorldVar, &pw) || !pw || !read32(pw + 0x14, &world) || !world || !read32(chr + 0x28, &ctrl) ||
+        !ctrl || !read32(ctrl + 0x1C, &phys) || !phys) {
+        return 0;
+    }
+    uint32_t found = 0;
+    __try {
+        std::memcpy(g_cast_start, reinterpret_cast<const void*>(static_cast<uintptr_t>(phys + 0x10)), 16);
+        g_cast_start[1] += 0.5f;
+        std::memset(&g_cast, 0, sizeof(g_cast));
+        g_cast.vt = kAllCdPointCollectorVt;
+        g_cast.early_out = 3.402823e38f;
+        g_cast.data = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(g_cast.inline_hits));
+        g_cast.cap = 0x80000008;
+        float cast_len = 0.5f;
+        uint8_t ok = 0;
+        __asm {
+            push cast_len
+            lea eax, g_cast_dir
+            push eax
+            push 0x28
+            push world
+            lea ecx, g_cast
+            lea edx, g_cast_start
+            mov eax, kShapeCast
+            call eax
+            mov ok, al
+        }
+        if (ok) {
+            __asm {
+                lea ecx, g_cast
+                mov eax, kCollectorSort
+                call eax
+            }
+            for (int i = 0; i < g_cast.size && i < 64 && !found; ++i) found = cast_hit_floor(i);
+        }
+        __asm {
+            lea ecx, g_cast
+            mov eax, kCollectorFree
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return found;
+}
+
 // 0xD6C490 as the request calls it.
 bool point_found(int point) {
     float pos[4] = {}, rot[4] = {};
@@ -4023,6 +4113,46 @@ int view_map(int map) {
         g_view_want.last_state = state;
     }
     return state;
+}
+
+const char* find_floor(uint32_t chr, bool* changed) {
+    *changed = false;
+    const uint32_t hit = floor_cast(chr);
+    uint32_t vt = 0, n = 0, have = 0;
+    uint8_t block = 0xFF;
+    const uint32_t wr = world_res();
+    if (!hit) return "nothing under them";
+    if (!read32(hit, &vt) || vt != kHitInsVtable || !read8(hit + 0xF, &block)) return "what is under them is no collision";
+    if (!wr || !read32(wr + kWrBlockCount, &n) || static_cast<int8_t>(block) < 0 ||
+        static_cast<uint32_t>(static_cast<int8_t>(block)) >= n ||
+        block_state(wr, static_cast<int8_t>(block)) != static_cast<int>(kBlockInUse)) {
+        return "the collision under them is not in a block in use";
+    }
+    if (read32(chr + 0x29C, &have) && have == hit) return nullptr;
+    __try {
+        __asm {
+            push hit
+            mov ecx, chr
+            mov eax, kSetFloorFn
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "their floor could not be set";
+    }
+    *changed = true;
+    return nullptr;
+}
+
+void clear_floor(uint32_t chr) {
+    __try {
+        __asm {
+            push 0
+            mov ecx, chr
+            mov eax, kSetFloorFn
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 bool view_only_floor(uint32_t chr) {

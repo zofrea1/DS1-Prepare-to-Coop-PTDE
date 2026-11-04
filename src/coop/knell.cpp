@@ -145,7 +145,12 @@ double g_seen_since = 0;
 int g_arrival_anim = 0;
 double g_arrival_at = 0;
 bool g_arrival_price = false;
-double g_join_at = 0;       // a join's arrival waits for this (0 none)
+double g_join_at = 0;       // a join's arrival is due (0 none): when it was armed
+double g_join_stood_at = 0;  // when we first stood in the host's world after it was armed (0 not yet)
+constexpr int kGameRise = 6950;         // the game's own rise at a bonfire, which a guest's placement plays
+constexpr double kJoinRiseWait = 1.5;   // the arrival starts by itself once we stood this long without that rise
+                                        // (the rise came 0.15 to 1.2 s after the load in the 2026-11-04 test)
+bool g_join_arrival = false;            // the arrival playing is a join's (the game's rise may still come over it)
 wchar_t g_prompt[kPromptSlots][96] = {};
 int g_prompt_slot = 0;
 // Our request, like a bonfire's, stays with the action manager until it is cancelled: closed without a warp (B, a hit,
@@ -508,6 +513,7 @@ void arrive() {
     g_arrival_anim = play_arrival("the Death Knell");
     g_arrival_at = now();
     g_arrival_price = true;
+    g_join_arrival = false;
     g_state = State::Arriving;
     LOG_INFO("[coop] Death Knell: arrived by %s; the price once the arrival is over", narrow(g_dest.name).c_str());
 }
@@ -541,6 +547,16 @@ void arriving_tick() {
         return;
     }
     const double t = now() - g_arrival_at;
+    // A join's arrival that came before the game's own rise: the rise comes over it a moment later, so the arrival
+    // starts again on our character (the others play it already).
+    if (g_join_arrival && g_arrival_anim != kGameRise && t < 2.0 && motion::held_event_anim(me) == kGameRise) {
+        g_join_arrival = false;
+        const bool again = start_event_anim(me, g_arrival_anim);
+        g_arrival_at = now();
+        LOG_INFO("[coop] Joined: the game's rise came over the arrival %.2f s in: arrival %d %s", t, g_arrival_anim,
+                 again ? "started again" : "could not be started again");
+        return;
+    }
     if (t < 0.8) return;
     const bool playing = g_arrival_anim && playing_anim(me) == g_arrival_anim;
     if (playing && t < arrival_length(g_arrival_anim) + 1.0) return;
@@ -806,6 +822,13 @@ void confirm() {
         LOG_INFO("[coop] Death Knell: %s is in a boss fight; not going", narrow(t->name).c_str());
         return;
     }
+    // Where they stand and the map they report do not go together during a cutscene (the crow's flight: Firelink's
+    // landing point in the Asylum's map; the load put us there in the Asylum, and we fell, 2026-11-04).
+    if (t->cutscene) {
+        say(t->name + L" is in a cutscene");
+        LOG_INFO("[coop] Death Knell: %s is in a cutscene; not going", narrow(t->name).c_str());
+        return;
+    }
     g_dest = Destination{};
     g_dest.id = t->id;
     g_dest.name = t->name;
@@ -890,6 +913,13 @@ void going_tick() {
         say(L"The Death Knell finds no one there");
         LOG_INFO("[coop] Death Knell: %s is gone", narrow(g_dest.name).c_str());
         close_view("they are gone");
+        g_state = State::Idle;
+        return;
+    }
+    if (t->cutscene) {
+        say(t->name + L" is in a cutscene");
+        LOG_INFO("[coop] Death Knell: %s went into a cutscene; not going", narrow(t->name).c_str());
+        close_view("their cutscene");
         g_state = State::Idle;
         return;
     }
@@ -1122,10 +1152,18 @@ void tick() {
         g_seen_anim = anim;
         g_seen_since = now();
     }
-    // A join's arrival: once we stand in the host's world, and only while we are still a co-op guest there (a leave
-    // inside the delay is a load that straddles it: the arrival would start at home, with nobody to send it to).
-    if (g_join_at > 0 && !loading && now() >= g_join_at && g_state == State::Idle) {
+    // A join's arrival: the moment the game starts its own rise at the host's bonfire (6950, 0.2 to 0.8 s after the
+    // load in the 2026-11-04 test), it is replaced by the arrival, or after kJoinRiseWait standing if no rise comes.
+    // Only while we are still a co-op guest there (a leave meanwhile is a load: the arrival would start at home, with
+    // nobody to send it to).
+    if (g_join_at > 0 && loading) g_join_stood_at = 0;
+    if (g_join_at > 0 && !loading && g_join_stood_at == 0) g_join_stood_at = now();
+    const bool rising = g_join_at > 0 && !loading && motion::held_event_anim(game::player()) == kGameRise;
+    if (g_join_at > 0 && !loading && g_state == State::Idle && (rising || now() - g_join_stood_at >= kJoinRiseWait)) {
+        LOG_INFO("[coop] Joined: the arrival %s (%.2f s after we stood)",
+                 rising ? "replaces the game's own rise" : "starts (no rise of the game's came)", now() - g_join_stood_at);
         g_join_at = 0;
+        g_join_stood_at = 0;
         if (!session::coop_guest_in_world()) {
             LOG_INFO("[coop] Joined: the summon arrival is not played (we are no longer a co-op guest in the host's "
                      "world)");
@@ -1133,6 +1171,7 @@ void tick() {
             g_arrival_anim = play_arrival("joined the session");
             g_arrival_at = now();
             g_arrival_price = false;
+            g_join_arrival = true;
             if (g_arrival_anim) g_state = State::Arriving;
         }
     }
@@ -1176,15 +1215,16 @@ bool swallow_use(int32_t goods) {
     return true;
 }
 
-// The others' games make our character a moment after we join (0.3 to 0.9 s in the 2026-11-03 test), and a character
-// made while its player plays an event animation may not collide (party.cpp waits for that when it makes one itself).
-// At 0.6 s the arrival came before our character was there in the others' games, which then showed none of it: it now
-// waits until our character is there and built (session.cpp, knell_anims_tick), and starts once it has been made.
-constexpr double kJoinArrivalDelay = 2.0;
-
+// The arrival takes the place of the game's own rise at the host's bonfire (the game plays 6950 on every guest it
+// places, 0.2 to 0.8 s after the load): no delay of our own (1.5.0 first waited 2 s, standing, which showed). The
+// others' games make our character 0.5 to 0.9 s after we join (the time our player data takes to reach them,
+// 0xD2A360 builds it the frame it is complete; 2026-11-04 test): they hold the arrival until it is built and start it
+// then, and end it with ours (session.cpp, knell_anims_tick). Their game making our character while we play an event
+// animation is no trouble: it did so during the game's own rise at every join of the 2026-11-04 test.
 void joined() {
-    g_join_at = now() + kJoinArrivalDelay;
-    LOG_INFO("[coop] Joined: the summon arrival plays in %.1f s, once the others have our character", kJoinArrivalDelay);
+    g_join_at = now();
+    g_join_stood_at = 0;
+    LOG_INFO("[coop] Joined: the summon arrival takes the place of the game's rise at the bonfire");
 }
 
 void left_session(const char* why) {

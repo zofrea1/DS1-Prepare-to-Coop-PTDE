@@ -147,6 +147,12 @@ const char* draw_from(uint32_t chr);
 int view_map(int map);
 // The character stands on a floor of the block the view loaded for itself (not in use before it asked).
 bool view_only_floor(uint32_t chr);
+// Spectating: the collision under another player's character (a shape cast down from it, as the game finds the local
+// player's floor), given to it as its floor (SetFloor) when it is a block's in use and not its floor already. Null when
+// it has that floor (`changed` when it was given just now), else why not.
+const char* find_floor(uint32_t chr, bool* changed);
+// The character's floor taken away again (SetFloor(0), as the game does to the party's characters at a map switch).
+void clear_floor(uint32_t chr);
 // An event animation starts on a character other than ours (motion.cpp's hook): bosses and watched enemies are
 // followed for a few seconds in the log (diagnostic), and the game whose own event run began it moves the character
 // until it ends (the others are told through set_event_lead_listener).

@@ -236,6 +236,11 @@ struct InfoMore2 {
     InfoMore more;
     int32_t event_anim;  // the event animation the sender's own character holds (motion::held_event_anim), 0 none
 };
+// event_anim 2 (no animation of the game's): the sender is in a cutscene (1.5.0). Their position and map do not go
+// together meanwhile: the crow's flight out of the Asylum put the player at Firelink's landing point 26 s before
+// their map changed, and a Death Knell to them loaded into the Asylum there and fell through it (2026-11-04). Older
+// players take it for an event animation they hold, as they should.
+constexpr int32_t kReportCutscene = 2;
 // 1.3.0, behind InfoMore2 the same way.
 struct InfoMore3 {
     InfoMore2 more2;
@@ -3375,6 +3380,16 @@ void guest_tick() {
 }
 
 // ---------------------------------------------------------------- shared
+// The event animation our report gives: the one our character holds (1 held with no id known: still "held", -1 is
+// "not reported"), kReportCutscene while a cutscene plays or waits for its map.
+int32_t reported_event_anim() {
+    if (game::loading()) return 0;
+    if (rules::cutscene_playing() || rules::cutscene_loading()) return kReportCutscene;
+    const uint32_t me = game::player();
+    const int held = me ? motion::held_event_anim(me) : 0;
+    return held < 0 ? 1 : held;
+}
+
 void send_info() {
     InfoMore4 more4{};
     InfoMore3& more3 = more4.more3;
@@ -3414,8 +3429,7 @@ void send_info() {
     more.reset = g_reset;  // not read from 1.1.0 on: kResetPhase carries it, reliably and for its rest
     more.boss = rules::own_gauge_boss();
     const uint32_t me = game::player();
-    const int held = me && !game::loading() ? motion::held_event_anim(me) : 0;
-    more2.event_anim = held < 0 ? 1 : held;  // held with no id known: still "held" (-1 is "not reported")
+    more2.event_anim = reported_event_anim();
     g_info_event = more2.event_anim;
     more3.bones = items::count(kHomewardBone);
     more4.disguised = me && !game::loading() && world::has_effect(me, kChameleonEffect) ? 1 : 0;
@@ -3431,9 +3445,7 @@ bool info_changed() {
     } else if (game::player() && !game::loading()) {
         dead = false;
     }
-    const uint32_t me = game::player();
-    const int held = me && !game::loading() ? motion::held_event_anim(me) : 0;
-    return dead != g_info_dead || (held < 0 ? 1 : held) != g_info_event;
+    return dead != g_info_dead || reported_event_anim() != g_info_event;
 }
 
 // The player an event is about, by their character's name when we know them (a 1.0.0 player's events carry its
@@ -3782,23 +3794,68 @@ void remote_characters_upkeep() {
 // arrival (0.2 s after the message in the 2026-11-03 test: "their character is not here"), and a character made a
 // moment ago is not updated yet (entity not active, rate -1 or 5 until remote_characters_upkeep fixes it 2 s on), so
 // an event animation started on it then is not played, or never ends (no collision, no attacks; see above). So the
-// animation waits for the character: active, with its physics, and given kCharacterBuilt more to be built when it was
-// made just now (its age as the upkeep saw it); its update rate is then fixed as the upkeep does, and the animation
-// started. A character that was here already takes it at once. It is let go once the player's own would be over (a
-// late arrival would hold their character in place while they walk away).
+// animation waits for the character: active, with its physics, and given kKnellCopyBuilt more to be built when it was
+// made just now (its age as the upkeep or this wait first saw it); its update rate is then fixed as the upkeep does,
+// and the animation started. A character that was here already takes it at once. One started late ends when its
+// player's does (their report, sent the moment it changes), and one not started before theirs would be over is let
+// go: a late arrival would hold their character in place while they walk away.
 struct KnellAnimWait {
     int anim = 0;
-    double came = 0;  // the message
+    double came = 0;          // the message
+    uint32_t chr = 0;         // the character we first saw for them while waiting
+    double chr_seen_at = 0;   // when (the upkeep's own first sight is only four times a second)
 };
 std::map<uint64_t, KnellAnimWait> g_knell_waits;
-constexpr double kCharacterBuilt = kCopyBuilt;  // as the upkeep fixes the rate
+// A character is built a moment after it is first seen (its entity active, its physics there): 0.1 s more before an
+// event animation goes on it (1.5.0 first gave it 0.5 s, which showed as lag on a join).
+constexpr double kKnellCopyBuilt = 0.1;
+// An arrival started late on a character made after it came: it ends when its player's does (their report says they
+// hold no event animation any more), so the character does not stand there after them.
+struct KnellLate {
+    uint32_t chr = 0;
+    int anim = 0;
+    double started = 0;
+    bool seen_held = false;  // their report showed an event animation since: a 0 after that is the end of theirs
+};
+std::map<uint64_t, KnellLate> g_knell_late;
+constexpr double kKnellLateAfter = 0.25;
+constexpr int kStaggerAnim = 2010;  // the knell's price: never late enough to matter, and it ends by itself
+
+void knell_late_tick() {
+    static int lines = 0;
+    for (auto it = g_knell_late.begin(); it != g_knell_late.end();) {
+        KnellLate& l = it->second;
+        const PeerInfo* p = nullptr;
+        for (const auto& q : g_peers) {
+            if (q.id == it->first) p = &q;
+        }
+        if (!p || chr_of_peer(it->first) != l.chr || motion::held_event_anim(l.chr) != l.anim ||
+            now() - l.started > motion::knell_anim_seconds(l.anim) + 2.0) {
+            it = g_knell_late.erase(it);
+            continue;
+        }
+        if (p->event_anim != 0) {
+            l.seen_held = true;
+        } else if (l.seen_held && now() - l.started > 0.3) {
+            if (motion::play_remote_anim(l.chr, motion::Anim{1, 0, 0}) && ++lines <= 60) {
+                LOG_INFO("[coop] %s: knell animation %d ended with theirs (%.2f s after it started here)",
+                         p->name.c_str(), l.anim, now() - l.started);
+            }
+            it = g_knell_late.erase(it);
+            continue;
+        }
+        ++it;
+    }
+}
 
 void knell_anims_tick() {
-    if (g_knell_waits.empty()) return;
     if (g_role == Role::None || game::loading()) {
         g_knell_waits.clear();
+        g_knell_late.clear();
         return;
     }
+    if (!g_knell_late.empty()) knell_late_tick();
+    if (g_knell_waits.empty()) return;
     static int lines = 0;
     for (auto it = g_knell_waits.begin(); it != g_knell_waits.end();) {
         KnellAnimWait& w = it->second;
@@ -3817,15 +3874,19 @@ void knell_anims_tick() {
             continue;
         }
         const uint32_t chr = chr_of_peer(it->first);
+        if (chr != w.chr) {
+            w.chr = chr;
+            w.chr_seen_at = now();
+        }
         const CopyLook c = chr ? look_at(chr) : CopyLook{};
         if (!chr || c.ent_state != 2 || c.hp <= 0 || !c.phys) {
             ++it;
             continue;
         }
         const auto seen = g_copy_seen_at.find(chr);
-        const double copy_age = seen == g_copy_seen_at.end() ? 0.0 : now() - seen->second;
+        const double copy_age = std::max(seen == g_copy_seen_at.end() ? 0.0 : now() - seen->second, now() - w.chr_seen_at);
         const bool fixed = (c.f1fd & 1) && c.rate == 0;  // here a while: the upkeep fixed its rate
-        if (!fixed && copy_age < kCharacterBuilt) {
+        if (!fixed && copy_age < kKnellCopyBuilt) {
             ++it;
             continue;
         }
@@ -3838,8 +3899,11 @@ void knell_anims_tick() {
             continue;
         }
         p->anim_at = now();  // the stuck-animation clean-up above leaves it be for a while
+        if (age > kKnellLateAfter && w.anim != kStaggerAnim) {
+            g_knell_late[it->first] = KnellLate{chr, w.anim, now(), p->event_anim != 0};
+        }
         if (++lines <= 60) {
-            LOG_INFO("[coop] %s: knell animation %d shown on their character %08X (%.1f s after it came%s)", name,
+            LOG_INFO("[coop] %s: knell animation %d shown on their character %08X (%.2f s after it came%s)", name,
                      w.anim, chr, age, fixed ? "" : "; the character was just made");
         }
         it = g_knell_waits.erase(it);
@@ -3847,6 +3911,7 @@ void knell_anims_tick() {
 }
 
 void knell_anim_came(uint64_t from, int anim) {
+    g_knell_late.erase(from);  // a new one of theirs replaces a late one still playing
     g_knell_waits[from] = KnellAnimWait{anim, now()};
     knell_anims_tick();
 }
@@ -5659,6 +5724,7 @@ void tick() {
                     std::copy(std::begin(p.pos), std::end(p.pos), t.pos);
                     t.pos_at = p.pos_at;
                     t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
+                    t.cutscene = p.event_anim == kReportCutscene && now() - p.last_seen <= 5.0;
                     team.push_back(t);
                 }
                 all_dead = false;  // the co-op team's wipe rules are not ours
@@ -5677,6 +5743,7 @@ void tick() {
                     std::copy(std::begin(p.pos), std::end(p.pos), t.pos);
                     t.pos_at = p.pos_at;
                     t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
+                    t.cutscene = p.event_anim == kReportCutscene && now() - p.last_seen <= 5.0;
                     team.push_back(t);
                 }
             }

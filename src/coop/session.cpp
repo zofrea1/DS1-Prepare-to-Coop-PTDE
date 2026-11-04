@@ -1537,6 +1537,7 @@ void reset_rules() {
 
 void finish(const std::wstring& why) {
     if (!why.empty()) say(why);
+    knell::left_session("the session ended");
     // A host closing its world over an invader: that invasion is over too (InvasionCooldown).
     const std::vector<uint64_t> invaders = g_invaders_in;
     for (uint64_t id : invaders) invasion_over(id);
@@ -2948,6 +2949,7 @@ bool holds(const std::vector<int32_t>& v, int32_t id) { return std::find(v.begin
 
 void guest_go_home(const std::wstring& why, const char* reason) {
     LOG_INFO("[coop] Going home (%s; session state %d, step %d)", reason, game::session_state(), game::join_step());
+    knell::left_session("the trip home started");
     g_blossoms_home = true;
     if (!g_invade && g_step == Step::InWorld) {
         const std::vector<int32_t> now_keys = items::key_items();
@@ -5965,6 +5967,9 @@ bool seal_boss_fogs() {
 }
 
 bool guest() { return g_role == Role::Guest; }
+bool coop_guest_in_world() {
+    return g_role == Role::Guest && g_step == Step::InWorld && !g_invade && !game::own_world();
+}
 bool active() { return g_role != Role::None; }
 bool idle() { return g_role == Role::None; }
 bool invader() { return g_role == Role::Guest && g_invade; }

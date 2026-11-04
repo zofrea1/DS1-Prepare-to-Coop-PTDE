@@ -1115,10 +1115,14 @@ void tick() {
         g_seen_anim = anim;
         g_seen_since = now();
     }
-    // A join's arrival: once we stand in the host's world.
+    // A join's arrival: once we stand in the host's world, and only while we are still a co-op guest there (a leave
+    // inside the delay is a load that straddles it: the arrival would start at home, with nobody to send it to).
     if (g_join_at > 0 && !loading && now() >= g_join_at && g_state == State::Idle) {
         g_join_at = 0;
-        if (!world::local_dead()) {
+        if (!session::coop_guest_in_world()) {
+            LOG_INFO("[coop] Joined: the summon arrival is not played (we are no longer a co-op guest in the host's "
+                     "world)");
+        } else if (!world::local_dead()) {
             g_arrival_anim = play_arrival("joined the session");
             g_arrival_at = now();
             g_arrival_price = false;
@@ -1174,6 +1178,12 @@ constexpr double kJoinArrivalDelay = 2.0;
 void joined() {
     g_join_at = now() + kJoinArrivalDelay;
     LOG_INFO("[coop] Joined: the summon arrival plays in %.1f s, once the others have our character", kJoinArrivalDelay);
+}
+
+void left_session(const char* why) {
+    if (g_join_at <= 0) return;
+    g_join_at = 0;
+    LOG_INFO("[coop] Joined: the summon arrival is dropped (%s)", why);
 }
 
 void note_texture(IDirect3DTexture9* texture, const void* data, unsigned size) {

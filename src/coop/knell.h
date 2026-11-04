@@ -35,6 +35,8 @@ constexpr uint32_t kDrainedText = 93129710;
 const wchar_t* text(uint32_t id);
 // We arrived in the host's world as a co-op guest (a join, not a reload): the summon arrival plays once we stand.
 void joined();
+// The session ended or our trip home started (session.cpp): a join's arrival not played yet is dropped.
+void left_session(const char* why);
 // The ring's animation plays again for the confirmation: an item use it sets off is not the player's (it would use
 // whatever item is selected), so it is swallowed. True when `goods` is.
 bool swallow_use(int32_t goods);

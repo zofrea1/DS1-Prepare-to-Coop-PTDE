@@ -112,6 +112,8 @@ bool in_session();
 uint64_t world_owner();
 bool hosting();
 bool guest();
+// We stand in the host's world as a co-op guest: arrived, not invading, not on the way home.
+bool coop_guest_in_world();
 bool active();       // any role, including searching and joining
 bool idle();         // no role at all (the session items may start one)
 bool invader();      // we invade

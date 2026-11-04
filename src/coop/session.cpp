@@ -3639,6 +3639,8 @@ void stray_copy_watch() {
 // bonfire was the one with no collision, both times: party.cpp now waits for that.)
 // Each character's state is written to the log when it is first seen and when it changes, and a character we stand
 // inside of (it should push us away) is pointed out with it.
+std::map<uint32_t, double> g_copy_seen_at;  // another player's character here -> when it was first seen (the upkeep's)
+
 void remote_characters_upkeep() {
     static double last = 0;
     if (now() - last < 0.5) return;
@@ -3653,6 +3655,7 @@ void remote_characters_upkeep() {
     static std::map<uint32_t, Watch> watch;
     if (g_role == Role::None || game::loading()) {
         watch.clear();  // a load makes every character anew, maybe at the same address
+        g_copy_seen_at.clear();
         return;
     }
     static int rate_lines = 0, look_lines = 0, inside_lines = 0;
@@ -3712,6 +3715,8 @@ void remote_characters_upkeep() {
         seen[chr] = w;
     }
     watch.swap(seen);
+    g_copy_seen_at.clear();
+    for (const auto& [chr, w] : watch) g_copy_seen_at[chr] = w.first;
     static std::map<uint32_t, double> held_since;  // characters seen holding an event animation, since when
     static std::map<uint32_t, double> cleared_at;
     static int lines = 0;
@@ -3738,6 +3743,81 @@ void remote_characters_upkeep() {
         }
     }
     held_since.swap(held_now);
+}
+
+// ---------------------------------------------------------------- the Death Knell's animations on others' characters
+// A summon arrival (a join's, or the Death Knell's; knell.cpp) and the knell's price are started on the player's
+// character here when it can take them. A joining player's character is made here a moment after their game plays the
+// arrival (0.2 s after the message in the 2026-11-03 test: "their character is not here"), and a character made a
+// moment ago is not updated yet (entity not active, rate -1 or 5 until remote_characters_upkeep fixes it 2 s on), so
+// an event animation started on it then is not played, or never ends (no collision, no attacks; see above). So the
+// animation waits for the character: active, with its physics, and given kCharacterBuilt more to be built when it was
+// made just now (its age as the upkeep saw it); its update rate is then fixed as the upkeep does, and the animation
+// started. A character that was here already takes it at once. It is let go once the player's own would be over (a
+// late arrival would hold their character in place while they walk away).
+struct KnellAnimWait {
+    int anim = 0;
+    double came = 0;  // the message
+};
+std::map<uint64_t, KnellAnimWait> g_knell_waits;
+constexpr double kCharacterBuilt = 0.5;
+
+void knell_anims_tick() {
+    if (g_knell_waits.empty()) return;
+    if (g_role == Role::None || game::loading()) {
+        g_knell_waits.clear();
+        return;
+    }
+    static int lines = 0;
+    for (auto it = g_knell_waits.begin(); it != g_knell_waits.end();) {
+        KnellAnimWait& w = it->second;
+        PeerInfo* p = nullptr;
+        for (auto& q : g_peers) {
+            if (q.id == it->first) p = &q;
+        }
+        const char* name = p ? p->name.c_str() : "another player";
+        const double age = now() - w.came;
+        if (!p || age > motion::knell_anim_seconds(w.anim) + 0.5) {
+            if (++lines <= 60) {
+                LOG_INFO("[coop] %s: knell animation %d not shown (their character here was not ready in %.1f s)", name,
+                         w.anim, age);
+            }
+            it = g_knell_waits.erase(it);
+            continue;
+        }
+        const uint32_t chr = chr_of_peer(it->first);
+        const CopyLook c = chr ? look_at(chr) : CopyLook{};
+        if (!chr || c.ent_state != 2 || c.hp <= 0 || !c.phys) {
+            ++it;
+            continue;
+        }
+        const auto seen = g_copy_seen_at.find(chr);
+        const double copy_age = seen == g_copy_seen_at.end() ? 0.0 : now() - seen->second;
+        const bool fixed = (c.f1fd & 1) && c.rate == 0;  // here a while: the upkeep fixed its rate
+        if (!fixed && copy_age < kCharacterBuilt) {
+            ++it;
+            continue;
+        }
+        if (!fixed) {
+            *ptr<uint8_t>(chr + 0x1FD) = static_cast<uint8_t>(c.f1fd | 1);
+            *ptr<int32_t>(chr + 0xF4) = 0;
+        }
+        if (!motion::play_remote_anim(chr, motion::Anim{0, w.anim, 0})) {
+            ++it;
+            continue;
+        }
+        p->anim_at = now();  // the stuck-animation clean-up above leaves it be for a while
+        if (++lines <= 60) {
+            LOG_INFO("[coop] %s: knell animation %d shown on their character %08X (%.1f s after it came%s)", name,
+                     w.anim, chr, age, fixed ? "" : "; the character was just made");
+        }
+        it = g_knell_waits.erase(it);
+    }
+}
+
+void knell_anim_came(uint64_t from, int anim) {
+    g_knell_waits[from] = KnellAnimWait{anim, now()};
+    knell_anims_tick();
 }
 
 void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
@@ -4411,12 +4491,18 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 p->ceremony = 0;
             }
             const uint32_t chr = chr_of_peer(from);
+            const bool knell = m.kind == 0 && !motion::synced_anim(m.anim) && motion::knell_arrival_anim(m.anim);
             static int lines = 0;
             if (++lines <= 200) {
-                LOG_INFO("[coop] %s: bonfire animation %s %d%s%s", p->name.c_str(), m.kind == 0 ? "start" : "stop",
-                         m.kind == 0 ? m.anim : 0, m.kind == 0 && m.loop ? " (loop)" : "",
-                         chr ? "" : " (their character is not here)");
+                LOG_INFO("[coop] %s: %s animation %s %d%s%s", p->name.c_str(), knell ? "knell" : "bonfire",
+                         m.kind == 0 ? "start" : "stop", m.kind == 0 ? m.anim : 0, m.kind == 0 && m.loop ? " (loop)" : "",
+                         chr ? "" : knell ? " (waiting for their character here)" : " (their character is not here)");
             }
+            if (knell) {
+                knell_anim_came(from, m.anim);  // once their character here can take it
+                break;
+            }
+            g_knell_waits.erase(from);  // a bonfire animation of theirs comes after it
             if (chr) motion::play_remote_anim(chr, motion::Anim{m.kind, m.anim, m.loop});
             break;
         }
@@ -5499,6 +5585,7 @@ void tick() {
     }
     reconcile_ceremonies();
     remote_characters_upkeep();
+    knell_anims_tick();
     player_net_watch();
     stray_copy_watch();
     itemshare_tick();

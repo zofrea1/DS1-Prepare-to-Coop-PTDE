@@ -1165,9 +1165,15 @@ bool swallow_use(int32_t goods) {
     return true;
 }
 
+// The others' games make our character a moment after we join (0.3 to 0.9 s in the 2026-11-03 test), and a character
+// made while its player plays an event animation may not collide (party.cpp waits for that when it makes one itself).
+// At 0.6 s the arrival came before our character was there in the others' games, which then showed none of it: it now
+// waits until our character is there and built (session.cpp, knell_anims_tick), and starts once it has been made.
+constexpr double kJoinArrivalDelay = 2.0;
+
 void joined() {
-    g_join_at = now() + 0.6;
-    LOG_INFO("[coop] Joined: the summon arrival plays once we stand");
+    g_join_at = now() + kJoinArrivalDelay;
+    LOG_INFO("[coop] Joined: the summon arrival plays in %.1f s, once the others have our character", kJoinArrivalDelay);
 }
 
 void note_texture(IDirect3DTexture9* texture, const void* data, unsigned size) {

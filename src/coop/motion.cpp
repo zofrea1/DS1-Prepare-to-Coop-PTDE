@@ -412,6 +412,15 @@ int local_loop_anim() { return g_enabled ? g_local_loop : 0; }
 
 bool knell_arrival_anim(int anim) { return knell_anim(anim); }
 
+double knell_anim_seconds(int anim) {
+    switch (anim) {
+        case 6951: return 4.55;
+        case 6952: return 5.4;
+        case 6950: return 2.15;
+        default: return 1.5;  // 2010, the price's stagger
+    }
+}
+
 void send_knell_arrival(int anim) {
     g_knell_send = anim;
     g_knell_send_at = GetTickCount64();

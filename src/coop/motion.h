@@ -69,5 +69,7 @@ bool synced_anim(int anim);
 void send_knell_arrival(int anim);
 // One of those arrivals (a start of it from another player is shown).
 bool knell_arrival_anim(int anim);
+// How long one of them plays, to where its player can act again (the arrivals' TAE windows; the price's stagger).
+double knell_anim_seconds(int anim);
 
 }  // namespace coop::motion

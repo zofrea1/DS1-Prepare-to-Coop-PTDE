@@ -518,6 +518,39 @@ const char* refusal() {
 
 void say(const std::wstring& line) { text::show(line); }
 
+// The action prompt at the bottom of the screen ("Rest at bonfire"). A talk object (a bonfire) registers its request
+// with the action manager [0x137D7CC] while the player is in range, and cancels it itself (0x456C40, from 0xD4E04B)
+// when the player walks out of range. After a teleport, or a load that takes the player away, that out-of-range pass
+// never runs, so the prompt stayed until another object of the same kind replaced it. Cancelled here as the game
+// does, and MenuMan's prompt (+0x814 text, +0x820 state) cleared as 0xC2A010 does; anything still in range
+// registers again on the next frame.
+constexpr uint32_t kActionManVar = 0x0137D7CC;
+constexpr uint32_t kActionCancel = 0x00456C40;  // eax = the action manager
+
+bool cancel_action(uint32_t mgr) {
+    __try {
+        __asm {
+            mov eax, mgr
+            mov ecx, kActionCancel
+            call ecx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+void clear_action_prompt(const char* why) {
+    uint32_t mgr = 0, mm = 0;
+    if (read32(kActionManVar, &mgr) && mgr) cancel_action(mgr);
+    if (read32(kMenuManVar, &mm) && mm) {
+        *ptr<int32_t>(mm + 0x820) = -1;
+        *ptr<int32_t>(mm + 0x814) = -1;
+    }
+    static int lines = 0;
+    if (++lines <= 50) LOG_INFO("[coop] Action prompt cleared (%s)", why);
+}
+
 // ---------------------------------------------------------------- the view
 void show_target(const spectate::Teammate& t, bool first) {
     g_target_id = t.id;
@@ -677,6 +710,7 @@ bool warp_here(uint32_t target) {
         LOG_ERROR("[coop] Death Knell: the warp failed");
         return false;
     }
+    clear_action_prompt("the Death Knell's warp");
     LOG_INFO("[coop] Death Knell: warped to (%.2f, %.2f, %.2f) beside %s, from (%.2f, %.2f, %.2f)", q.x, q.y, q.z,
              narrow(g_dest.name).c_str(), mine.x, mine.y, mine.z);
     return true;
@@ -910,6 +944,12 @@ void use() {
 }
 
 void tick() {
+    // Every load (the Homeward Bone, the Darksign, the Homeward miracle, travel, the Knell's own): the prompt of what
+    // stood near the player before it goes once the player stands again.
+    static bool was_loading = false;
+    const bool loading = game::loading() || !game::player();
+    if (was_loading && !loading) clear_action_prompt("after a load");
+    was_loading = loading;
     switch (g_state) {
         case State::Idle:
             track_levels();

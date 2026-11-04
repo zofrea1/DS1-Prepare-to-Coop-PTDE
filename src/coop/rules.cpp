@@ -3347,16 +3347,12 @@ uint32_t cast_hit_floor(int i) {
     return hit;
 }
 
-uint32_t floor_cast(uint32_t chr) {
-    uint32_t pw = 0, world = 0, ctrl = 0, phys = 0;
-    if (!read32(kPhysWorldVar, &pw) || !pw || !read32(pw + 0x14, &world) || !world || !read32(chr + 0x28, &ctrl) ||
-        !ctrl || !read32(ctrl + 0x1C, &phys) || !phys) {
-        return 0;
-    }
+// The cast from g_cast_start (0.5 m above the point already): the floor it finds, 0 none.
+uint32_t floor_cast_from_start() {
+    uint32_t pw = 0, world = 0;
+    if (!read32(kPhysWorldVar, &pw) || !pw || !read32(pw + 0x14, &world) || !world) return 0;
     uint32_t found = 0;
     __try {
-        std::memcpy(g_cast_start, reinterpret_cast<const void*>(static_cast<uintptr_t>(phys + 0x10)), 16);
-        g_cast_start[1] += 0.5f;
         std::memset(&g_cast, 0, sizeof(g_cast));
         g_cast.vt = kAllCdPointCollectorVt;
         g_cast.early_out = 3.402823e38f;
@@ -3393,6 +3389,33 @@ uint32_t floor_cast(uint32_t chr) {
         return 0;
     }
     return found;
+}
+
+// From a character's physics position (its fourth word as the game's own cast takes it).
+uint32_t floor_cast(uint32_t chr) {
+    uint32_t ctrl = 0, phys = 0;
+    if (!read32(chr + 0x28, &ctrl) || !ctrl || !read32(ctrl + 0x1C, &phys) || !phys) return 0;
+    __try {
+        std::memcpy(g_cast_start, reinterpret_cast<const void*>(static_cast<uintptr_t>(phys + 0x10)), 16);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    g_cast_start[1] += 0.5f;
+    return floor_cast_from_start();
+}
+
+// A collision (HitIns) of a block in use here, else why not.
+const char* floor_in_use(uint32_t hit) {
+    uint32_t vt = 0, n = 0;
+    uint8_t block = 0xFF;
+    const uint32_t wr = world_res();
+    if (!read32(hit, &vt) || vt != kHitInsVtable || !read8(hit + 0xF, &block)) return "it is no collision";
+    if (!wr || !read32(wr + kWrBlockCount, &n) || static_cast<int8_t>(block) < 0 ||
+        static_cast<uint32_t>(static_cast<int8_t>(block)) >= n ||
+        block_state(wr, static_cast<int8_t>(block)) != static_cast<int>(kBlockInUse)) {
+        return "its block is not in use here";
+    }
+    return nullptr;
 }
 
 // 0xD6C490 as the request calls it.
@@ -4115,19 +4138,29 @@ int view_map(int map) {
     return state;
 }
 
+uint32_t floor_at(const float* pos) {
+    // The fourth word as our own character's physics position has it (the game's cast copies it).
+    float w = 1.0f;
+    const uint32_t me = game::player();
+    uint32_t ctrl = 0, phys = 0, word = 0;
+    if (me && read32(me + 0x28, &ctrl) && ctrl && read32(ctrl + 0x1C, &phys) && phys && read32(phys + 0x1C, &word)) {
+        std::memcpy(&w, &word, 4);
+    }
+    g_cast_start[0] = pos[0];
+    g_cast_start[1] = pos[1] + 0.5f;
+    g_cast_start[2] = pos[2];
+    g_cast_start[3] = w;
+    const uint32_t hit = floor_cast_from_start();
+    if (!hit || floor_in_use(hit)) return 0;
+    return hit;
+}
+
 const char* find_floor(uint32_t chr, bool* changed) {
     *changed = false;
     const uint32_t hit = floor_cast(chr);
-    uint32_t vt = 0, n = 0, have = 0;
-    uint8_t block = 0xFF;
-    const uint32_t wr = world_res();
+    uint32_t have = 0;
     if (!hit) return "nothing under them";
-    if (!read32(hit, &vt) || vt != kHitInsVtable || !read8(hit + 0xF, &block)) return "what is under them is no collision";
-    if (!wr || !read32(wr + kWrBlockCount, &n) || static_cast<int8_t>(block) < 0 ||
-        static_cast<uint32_t>(static_cast<int8_t>(block)) >= n ||
-        block_state(wr, static_cast<int8_t>(block)) != static_cast<int>(kBlockInUse)) {
-        return "the collision under them is not in a block in use";
-    }
+    if (floor_in_use(hit)) return "the collision under them is not of a block in use";
     if (read32(chr + 0x29C, &have) && have == hit) return nullptr;
     __try {
         __asm {

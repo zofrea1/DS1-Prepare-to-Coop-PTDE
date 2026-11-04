@@ -38,6 +38,9 @@ struct CoopConfig {
     // 1.5.0: spectating a teammate (after our death, or with the Death Knell) loads their map when our game has not, and
     // draws the world and the characters around them as if we stood there.
     bool spectate_streaming = true;
+    // 1.5.0: the Death Knell to a teammate takes a soul level (its first price) instead of every soul and all humanity;
+    // the debuffs (a Crimson Blossom, a Bloody Mary for the session) are its price either way. Off by default.
+    bool knell_soul_level = false;
     // An item a co-op player drops lies on every co-op player's floor; the first to pick it up has it (itemshare.cpp).
     // The host's decides for its session.
     bool share_items = true;

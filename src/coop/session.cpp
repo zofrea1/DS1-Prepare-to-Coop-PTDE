@@ -121,6 +121,9 @@ enum MsgType : uint8_t {
     kBonfireKindle = 40, // 1.4.0, co-op guest -> host: I kindled this bonfire of your world (BonfireMsg)
     kBossSouls = 41,     // 1.4.0, co-op player -> all (through the host): my game paid a boss's souls
                          // (BossSoulsMsg), for a player whose game did not run the boss's defeat (world.cpp)
+    kSign = 42,          // 1.5.0, co-op player -> all (through the host): my summon sign (SignMsg), on a change and
+                         // every kSignResend; one not heard of for kSignLapse is gone
+    kKnellPrice = 43,    // 1.5.0, co-op guest -> host: my Death Knell's price, a Bloody Mary for the session
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -272,6 +275,19 @@ struct BossSoulsMsg {
     Header h;
     uint32_t souls;
     int32_t flag;
+};
+struct SignMsg {
+    Header h;
+    uint64_t owner;
+    uint32_t serial;   // a new one for each sign the owner places
+    int32_t map;       // area << 24 | block << 16
+    float pos[3];
+    float angle;
+    uint8_t active;    // 0: the owner has no sign any more
+};
+struct KnellPriceMsg {
+    Header h;
+    uint8_t sign;  // the bell took them to a summon sign
 };
 // kRest's value is the rest's id (1.1.0: random, set by the one who rests and passed on by the host; 1.0.0: their
 // bonfire, or 0 passed on by a 1.0.0 host). Each player's reload phase is sent for the rest it answers.
@@ -764,11 +780,11 @@ int g_bloody = 0;       // host: the count
 int g_host_bloody = 0;  // guest: the host's
 bool g_bloody_on = true;
 
-void bloody_add(const char* who) {
+void bloody_add(const char* who, const char* what = "fell") {
     if (!g_bloody_on || g_bloody >= kMaxBloody) return;
     ++g_bloody;
     g_last_state = 0;  // the guests hear it now, so their enemies grow when the host's do
-    LOG_INFO("[coop] Bloody Mary: %s fell; the session has %d", who, g_bloody);
+    LOG_INFO("[coop] Bloody Mary: %s %s; the session has %d", who, what, g_bloody);
 }
 
 void bloody_reset(const char* why) {
@@ -3788,6 +3804,88 @@ void remote_characters_upkeep() {
     held_since.swap(held_now);
 }
 
+// ---------------------------------------------------------------- summon signs (1.5.0)
+// A co-op player's White Sign Soapstone, in a session, leaves a summon sign where they stand, one per player (a new one
+// replaces the last); the Death Knell can take anyone else there (knell.cpp). Each player sends their own on a change
+// and every kSignResend, through the host as the other world news, so a player who joins later has them within that;
+// one not heard of for kSignLapse is gone (its owner left), and the end of the session takes them all.
+constexpr double kSignResend = 5.0;
+constexpr double kSignLapse = 16.0;
+struct SignInfo {
+    uint32_t serial = 0;
+    int map = -1;  // -1: none
+    float pos[3] = {};
+    float angle = 0;
+    double heard = 0;
+};
+SignInfo g_my_sign;
+double g_my_sign_sent = 0;
+std::map<uint64_t, SignInfo> g_signs;  // the others', by owner
+
+bool coop_in_world() {
+    return (g_role == Role::Host && (g_step == Step::Hosting || g_step == Step::Closing)) ||
+           (g_role == Role::Guest && !g_invade && g_step == Step::InWorld);
+}
+
+void send_sign() {
+    SignMsg m{};
+    fill_header(&m, kSign);
+    m.owner = steam::self();
+    m.serial = g_my_sign.serial;
+    m.map = g_my_sign.map;
+    std::copy(std::begin(g_my_sign.pos), std::end(g_my_sign.pos), m.pos);
+    m.angle = g_my_sign.angle;
+    m.active = g_my_sign.map != -1 ? 1 : 0;
+    if (g_role == Role::Host) {
+        broadcast_coop(m);
+    } else if (g_host) {
+        send_to(g_host, m);
+    }
+    g_my_sign_sent = now();
+}
+
+void signs_tick() {
+    if (!coop_in_world()) {
+        if (g_my_sign.map != -1 || !g_signs.empty()) {
+            LOG_INFO("[coop] Summon signs: ours and %d of the others' gone (the session ended)",
+                     static_cast<int>(g_signs.size()));
+        }
+        g_my_sign = SignInfo{};
+        g_signs.clear();
+        return;
+    }
+    if (g_my_sign.map != -1 && now() - g_my_sign_sent >= kSignResend) send_sign();
+    for (auto it = g_signs.begin(); it != g_signs.end();) {
+        if (now() - it->second.heard > kSignLapse) {
+            LOG_INFO("[coop] Summon sign of %s gone (not heard of for %.0f s)", steam::persona(it->first).c_str(),
+                     kSignLapse);
+            it = g_signs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void on_sign(uint64_t from, const SignMsg& m) {
+    if (m.owner == steam::self()) return;
+    const std::string who = steam::persona(m.owner);
+    if (!m.active) {
+        if (g_signs.erase(m.owner)) LOG_INFO("[coop] %s's summon sign is gone", who.c_str());
+        return;
+    }
+    SignInfo& s = g_signs[m.owner];
+    const bool fresh = s.serial != m.serial || s.map != m.map;
+    s.serial = m.serial;
+    s.map = m.map;
+    std::copy(std::begin(m.pos), std::end(m.pos), s.pos);
+    s.angle = m.angle;
+    s.heard = now();
+    if (fresh) {
+        LOG_INFO("[coop] %s's summon sign at (%.1f, %.1f, %.1f) in map %08X%s", who.c_str(), m.pos[0], m.pos[1],
+                 m.pos[2], static_cast<uint32_t>(m.map), from != m.owner ? " (through the host)" : "");
+    }
+}
+
 // ---------------------------------------------------------------- the Death Knell's animations on others' characters
 // A summon arrival (a join's, or the Death Knell's; knell.cpp) and the knell's price are started on the player's
 // character here when it can take them. A joining player's character is made here a moment after their game plays the
@@ -4552,6 +4650,26 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                               g_peers.end());
                 set_admitted(from, false);
             }
+            break;
+        }
+        case kSign: {
+            SignMsg m;
+            if (!as(&m) || g_invade || g_role == Role::None) return;
+            if (g_role == Role::Host) {
+                if (peer_is_invader(from) || m.owner != from) return;
+                broadcast_coop(m, from);
+            } else if (from != g_host) {
+                return;
+            }
+            on_sign(from, m);
+            break;
+        }
+        case kKnellPrice: {
+            KnellPriceMsg m;
+            if (!as(&m) || g_role != Role::Host || peer_is_invader(from)) return;
+            const PeerInfo* p = peer(from);
+            const std::string who = p && !p->char_name.empty() ? utf8(p->char_name) : steam::persona(from);
+            bloody_add(who.c_str(), m.sign ? "rang the Death Knell to a summon sign" : "rang the Death Knell");
             break;
         }
         case kLeft: {
@@ -5689,6 +5807,7 @@ void tick() {
         }
     }
     reconcile_ceremonies();
+    signs_tick();
     remote_characters_upkeep();
     knell_anims_tick();
     player_net_watch();
@@ -6056,6 +6175,68 @@ bool in_session() {
 }
 
 bool hosting() { return g_role == Role::Host && g_step == Step::Hosting && g_lobby != 0; }
+
+std::vector<SummonSign> summon_signs() {
+    std::vector<SummonSign> out;
+    if (!coop_in_world()) return out;
+    for (const auto& [owner, sign] : g_signs) {
+        const PeerInfo* p = nullptr;
+        for (const auto& q : g_peers) p = q.id == owner ? &q : p;
+        if (!p || p->invader) continue;  // not one of our co-op players (any more)
+        SummonSign o;
+        o.owner = owner;
+        o.name = shown_name(*p);
+        o.map = sign.map;
+        std::copy(std::begin(sign.pos), std::end(sign.pos), o.pos);
+        o.angle = sign.angle;
+        out.push_back(o);
+    }
+    return out;
+}
+
+const char* sign_refusal() {
+    if (!coop_in_world() || !g_lobby) return "Only in a co-operative session";
+    if (!game::player() || game::loading()) return "Not while loading";
+    if (world::local_dead()) return "Not while fallen";
+    if (world::boss_fight()) return "Not in a boss fight";
+    if (rules::cutscene_playing() || rules::cutscene_loading()) return "Not during a cutscene";
+    return nullptr;
+}
+
+const char* place_summon_sign() {
+    if (const char* why = sign_refusal()) return why;
+    game::Vec3 at{};
+    float angle = 0;
+    if (!game::position(&at, &angle) || !std::isfinite(at.x) || !std::isfinite(at.y) || !std::isfinite(at.z)) {
+        return "Not here";
+    }
+    const int world = rules::world_map();
+    const int map = static_cast<int>(static_cast<uint32_t>(world != -1 ? world : game::map_id()) & 0xFFFF0000u);
+    const bool moved = g_my_sign.map != -1;
+    g_my_sign.serial = static_cast<uint32_t>(GetTickCount64() & 0xFFFFFFFF) | 1;
+    g_my_sign.map = map;
+    g_my_sign.pos[0] = at.x;
+    g_my_sign.pos[1] = at.y;
+    g_my_sign.pos[2] = at.z;
+    g_my_sign.angle = angle;
+    send_sign();
+    LOG_INFO("[coop] Our summon sign %s (%.1f, %.1f, %.1f) in map %08X", moved ? "moved to" : "placed at", at.x, at.y,
+             at.z, static_cast<uint32_t>(map));
+    return nullptr;
+}
+
+void knell_bloody_mary(bool sign) {
+    const char* what = sign ? "rang the Death Knell to a summon sign" : "rang the Death Knell";
+    if (g_role == Role::Host) {
+        bloody_add("we", what);
+    } else if (g_role == Role::Guest && !g_invade && g_host) {
+        KnellPriceMsg m{};
+        fill_header(&m, kKnellPrice);
+        m.sign = sign ? 1 : 0;
+        send_to(g_host, m);
+        LOG_INFO("[coop] Death Knell: the host's game is told of our price (a Bloody Mary for the session)");
+    }
+}
 
 bool trip_slot_busy() { return now() - g_travel_started < kTravelGap || g_homeward_at > 0 || homeward_asked(); }
 

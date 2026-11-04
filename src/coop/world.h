@@ -62,6 +62,9 @@ void set_blossom_wither(void (*fn)());
 // Adds one Crimson Blossom (up to five; coop.cpp): true when one was added. A death that keeps the world costs one,
 // when its respawn warp goes (keep_dead_on_reload).
 void set_blossom_give(bool (*fn)());
+// The Death Knell's price (1.5.0): one Crimson Blossom more, as a death gives one (with DeathDebuffs; not for an
+// invader). True when one was added.
+bool give_knell_blossom();
 // A bonfire rest: take off every death-debuff effect immediately. The inventory clear is separate.
 void clear_death_debuff();
 // Another player rested: reset this world (enemies respawn), wither the Crimson Blossoms, end limbo.

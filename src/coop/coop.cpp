@@ -131,6 +131,8 @@ void parchment() {
     if (bonfire >= 0) world::warp_now(game::bonfire_map(bonfire), -1);
 }
 
+constexpr int32_t kWhiteSoapstone = 100;  // White Sign Soapstone
+
 // Remastered Seamless Co-op's rules for when an item can be used (it replaces the game's check for these ids).
 int can_use(int32_t id) {
     using namespace coop;
@@ -156,6 +158,9 @@ int can_use(int32_t id) {
             return 0;
         case items::kKnell:  // a co-op player in a session, standing, out of a boss fight, with a teammate standing
             return knell::can_use() ? 1 : 0;
+        case kWhiteSoapstone:  // in a session: our summon sign, for the others' Death Knells (1.5.0); else the game's
+            if (!in_session) return -1;
+            return !invader && session::sign_refusal() == nullptr ? 1 : 0;
         case 230:  // Elizabeth's Mushroom
         case 240:  // Divine Blessing
         case 390: case 391: case 392: case 393: case 394: case 395: case 396:  // Fire Keeper Souls
@@ -200,6 +205,15 @@ bool use_item(int32_t id) {
         case items::kInfection: session::curse_world(); return true;
         case items::kParchment: parchment(); return true;
         case items::kKnell: knell::use(); return true;
+        case kWhiteSoapstone: {
+            // In a session the soapstone's own animation plays and our summon sign goes where we stand (session.cpp),
+            // free; the game's own sign (its refId) is not made.
+            if (!session::in_session()) return false;
+            const char* why = session::place_summon_sign();
+            text::show(why ? text::widen(why)
+                           : std::wstring(L"Summon sign placed: the others' Death Knell can bring them here"));
+            return true;
+        }
         case 330:
             // In a session the bone takes everyone to the host's last bonfire (session tick), whoever used it.
             if (!session::in_session()) return false;
@@ -459,6 +473,7 @@ void coop_install(const CoopConfig& config) {
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");
     g_items = coop::items::install();
     if (g_items) coop::knell::install();
+    coop::knell::set_soul_level_price(g_cfg.knell_soul_level);
     coop::items::set_use_handler(&use_item);
     coop::items::set_can_use(&can_use);
     coop::items::set_dialog_text(&parchment_dialog);

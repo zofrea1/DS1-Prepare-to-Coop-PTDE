@@ -153,6 +153,8 @@ bool view_only_floor(uint32_t chr);
 const char* find_floor(uint32_t chr, bool* changed);
 // The character's floor taken away again (SetFloor(0), as the game does to the party's characters at a map switch).
 void clear_floor(uint32_t chr);
+// The collision under a point (x, y, z) of a block in use here, by the same cast; 0 none.
+uint32_t floor_at(const float* pos);
 // An event animation starts on a character other than ours (motion.cpp's hook): bosses and watched enemies are
 // followed for a few seconds in the log (diagnostic), and the game whose own event run began it moves the character
 // until it ends (the others are told through set_event_lead_listener).

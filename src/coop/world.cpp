@@ -1086,6 +1086,19 @@ void give_death_blossom() {
     text::show(L"Crimson Blossom received: maximum HP lowered until anyone rests");
 }
 
+}  // namespace
+
+// The Death Knell's price (knell.cpp, 1.5.0): a Crimson Blossom, as a death gives one (DeathDebuffs).
+bool give_knell_blossom() {
+    if (!g_cfg.death_debuffs || g_invader || !g_blossom_give_fn) return false;
+    if (!g_blossom_give_fn()) return false;
+    const int n = g_blossom_count_fn ? g_blossom_count_fn() : 1;
+    LOG_INFO("[coop] A Crimson Blossom for the Death Knell (%d held)", n);
+    return true;
+}
+
+namespace {
+
 // The respawn warp that waited (limbo, a team wipe) goes ahead.
 void respawn_now() {
     if (rules::prepare_warp_kick(local_dead())) return;

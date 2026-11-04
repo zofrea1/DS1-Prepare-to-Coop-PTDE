@@ -32,7 +32,10 @@ void note_texture(IDirect3DTexture9* texture, const void* data, unsigned size);
 void render();
 // The HUD line of the drain and the prompt's lines (FMG ids of ours, answered through the items' dialog text).
 constexpr uint32_t kDrainedText = 93129710;
+constexpr uint32_t kDebuffedText = 93129711;
 const wchar_t* text(uint32_t id);
+// DeathKnellSoulLevel: going to a teammate takes a soul level instead of their souls and humanity (off by default).
+void set_soul_level_price(bool on);
 // We arrived in the host's world as a co-op guest (a join, not a reload): the summon arrival plays once we stand.
 void joined();
 // The session ended or our trip home started (session.cpp): a join's arrival not played yet is dropped.

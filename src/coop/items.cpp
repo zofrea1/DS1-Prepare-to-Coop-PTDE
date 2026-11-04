@@ -117,8 +117,8 @@ const Def kDefs[kCount] = {
     {-92, 40, 2159, L"Death Knell", L"Summon yourself to a co-operator",
      L"The Death Knell tolls for those who have gone\nhollow. The faint ringing of this bell brings comfort\n"
      L"and closeness to those we most yearn for. The bell\nlongs to answer your wish, but not without a price.\n\n"
-     L"Use in a co-operative session to find and summon\nyourself to one's position. But did it have to be\n"
-     L"this way?"},
+     L"Use in a co-operative session to summon yourself\nto one's position, or to the summon sign they left.\n"
+     L"But did it have to be this way?"},
     // 1.5.0: the Crimson Blossom's icon, a key item as it is.
     {0, 0, 2033, L"Bloody Mary", L"Strengthens the world's enemies",
      L"A blood-red flower that drinks from every death in the\nworld it grows in.\n\nOne blooms for everyone in the "

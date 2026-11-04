@@ -121,15 +121,18 @@ enum class State { Idle, Opening, View, Going, Loading, Arriving };
 State g_state = State::Idle;
 double g_at = 0;           // Opening / Going: when the next step is due
 double g_view_since = 0;
-uint64_t g_target_id = 0;  // the teammate the view shows
+uint64_t g_target_id = 0;  // the teammate the view shows, or the owner of the summon sign it shows
+bool g_target_sign = false;
 uint32_t g_shown_chr = 0;  // the character the camera was given (0: ours)
 int g_view_hp = 0;         // our HP when the view opened (a hit closes it)
 bool g_cancel_down = true; // B or Esc held (only a fresh press closes the view)
 struct Destination {
     uint64_t id = 0;
+    bool sign = false;  // their summon sign, not the teammate
     std::wstring name;
     int map = -1;
     float pos[3] = {};
+    float angle = 0;
 };
 Destination g_dest;
 double g_load_since = 0;
@@ -158,6 +161,9 @@ int g_prompt_slot = 0;
 // registers again on the next frame.
 bool g_prompt_up = false;  // our request was registered since the last clear
 std::mt19937 g_rng(static_cast<uint32_t>(GetTickCount64()));
+// DeathKnellSoulLevel (1.5.0, default off): going to a teammate takes a soul level (the bell's first price) instead of
+// their souls and humanity.
+bool g_soul_level = false;
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -518,19 +524,41 @@ void arrive() {
     LOG_INFO("[coop] Death Knell: arrived by %s; the price once the arrival is over", narrow(g_dest.name).c_str());
 }
 
-// The poise breaks, the riposte's stab sounds, the HUD says so, and the level goes.
+// The poise breaks, the riposte's stab sounds, and the bell takes its price (1.5.0, the user's design): the mod's death
+// debuffs, a Crimson Blossom for us and a Bloody Mary for the whole session (the host counts it), as a death gives
+// them; and going to a teammate also takes every soul and all humanity we carry, as the Darksign does (no bloodstain).
+// A summon sign one of them left (White Sign Soapstone) is the co-operative way: the debuffs only. With
+// DeathKnellSoulLevel, going to a teammate takes a soul level instead of the souls and humanity (the first price).
 void pay_price() {
     const uint32_t me = game::player();
     if (!me) return;
     motion::send_knell_arrival(kStagger);
     const bool staggered = start_event_anim(me, kStagger);
     const bool sound = play_sound(10000, kRiposteSoundType, kRiposteSound);
-    hud_warning(kDrainedText);
-    const char* why = nullptr;
-    const int stat = drain(&why);
-    if (stat < 0) LOG_INFO("[coop] Death Knell: no soul level was taken (%s)", why ? why : "?");
-    LOG_INFO("[coop] Death Knell: the price (stagger %d%s, riposte sound c%d%s)", kStagger, staggered ? "" : " FAILED",
-             kRiposteSound, sound ? "" : " FAILED");
+    const bool sign = g_dest.sign;
+    const bool blossom = world::give_knell_blossom();
+    session::knell_bloody_mary(sign);
+    if (!sign && g_soul_level) {
+        hud_warning(kDrainedText);
+        const char* why = nullptr;
+        const int stat = drain(&why);
+        if (stat < 0) LOG_INFO("[coop] Death Knell: no soul level was taken (%s)", why ? why : "?");
+    } else {
+        hud_warning(kDebuffedText);
+        if (!sign) {
+            const int souls = game::souls(), humanity = game::humanity();
+            game::set_souls(0);
+            game::set_humanity(0);
+            LOG_INFO("[coop] Death Knell: %d souls and %d humanity lost, as to the Darksign", souls, humanity);
+        }
+        text::show(sign ? L"The Death Knell's price: a Crimson Blossom, and the enemies grow hardier"
+                        : L"The Death Knell's price: your souls, your humanity and a Crimson Blossom; the enemies "
+                          L"grow hardier");
+    }
+    LOG_INFO("[coop] Death Knell: the price for %s (stagger %d%s, riposte sound c%d%s, Crimson Blossom %s, a Bloody Mary "
+             "for the session)", sign ? "a summon sign" : g_soul_level ? "a teammate, a soul level" : "a teammate",
+             kStagger, staggered ? "" : " FAILED", kRiposteSound, sound ? "" : " FAILED",
+             blossom ? "given" : "not given (DeathDebuffs off, or five held)");
 }
 
 // Until the arrival lets the player act again: its animation leaves ChrCtrl+0x350, or its length passes.
@@ -620,10 +648,59 @@ const spectate::Teammate* find(uint64_t id) {
     return nullptr;
 }
 
+// The places the bell can take us (1.5.0): every co-op teammate standing, then every summon sign the others left
+// (session::summon_signs, their White Sign Soapstones), each by player. Good for the frame they are made in.
+struct Choice {
+    uint64_t id = 0;
+    bool sign = false;
+    const spectate::Teammate* mate = nullptr;  // the teammate (sign false)
+    session::SummonSign at;                    // the sign (sign true)
+    std::wstring name;
+    int map = -1;
+};
+std::vector<Choice> choices() {
+    std::vector<Choice> out;
+    for (const spectate::Teammate* t : candidates()) {
+        Choice c;
+        c.id = t->id;
+        c.mate = t;
+        c.name = t->name;
+        c.map = t->map;
+        out.push_back(c);
+    }
+    std::vector<session::SummonSign> signs = session::summon_signs();
+    std::sort(signs.begin(), signs.end(),
+              [](const session::SummonSign& a, const session::SummonSign& b) { return a.owner < b.owner; });
+    for (const session::SummonSign& sg : signs) {
+        Choice c;
+        c.id = sg.owner;
+        c.sign = true;
+        c.at = sg;
+        c.name = sg.name;
+        c.map = sg.map;
+        out.push_back(c);
+    }
+    return out;
+}
+
+const Choice* find_choice(const std::vector<Choice>& can, uint64_t id, bool sign) {
+    for (const Choice& c : can) {
+        if (c.id == id && c.sign == sign) return &c;
+    }
+    return nullptr;
+}
+
 std::wstring where(const spectate::Teammate& t) {
     if (t.chr && remote_character(t.chr)) return L"";
     const char* area = area_name(t.map);
     return area ? L" (far away, in " + text::widen(area) + L")" : L" (far away)";
+}
+
+// "<name>" for a teammate (and where), "<name>'s summon sign (<area>)" for a sign.
+std::wstring label(const Choice& c) {
+    if (!c.sign) return c.name + where(*c.mate);
+    const char* area = area_name(c.map);
+    return c.name + L"'s summon sign" + (area ? L" (" + text::widen(area) + L")" : std::wstring());
 }
 
 // Why the Death Knell cannot be rung now, or null.
@@ -634,7 +711,7 @@ const char* refusal() {
     if (world::local_dead() || spectate::holding() || world::in_limbo()) return "Not while fallen";
     if (session::trip_slot_busy()) return "Not while the party travels";
     if (world::boss_fight()) return "Not in a boss fight";
-    if (candidates().empty()) return "No other co-operator stands";
+    if (choices().empty()) return "No co-operator or summon sign to go to";
     return nullptr;
 }
 
@@ -705,14 +782,16 @@ void clear_action_prompt(const char* why) {
 }
 
 // ---------------------------------------------------------------- the view
-void show_target(const spectate::Teammate& t, bool first) {
-    g_target_id = t.id;
-    const uint32_t chr = t.chr && remote_character(t.chr) ? t.chr : 0;
+void show_target(const Choice& c, bool first) {
+    g_target_id = c.id;
+    g_target_sign = c.sign;
+    const uint32_t chr = !c.sign && c.mate->chr && remote_character(c.mate->chr) ? c.mate->chr : 0;
     g_shown_chr = chr;
     spectate::knell_view(chr);
-    set_prompt(L"Summon yourself to " + t.name + where(t));
-    if (first) say(L"Death Knell: choose a co-operator with the D-pad or the arrow keys");
-    LOG_INFO("[coop] Death Knell: viewing %s%s", narrow(t.name).c_str(), chr ? "" : " (not in our world: no camera)");
+    set_prompt(L"Summon yourself to " + label(c));
+    if (first) say(L"Death Knell: choose a co-operator or a summon sign with the D-pad or the arrow keys");
+    LOG_INFO("[coop] Death Knell: viewing %s%s", narrow(label(c)).c_str(),
+             chr ? "" : c.sign ? " (a summon sign: the camera stays)" : " (not in our world: no camera)");
 }
 
 void close_view(const char* why) {
@@ -734,19 +813,21 @@ void open_view() {
         g_state = State::Idle;
         return;
     }
-    const auto can = candidates();
+    const auto can = choices();
     // The nearest teammate whose character stands in our world, else the first.
-    const spectate::Teammate* best = can.front();
+    const Choice* best = &can.front();
     game::Vec3 me{};
     float best_d = 3.4e38f;
     if (game::position(&me, nullptr)) {
-        for (const spectate::Teammate* t : can) {
+        for (const Choice& c : can) {
             game::Vec3 q{};
-            if (!t->chr || !remote_character(t->chr) || !game::chr_position(t->chr, &q)) continue;
+            if (c.sign || !c.mate->chr || !remote_character(c.mate->chr) || !game::chr_position(c.mate->chr, &q)) {
+                continue;
+            }
             const float d = (q.x - me.x) * (q.x - me.x) + (q.y - me.y) * (q.y - me.y) + (q.z - me.z) * (q.z - me.z);
             if (d < best_d) {
                 best_d = d;
-                best = t;
+                best = &c;
             }
         }
     }
@@ -755,7 +836,7 @@ void open_view() {
     g_view_hp = chr_int(game::player(), kChrHp);
     g_cancel_down = true;
     InterlockedExchange(&g_mask_dpad, 1);
-    LOG_INFO("[coop] Death Knell: view open (%d co-operator(s))", static_cast<int>(can.size()));
+    LOG_INFO("[coop] Death Knell: view open (%d co-operator(s) and summon sign(s))", static_cast<int>(can.size()));
     show_target(*best, true);
 }
 
@@ -783,22 +864,23 @@ void view_tick() {
         return;
     }
     g_view_hp = std::max(g_view_hp, chr_int(me, kChrHp));  // healing is no hit
-    const auto can = candidates();
+    const auto can = choices();
     int at = -1;
     for (size_t i = 0; i < can.size(); ++i) {
-        if (can[i]->id == g_target_id) at = static_cast<int>(i);
+        if (can[i].id == g_target_id && can[i].sign == g_target_sign) at = static_cast<int>(i);
     }
     const int step = spectate::switch_step();
     if (at < 0) {
-        show_target(*can.front(), false);  // the one shown fell or left
+        show_target(can.front(), false);  // the one shown fell or left, or the sign went
         return;
     }
     if (step != 0 && can.size() > 1) {
-        show_target(*can[(at + step + static_cast<int>(can.size())) % can.size()], false);
+        show_target(can[(at + step + static_cast<int>(can.size())) % can.size()], false);
         return;
     }
     // Their character came into our world, or left it: the camera follows.
-    const uint32_t chr = can[at]->chr && remote_character(can[at]->chr) ? can[at]->chr : 0;
+    const Choice& shown = can[at];
+    const uint32_t chr = !shown.sign && shown.mate->chr && remote_character(shown.mate->chr) ? shown.mate->chr : 0;
     if (chr != g_shown_chr) {
         g_shown_chr = chr;
         spectate::knell_view(chr);
@@ -812,11 +894,30 @@ void view_tick() {
 // The action button on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so
 // it does not swing back to us and out again, and the arrival's sound is heard where we arrive.
 void confirm() {
-    const spectate::Teammate* t = find(g_target_id);
-    if (!t) {
+    const auto can = choices();
+    const Choice* c = find_choice(can, g_target_id, g_target_sign);
+    if (!c) {
         say(L"The Death Knell finds no one there");
         return;
     }
+    if (c->sign) {
+        g_dest = Destination{};
+        g_dest.id = c->id;
+        g_dest.sign = true;
+        g_dest.name = c->name;
+        g_dest.map = c->map;
+        std::copy(std::begin(c->at.pos), std::end(c->at.pos), g_dest.pos);
+        g_dest.angle = c->at.angle;
+        InterlockedExchange(&g_mask_dpad, 0);
+        g_state = State::Going;
+        const uint32_t me = game::player();
+        const bool again = g_use_anim > 0 && me && start_event_anim(me, g_use_anim);
+        g_at = now() + (again ? std::max(0.6, std::min(2.5, g_use_point)) + 0.3 : kGoDelay);
+        LOG_INFO("[coop] Death Knell: going to %s's summon sign (the ring's animation %d %s, the warp in %.1f s)",
+                 narrow(c->name).c_str(), g_use_anim, again ? "again" : "not played", g_at - now());
+        return;
+    }
+    const spectate::Teammate* t = c->mate;
     if (t->boss_fight) {
         say(t->name + L" is in a boss fight");
         LOG_INFO("[coop] Death Knell: %s is in a boss fight; not going", narrow(t->name).c_str());
@@ -899,6 +1000,74 @@ bool warp_here(uint32_t target) {
     return true;
 }
 
+// A load into `map`, stood at `pos` facing `angle` (rules::place_next_load_at).
+void load_into(int map_id, const float* pos, float angle, const std::wstring& what) {
+    const int map = static_cast<int>(static_cast<uint32_t>(map_id) & 0xFFFF0000u);
+    rules::place_next_load_at(map, pos[0], pos[1], pos[2], angle);
+    world::warp_now(map, -1);
+    g_state = State::Loading;
+    g_load_since = now();
+    g_load_seen = false;
+    g_stand_since = 0;
+    LOG_INFO("[coop] Death Knell: loading into map %08X (%s) for %s at (%.2f, %.2f, %.2f)", static_cast<uint32_t>(map),
+             area_name(map) ? area_name(map) : "?", narrow(what).c_str(), pos[0], pos[1], pos[2]);
+}
+
+// A summon sign in a block in use here: onto the collision under it (found as the game finds our own floor, by a cast
+// from the sign's point; rules::floor_at), as the warp onto a teammate stands us on theirs.
+bool warp_to_point(const float* p, float angle) {
+    const uint32_t me = game::player();
+    uint32_t vt = 0, fn = 0;
+    if (!me || !read32(me, &vt) || !read32(vt + kChrWarpSlot, &fn) || !fn) return false;
+    if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) return false;
+    const uint32_t floor = rules::floor_at(p);
+    if (!floor) return false;
+    game::Vec3 mine{};
+    game::position(&mine, nullptr);
+    alignas(16) float pos[4] = {p[0], p[1], p[2], 1.0f};
+    alignas(16) float rot[4] = {0.0f, angle, 0.0f, 0.0f};
+    if (!do_warp(me, fn, pos, rot, floor)) {
+        LOG_ERROR("[coop] Death Knell: the warp failed");
+        return false;
+    }
+    clear_action_prompt("the Death Knell's warp");
+    LOG_INFO("[coop] Death Knell: warped to %s's summon sign at (%.2f, %.2f, %.2f), from (%.2f, %.2f, %.2f)",
+             narrow(g_dest.name).c_str(), p[0], p[1], p[2], mine.x, mine.y, mine.z);
+    return true;
+}
+
+void go_to_sign() {
+    const std::vector<session::SummonSign> signs = session::summon_signs();
+    const session::SummonSign* sg = nullptr;
+    for (const session::SummonSign& x : signs) {
+        if (x.owner == g_dest.id) sg = &x;
+    }
+    if (!sg) {
+        say(L"The summon sign is gone");
+        LOG_INFO("[coop] Death Knell: %s's summon sign is gone", narrow(g_dest.name).c_str());
+        close_view("the sign is gone");
+        g_state = State::Idle;
+        return;
+    }
+    g_dest.map = sg->map;  // it may have moved since
+    std::copy(std::begin(sg->pos), std::end(sg->pos), g_dest.pos);
+    g_dest.angle = sg->angle;
+    if (warp_to_point(g_dest.pos, g_dest.angle)) {
+        close_view("arrived");
+        arrive();
+        return;
+    }
+    close_view("loading");
+    if (!valid_map(g_dest.map)) {
+        say(L"The Death Knell cannot find the summon sign");
+        LOG_INFO("[coop] Death Knell: %s's summon sign is in no map we know (%08X)", narrow(g_dest.name).c_str(),
+                 static_cast<uint32_t>(g_dest.map));
+        g_state = State::Idle;
+        return;
+    }
+    load_into(g_dest.map, g_dest.pos, g_dest.angle, g_dest.name + L"'s summon sign");
+}
+
 void going_tick() {
     if (now() < g_at) return;
     if (const char* why = refusal()) {
@@ -906,6 +1075,10 @@ void going_tick() {
         LOG_INFO("[coop] Death Knell: not going (%s)", why);
         close_view("not going");
         g_state = State::Idle;
+        return;
+    }
+    if (g_dest.sign) {
+        go_to_sign();
         return;
     }
     const spectate::Teammate* t = find(g_dest.id);
@@ -944,16 +1117,7 @@ void going_tick() {
     float angle = 0;
     game::Vec3 mine{};
     game::position(&mine, &angle);
-    const int map = static_cast<int>(static_cast<uint32_t>(t->map) & 0xFFFF0000u);
-    rules::place_next_load_at(map, g_dest.pos[0], g_dest.pos[1], g_dest.pos[2], angle);
-    world::warp_now(map, -1);
-    g_state = State::Loading;
-    g_load_since = now();
-    g_load_seen = false;
-    g_stand_since = 0;
-    LOG_INFO("[coop] Death Knell: loading into map %08X (%s) for %s at (%.2f, %.2f, %.2f)", static_cast<uint32_t>(map),
-             area_name(map) ? area_name(map) : "?", narrow(t->name).c_str(), g_dest.pos[0], g_dest.pos[1],
-             g_dest.pos[2]);
+    load_into(t->map, g_dest.pos, angle, t->name);
 }
 
 void loading_tick() {
@@ -1203,8 +1367,15 @@ void tick() {
 
 bool viewing() { return g_state == State::View; }
 
+void set_soul_level_price(bool on) {
+    g_soul_level = on;
+    LOG_INFO("[coop] Death Knell: going to a teammate costs %s (DeathKnellSoulLevel)",
+             on ? "a soul level and the debuffs" : "souls, humanity and the debuffs");
+}
+
 const wchar_t* text(uint32_t id) {
     if (id == kDrainedText) return L"! SOUL LEVEL DRAINED !";
+    if (id == kDebuffedText) return L"! DEBUFFED !";
     if (id >= kPromptText && id < kPromptText + kPromptSlots) return g_prompt[id - kPromptText];
     return nullptr;
 }

@@ -8,6 +8,7 @@
 #include "game.h"
 #include "hook.h"
 #include "items.h"
+#include "knell.h"
 #include "log.h"
 #include "motion.h"
 #include "netrate.h"
@@ -152,6 +153,8 @@ int can_use(int32_t id) {
             return (host || !session::active()) && game::own_world() && area_allows(id) ? 1 : 0;
         case items::kBlossom:
             return 0;
+        case items::kKnell:  // a co-op player in a session, standing, out of a boss fight, with a teammate standing
+            return knell::can_use() ? 1 : 0;
         case 230:  // Elizabeth's Mushroom
         case 240:  // Divine Blessing
         case 390: case 391: case 392: case 393: case 394: case 395: case 396:  // Fire Keeper Souls
@@ -194,6 +197,7 @@ bool use_item(int32_t id) {
         case items::kTaunt: session::taunt(); return true;
         case items::kInfection: session::curse_world(); return true;
         case items::kParchment: parchment(); return true;
+        case items::kKnell: knell::use(); return true;
         case 330:
             // In a session the bone takes everyone to the host's last bonfire (session tick), whoever used it.
             if (!session::in_session()) return false;
@@ -338,6 +342,7 @@ void tick_body() {
     coop::drops::tick();
     coop::deathtext::tick();
     coop::spectate::tick();
+    if (g_items) coop::knell::tick();
     coop::netrate::tick(coop::session::net_rate());
     coop::players::tick();
     coop::updates::tick();
@@ -421,6 +426,7 @@ void coop_install(const CoopConfig& config) {
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");
     g_items = coop::items::install();
+    if (g_items) coop::knell::install();
     coop::items::set_use_handler(&use_item);
     coop::items::set_can_use(&can_use);
     coop::items::set_dialog_text(&parchment_dialog);

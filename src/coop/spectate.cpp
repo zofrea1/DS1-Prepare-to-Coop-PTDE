@@ -88,6 +88,7 @@ uint32_t g_rate_chr = 0;      // the teammate whose update rate we fixed (0 none
 bool g_rate_was_fixed = false;
 uint32_t g_drawn_for = 0;     // the teammate the view's last "drawn from" line was about
 const char* g_drawn_why = "";
+uint32_t g_knell_chr = 0;     // the Death Knell's view: the teammate it shows (knell.cpp), 0 none
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -146,9 +147,10 @@ uint32_t __cdecl camera_chr() {
     g_followed = 0;
     uint32_t dbg = 0, v = 0;
     if (read32(kDebugChrVar, &dbg) && dbg && read32(dbg + 0xEC, &v) && v) return v;
-    if (!g_target || !player_character(g_target)) return 0;
-    g_followed = g_target;
-    return g_target;
+    const uint32_t want = g_hold ? g_target : g_knell_chr;
+    if (!want || !player_character(want)) return 0;
+    g_followed = want;
+    return want;
 }
 
 __declspec(naked) void hk_cam_chr() {
@@ -282,7 +284,8 @@ void fix_rate(uint32_t chr) {
 // Every frame while we follow a teammate: the world is drawn from their floor (the reason when not is logged once
 // per change).
 void view_extras() {
-    const uint32_t chr = g_hold && g_target && player_character(g_target) ? g_target : 0;
+    const uint32_t want = g_hold ? g_target : g_knell_chr;
+    const uint32_t chr = want && player_character(want) ? want : 0;
     fix_rate(chr);
     if (!chr) {
         g_drawn_for = 0;
@@ -309,20 +312,17 @@ void follow(const Teammate* t) {
     LOG_INFO("[coop] Spectating %s", narrow(t->name).c_str());
 }
 
-// D-pad left or right (any controller), or the arrow keys, while the game has the focus: the previous or next
-// teammate.
-int switch_input() {
-    static bool was_left = false, was_right = false;
-    static double polled = 0;
-    static uint16_t buttons = 0;
+bool focused() {
     DWORD pid = 0;
     const HWND fg = GetForegroundWindow();
-    if (!fg || !GetWindowThreadProcessId(fg, &pid) || pid != GetCurrentProcessId()) {
-        was_left = was_right = false;
-        return 0;
-    }
-    // An empty controller slot is slow to ask (XInput looks for the device each time): the slots in use are read
-    // every 30 ms, the others every 2 s.
+    return fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId();
+}
+
+// Every connected controller's buttons. An empty controller slot is slow to ask (XInput looks for the device each
+// time): the slots in use are read every 30 ms, the others every 2 s.
+uint16_t poll_buttons() {
+    static double polled = 0;
+    static uint16_t buttons = 0;
     static bool connected[4] = {};
     static double scanned = -100;
     if (now() - polled >= 0.03) {
@@ -341,6 +341,18 @@ int switch_input() {
             }
         }
     }
+    return buttons;
+}
+
+// D-pad left or right (any controller), or the arrow keys, while the game has the focus: the previous or next
+// teammate.
+int switch_input() {
+    static bool was_left = false, was_right = false;
+    if (!focused()) {
+        was_left = was_right = false;
+        return 0;
+    }
+    const uint16_t buttons = poll_buttons();
     const bool left = (buttons & kPadLeft) || (GetAsyncKeyState(VK_LEFT) & 0x8000);
     const bool right = (buttons & kPadRight) || (GetAsyncKeyState(VK_RIGHT) & 0x8000);
     const int step = left && !was_left ? -1 : right && !was_right ? 1 : 0;
@@ -547,5 +559,16 @@ void trip_release() {
 bool holding() { return g_hold; }
 
 bool installed() { return g_installed; }
+
+const std::vector<Teammate>& teammates() { return g_team; }
+
+void knell_view(uint32_t chr) {
+    if (chr != g_knell_chr) g_drawn_for = 0;
+    g_knell_chr = chr;
+}
+
+int switch_step() { return switch_input(); }
+
+uint16_t pad_buttons() { return focused() ? poll_buttons() : 0; }
 
 }  // namespace coop::spectate

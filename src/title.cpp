@@ -3,6 +3,7 @@
 #include "title.h"
 
 #include "coop/deathtext.h"
+#include "coop/knell.h"
 #include "coop/hook.h"
 #include "log.h"
 
@@ -82,7 +83,10 @@ HRESULT WINAPI hk_from_memory_ex(IDirect3DDevice9* device, const void* data, UIN
     }
     const HRESULT hr = g_from_memory_ex(device, data, size, width, height, mips, usage, format, pool, filter,
                                         mip_filter, color_key, info, palette, texture);
-    if (SUCCEEDED(hr) && texture) coop::deathtext::note_texture(*texture, data, size);
+    if (SUCCEEDED(hr) && texture) {
+        coop::deathtext::note_texture(*texture, data, size);
+        coop::knell::note_texture(*texture, data, size);
+    }
     return hr;
 }
 
@@ -96,7 +100,10 @@ HRESULT WINAPI hk_from_memory(IDirect3DDevice9* device, const void* data, UINT s
         LOG_ERROR("Title: the Prepare to Co-op logo could not be loaded (0x%08lX); the game's own is used", hr);
     }
     const HRESULT hr = g_from_memory(device, data, size, texture);
-    if (SUCCEEDED(hr) && texture) coop::deathtext::note_texture(*texture, data, size);
+    if (SUCCEEDED(hr) && texture) {
+        coop::deathtext::note_texture(*texture, data, size);
+        coop::knell::note_texture(*texture, data, size);
+    }
     return hr;
 }
 

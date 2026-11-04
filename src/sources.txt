@@ -28,3 +28,4 @@ src\coop\partylist.cpp
 src\coop\updates.cpp
 src\coop\itemshare.cpp
 src\coop\crterror.cpp
+src\coop\knell.cpp

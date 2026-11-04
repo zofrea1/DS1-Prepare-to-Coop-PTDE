@@ -515,7 +515,16 @@ bool g_place_warp = false;
 constexpr int kPlaceAsGame = 0;
 constexpr int kPlaceOnBonfire = 1;
 constexpr int kPlaceOnPoint = 2;
+// The Death Knell's (knell.cpp): the position and facing below go where the game's own branches put theirs (the
+// placement's [esp+0x10] pos x, y, z, 1 and [esp+0x20] rotation 0, angle, 0, 0; 0xEFA94C copies the join point there,
+// 0xEFAAA3 the sign's), MenuMan+0x1009 is set as both do, and the placement's end (0xEFACD0) takes it from there.
+constexpr int kPlaceAtPosition = 3;
+constexpr uint32_t kPlaceEnd = 0x00EFACD0;
+void* g_place_end = reinterpret_cast<void*>(kPlaceEnd);
 int g_place_kind = kPlaceAsGame;
+bool g_knell_armed = false;
+int g_knell_map = -1;
+__declspec(align(16)) float g_knell_place[8] = {};
 
 // The regen switch checks GameMan+0xB04 before it will call the bonfire case. A guest's rest writes that
 // field, and a load clears it again, so it is put back here. The sign-warp byte would make the case reload
@@ -711,6 +720,19 @@ int place_at_destination(uint32_t step) {
 }
 
 int __stdcall place_choice(uint32_t step) {
+    if (g_knell_armed) {
+        g_knell_armed = false;
+        uint32_t map = 0;
+        const bool read = read32(step + kStepWarpMap, &map);
+        if (!g_place_bonfire && read && (map & 0xFFFF0000u) == (static_cast<uint32_t>(g_knell_map) & 0xFFFF0000u)) {
+            g_place_warp = false;
+            LOG_INFO("[coop] Death Knell: placed at (%.2f, %.2f, %.2f) in map %08X", g_knell_place[0], g_knell_place[1],
+                     g_knell_place[2], map);
+            return kPlaceAtPosition;
+        }
+        LOG_INFO("[coop] Death Knell: this load (map %08X%s) is not the knell's (%08X); placed as it would be",
+                 read ? map : 0, g_place_bonfire ? ", a respawn" : "", static_cast<uint32_t>(g_knell_map));
+    }
     if (place_at_bonfire()) return kPlaceOnBonfire;
     if (g_place_warp) return place_at_destination(step);
     return kPlaceAsGame;
@@ -760,12 +782,37 @@ __declspec(naked) void hk_place_choice() {
         je on_bonfire
         cmp dword ptr [g_place_kind], 2  // kPlaceOnPoint
         je on_point
+        cmp dword ptr [g_place_kind], 3  // kPlaceAtPosition
+        je at_position
         jmp g_place_orig
     on_bonfire:
         jmp g_bonfire_place
     on_point:
         jmp g_point_place
+    at_position:
+        // eax and xmm0 only, as the game's own branches use them
+        movups xmm0, xmmword ptr [g_knell_place]
+        movups xmmword ptr [esp + 0x10], xmm0
+        movups xmm0, xmmword ptr [g_knell_place + 16]
+        movups xmmword ptr [esp + 0x20], xmm0
+        mov eax, 0x013786D0
+        mov eax, [eax]
+        mov byte ptr [eax + 0x1009], 1
+        jmp g_place_end
     }
+}
+
+void arm_knell_place(int map, float x, float y, float z, float angle) {
+    g_knell_map = map;
+    g_knell_place[0] = x;
+    g_knell_place[1] = y;
+    g_knell_place[2] = z;
+    g_knell_place[3] = 1.0f;
+    g_knell_place[4] = 0.0f;
+    g_knell_place[5] = angle;
+    g_knell_place[6] = 0.0f;
+    g_knell_place[7] = 0.0f;
+    g_knell_armed = true;
 }
 
 __declspec(naked) void hk_movemap() {
@@ -6432,5 +6479,7 @@ void tick() {
     if (!seamless_rules()) return;
     if (g_state.host && !g_state.closing && game::session_state() == 3) game::keep_room_open();
 }
+
+void place_next_load_at(int map, float x, float y, float z, float angle) { arm_knell_place(map, x, y, z, angle); }
 
 }  // namespace coop::rules

@@ -121,6 +121,10 @@ void set_separation_listener(void (*fn)(bool host));
 // guest rests). WarpSelfBloodMark's map 0x01000000 has no collision; that kick is not started. Returns true
 // when the kick itself must not run.
 bool prepare_warp_kick(bool dead);
+// The Death Knell's load (knell.cpp): the next load into `map` (area << 24 | block << 16) stands the player at (x, y, z)
+// facing `angle` (radians), host or guest, instead of the bonfire, warp point or join point the game would choose. A
+// death's respawn still goes to its bonfire. Dropped by that load's placement, or by one into another map.
+void place_next_load_at(int map, float x, float y, float z, float angle);
 
 // A boss with a health bar whose fight began in this game since its last load and that still lives (its entity),
 // else 0. After a rest it means the fight was lost: only a load puts it back to sleep (world.cpp).

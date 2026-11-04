@@ -22,6 +22,11 @@ struct Teammate {
     std::wstring name;
     uint32_t chr = 0;    // their character in our world (0 none: another map, or not built yet)
     bool alive = false;  // as they report it
+    // Where they stand as they report it every second (Info), for the Death Knell (knell.cpp).
+    int map = -1;          // area << 24 | block << 16 ..., -1 unknown
+    float pos[3] = {};
+    double pos_at = 0;     // when map and pos came (GetTickCount64 seconds), 0 never
+    bool boss_fight = false;  // a boss gauge is up in their game
 };
 
 bool install();
@@ -37,5 +42,15 @@ void trip_release();
 bool holding();
 // The death event can be held. Without it, world.cpp holds the respawn warp instead (the old limbo).
 bool installed();
+// The other co-op players as set_teammates last gave them.
+const std::vector<Teammate>& teammates();
+// The Death Knell's view (knell.cpp): the camera follows `chr` (a teammate's character in our world) while we stand;
+// 0 gives the camera back. Ignored while our death waits (that view comes first).
+void knell_view(uint32_t chr);
+// D-pad left or right (any controller) or the arrow keys pressed since the last call, while the game has the focus:
+// -1, 1, or 0. The spectating view and the Death Knell's take turns (never both at once).
+int switch_step();
+// The controllers' buttons (XINPUT_GAMEPAD bits of every connected pad, polled every 30 ms).
+uint16_t pad_buttons();
 
 }  // namespace coop::spectate

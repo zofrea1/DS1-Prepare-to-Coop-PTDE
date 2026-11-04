@@ -4365,8 +4365,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             PeerInfo* p = peer(from);
             p->anim_at = now();
             if (m.kind == 0) {
-                if (!motion::synced_anim(m.anim)) return;
-                p->ceremony = m.loop ? m.anim : 0;
+                if (!motion::synced_anim(m.anim) && !motion::knell_arrival_anim(m.anim)) return;
+                p->ceremony = m.loop && motion::synced_anim(m.anim) ? m.anim : 0;
             } else {
                 p->ceremony = 0;
             }
@@ -5485,6 +5485,10 @@ void tick() {
                     t.name = shown_name(p);
                     t.chr = chr_of_peer(p.id);
                     t.alive = !p.dead;
+                    t.map = p.map;
+                    std::copy(std::begin(p.pos), std::end(p.pos), t.pos);
+                    t.pos_at = p.pos_at;
+                    t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
                     team.push_back(t);
                 }
                 all_dead = false;  // the co-op team's wipe rules are not ours
@@ -5499,6 +5503,10 @@ void tick() {
                     t.name = shown_name(p);
                     t.chr = chr_of_peer(p.id);
                     t.alive = !p.dead;
+                    t.map = p.map;
+                    std::copy(std::begin(p.pos), std::end(p.pos), t.pos);
+                    t.pos_at = p.pos_at;
+                    t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
                     team.push_back(t);
                 }
             }

@@ -144,6 +144,18 @@ void* g_anim_stop_orig = nullptr;
 bool g_replaying = false;
 std::vector<Anim> g_pending;
 bool g_enabled = true;      // [SeamlessCoop] BonfireAnimations
+// The Death Knell's arrivals (knell.cpp): the living player's rise (6950), the summoned phantom's (6951) and the
+// Warrior of Sunlight's (6952, "Praise the Sun"). Passed on only when the Knell starts one (send_knell_arrival).
+constexpr int kKnellAnims[] = {6950, 6951, 6952};
+int g_knell_send = 0;
+ULONGLONG g_knell_send_at = 0;
+
+bool knell_anim(int anim) {
+    for (int a : kKnellAnims) {
+        if (a == anim) return true;
+    }
+    return false;
+}
 bool g_local_open = false;  // a synced animation of ours was passed on and not stopped since
 int g_local_loop = 0;       // the synced animation we are looping (0 none)
 
@@ -160,6 +172,11 @@ void __stdcall note_anim_start(uint32_t chr, int anim, uint32_t loop) {
     if (chr && !g_replaying && chr != game::player()) rules::note_event_anim(chr, anim, (loop & 0xFF) != 0);
     if (g_replaying || !g_enabled || !chr || chr != game::player()) return;
     const bool looped = (loop & 0xFF) != 0;
+    if (anim == g_knell_send && knell_anim(anim) && GetTickCount64() - g_knell_send_at < 2000) {
+        g_knell_send = 0;
+        queue(Anim{0, anim, 0});
+        return;
+    }
     if (!synced_anim(anim)) {
         // Something else replaces our ceremony: the others let go of it too.
         if (g_local_open) queue(Anim{1, 0, 0});
@@ -390,12 +407,19 @@ void clear_remote_gaits() {
 
 int local_loop_anim() { return g_enabled ? g_local_loop : 0; }
 
+bool knell_arrival_anim(int anim) { return knell_anim(anim); }
+
+void send_knell_arrival(int anim) {
+    g_knell_send = anim;
+    g_knell_send_at = GetTickCount64();
+}
+
 void set_bonfire_animations(bool on) { g_enabled = on; }
 
 bool play_remote_anim(uint32_t chr, const Anim& a) {
     // A stop is always carried out: it only ever puts a character back to normal.
     if (!chr || chr == game::player() || (!g_enabled && a.kind == 0)) return false;
-    if (a.kind == 0 && !synced_anim(a.anim)) return false;
+    if (a.kind == 0 && !synced_anim(a.anim) && !knell_anim(a.anim)) return false;
     // The functions need the character's controller and its animation object.
     uint32_t ctrl = 0, request = 0, hp = 0;
     if (!read32(chr + 0x28, &ctrl) || ctrl < 0x10000 || !read32(chr + 0x10, &request) || request < 0x10000 ||

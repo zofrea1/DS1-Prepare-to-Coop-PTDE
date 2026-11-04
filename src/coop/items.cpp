@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "hook.h"
+#include "knell.h"
 #include "log.h"
 #include "text.h"
 
@@ -111,6 +112,13 @@ const Def kDefs[kCount] = {
     {-93, 0, 2067, L"Parchment of Deliverance", L"Revives world allies",
      L"A parchment that calls back certain allies of the\nworld who have fallen.\n\nCosts souls, and returns you "
      L"to your last bonfire."},
+    // Prepare to Co-op's own (1.5.0): the Blessed Eye Orb's animation and effect (sfx 40); icon 2159, a cell of the atlas
+    // Icon21 that the game leaves empty, painted at run time (knell.cpp).
+    {-92, 40, 2159, L"Death Knell", L"Summon yourself to a co-operator",
+     L"The Death Knell tolls for those who have gone\nhollow. The faint ringing of this bell brings comfort\n"
+     L"and closeness to those we most yearn for. The bell\nlongs to answer your wish, but not without a price.\n\n"
+     L"Use in a co-operative session to find and summon\nyourself to one's position. But did it have to be\n"
+     L"this way?"},
 };
 
 void put32(uint8_t* r, int off, int32_t v) { std::memcpy(r + off, &v, 4); }
@@ -162,7 +170,7 @@ __declspec(naked) void hk_goods_row() {
     __asm {
         cmp edi, 389000
         jl orig
-        cmp edi, 389008
+        cmp edi, 389009  // kLast
         jg orig
         push edi
         call our_row
@@ -189,6 +197,7 @@ const wchar_t* item_text(uint32_t id, text::Fmg kind) {
 }
 
 const wchar_t* dialog_text(uint32_t id) {
+    if (id == knell::kDrainedText) return knell::drained_text();
     return (id == kParchmentDialog && g_dialog_fn) ? g_dialog_fn() : nullptr;
 }
 

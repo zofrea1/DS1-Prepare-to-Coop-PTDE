@@ -2,7 +2,8 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #pragma once
 
-// The seamless co-op items (goods 389000-389008), as in Remastered Seamless Co-op: extra EquipParamGoods rows
+// The seamless co-op items (goods 389000-389008), as in Remastered Seamless Co-op, and the Death Knell (389009, 1.5.0,
+// knell.cpp): extra EquipParamGoods rows
 // served by the goods param getter, their texts through the FMG hook, whether they can be used decided in the
 // game's own item check (0xEADCA0), and their effect caught in PlayerIns::UseGoods. They behave like any other
 // item: equipped to a quick slot, used with the item animation, refused (greyed out) when not usable.
@@ -23,8 +24,9 @@ enum Id : int32_t {
     kInfection = 389006,  // Cursed Pendant: curses one's own world (offline or hosting)
     kBlossom = 389007,    // Crimson Blossom: death debuff counter (key item, never used)
     kParchment = 389008,  // Parchment of Deliverance: revive certain NPCs
+    kKnell = 389009,      // Death Knell (1.5.0): go to another co-op player, for a soul level (knell.cpp)
     kFirst = kHost,
-    kLast = kParchment,
+    kLast = kKnell,
 };
 
 // The Parchment's yes/no dialog (event text FMG id), answered with the soul cost.

@@ -3,6 +3,7 @@
 #include "overlay.h"
 
 #include "deathtext.h"
+#include "knell.h"
 
 #include "log.h"
 
@@ -297,6 +298,7 @@ void draw(IDirect3DDevice9* dev) {
 
 HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty) {
     deathtext::render();  // the death text's band, between two frames (deathtext.cpp)
+    knell::render();      // the Death Knell's icon, once its atlas is loaded (knell.cpp)
     __try {
         draw(dev);
     } __except (EXCEPTION_EXECUTE_HANDLER) {

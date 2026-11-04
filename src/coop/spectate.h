@@ -30,6 +30,9 @@ struct Teammate {
 };
 
 bool install();
+// SpectateStreaming (default on): following a teammate (our death's view, the Death Knell's) keeps their map loaded and
+// has the characters around them updated and drawn as the ones around us are.
+void set_streaming(bool on);
 // Every frame on the game thread, before tick(): the other co-op players of the session (invaders not included).
 void set_teammates(const std::vector<Teammate>& teammates);
 void tick();

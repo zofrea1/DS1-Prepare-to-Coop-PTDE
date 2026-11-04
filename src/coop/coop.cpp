@@ -455,6 +455,7 @@ void coop_install(const CoopConfig& config) {
     }
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
+    coop::spectate::set_streaming(g_cfg.spectate_streaming);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");
     g_items = coop::items::install();
     if (g_items) coop::knell::install();

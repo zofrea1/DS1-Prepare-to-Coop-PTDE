@@ -856,6 +856,13 @@ bool warp_here(uint32_t target) {
         !read32(me, &vt) || !read32(vt + kChrWarpSlot, &fn) || !fn) {
         return false;
     }
+    // Their map is loaded here only because the view keeps it (spectate.cpp): the load takes us there, as before the
+    // view loaded far maps, and as the game itself takes a player into a map it has not loaded around them.
+    if (rules::view_only_floor(target)) {
+        LOG_INFO("[coop] Death Knell: %s stands in a map loaded only for the view: going by a load",
+                 narrow(g_dest.name).c_str());
+        return false;
+    }
     if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z)) return false;
     alignas(16) float pos[4] = {q.x, q.y, q.z, 1.0f};
     alignas(16) float rot[4] = {0.0f, angle, 0.0f, 0.0f};

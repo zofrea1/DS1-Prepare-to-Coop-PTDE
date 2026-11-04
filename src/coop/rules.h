@@ -141,6 +141,12 @@ void arm_trip_reload();
 // Spectating: this frame's world is drawn as from the floor `chr` stands on (the draw groups, the area's light, the
 // connected blocks), instead of ours. Null when done, else why not (no floor, its block not loaded here).
 const char* draw_from(uint32_t chr);
+// Spectating: `map` (a teammate's, as they report it) is kept loaded while this is called every frame, as a floor
+// under them connecting to it would: its block is wanted on every WorldRes update. -1 lets it go (so does a second
+// without a call). The block's state (7 in use), -1 when this world cannot load that map.
+int view_map(int map);
+// The character stands on a floor of the block the view loaded for itself (not in use before it asked).
+bool view_only_floor(uint32_t chr);
 // An event animation starts on a character other than ours (motion.cpp's hook): bosses and watched enemies are
 // followed for a few seconds in the log (diagnostic), and the game whose own event run began it moves the character
 // until it ends (the others are told through set_event_lead_listener).

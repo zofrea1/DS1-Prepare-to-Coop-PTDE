@@ -61,6 +61,18 @@ constexpr uint32_t kFadeManVar = 0x013786B8;
 // command "Set Network Update Rate" (2004[34], 0xD6D780) fixes it at 0 (always), as here while we follow them.
 constexpr uint32_t kChrRateFlags = 0x1FD;  // bit 0: the rate is fixed
 constexpr uint32_t kChrRate = 0xF4;
+// The world around a far teammate, as if we stood there (SpectateStreaming, 1.5.0):
+//  * Their map: a teammate in a block our game has not loaded had no floor here, so nothing around them was drawn
+//    (2026-11-03: "no floor under them" in the Undead Burg, seen from the Asylum). Their block is asked for on every
+//    WorldRes update while we follow them (rules::view_map), as a floor under them connecting to it would; once it is
+//    in use their character finds its floor there and the world is drawn from it (above).
+//  * The characters around them: WorldChrMan's per-frame pass (0xE3F630) decides every character's update rate from
+//    a camera frustum test and a rank by distance, both taken from the local player's character ([WorldChrMan+0x3C]:
+//    its position, and its draw groups chr+0x274 that the frustum test is limited to, 0x456B70). The enemies around a
+//    far teammate failed the draw group test (not drawn, or drawn at rate -2's LOD) and ranked behind everything near
+//    us. While we follow a teammate the pass takes their character instead (0xE3F68A: mov ecx,[edi+3Ch]; mov eax,
+//    [ecx+28h]), checked to be one of WorldChrMan's players every time.
+constexpr uint32_t kChrPassOriginSite = 0x00E3F68A;
 
 constexpr double kViewDelay = 3.0;      // the death animation plays before the camera moves on
 constexpr double kFightOffFor = 1.5;    // the fight counts as over once it has been over this long
@@ -89,6 +101,10 @@ bool g_rate_was_fixed = false;
 uint32_t g_drawn_for = 0;     // the teammate the view's last "drawn from" line was about
 const char* g_drawn_why = "";
 uint32_t g_knell_chr = 0;     // the Death Knell's view: the teammate it shows (knell.cpp), 0 none
+bool g_streaming = true;      // SpectateStreaming
+bool g_origin_patched = false;
+volatile uint32_t g_pass_origin = 0;  // the character WorldChrMan's pass takes instead of ours (0: ours)
+int g_view_map = -1;          // the followed teammate's map kept loaded for the view (-1 none)
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -265,6 +281,32 @@ void clear_death_tint() {
     }
 }
 
+uint32_t __stdcall pass_origin(uint32_t wcm) {
+    uint32_t local = 0;
+    read32(wcm + 0x3C, &local);
+    const uint32_t chr = g_pass_origin;
+    uint32_t ctrl = 0, phys = 0;
+    if (!chr || chr == local || !player_character(chr) || !read32(chr + 0x28, &ctrl) || !ctrl ||
+        !read32(ctrl + 0x1C, &phys) || !phys) {
+        return local;
+    }
+    return chr;
+}
+
+__declspec(naked) void hk_chr_pass_origin() {
+    __asm {
+        push edx
+        push eax
+        push edi            // WorldChrMan
+        call pass_origin    // stdcall
+        mov ecx, eax
+        pop eax
+        pop edx
+        mov eax, dword ptr [ecx + 0x28]
+        ret
+    }
+}
+
 // Puts back the update rate of the teammate we stop following (if they are still here) and fixes the new one's.
 void fix_rate(uint32_t chr) {
     if (chr == g_rate_chr) return;
@@ -287,11 +329,25 @@ void view_extras() {
     const uint32_t want = g_hold ? g_target : g_knell_chr;
     const uint32_t chr = want && player_character(want) ? want : 0;
     fix_rate(chr);
+    // Their map, as they report it, kept loaded while we follow them.
+    int map = -1;
+    if (chr && g_streaming) {
+        for (const Teammate& t : g_team) {
+            if (t.chr == chr) map = t.map;
+        }
+    }
+    if (map != g_view_map || map >= 0) {
+        g_view_map = map;
+        rules::view_map(map);
+    }
     if (!chr) {
+        g_pass_origin = 0;
         g_drawn_for = 0;
         return;
     }
     const char* why = rules::draw_from(chr);
+    // Only from a floor of theirs that is loaded here: their draw groups come from it.
+    g_pass_origin = g_streaming && g_origin_patched && !why ? chr : 0;
     if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why)) {
         g_drawn_for = chr;
         g_drawn_why = why ? why : "";
@@ -497,7 +553,19 @@ bool install() {
     if (!patch_call(kDeathTintTest, tint_k, sizeof(tint_k), reinterpret_cast<void*>(&hk_death_tint))) {
         LOG_ERROR("[coop] Spectating: the death tint test did not match this build (the picture greys while spectating)");
     }
+    static const uint8_t origin_k[6] = {0x8B, 0x4F, 0x3C, 0x8B, 0x41, 0x28};  // mov ecx,[edi+3Ch]; mov eax,[ecx+28h]
+    g_origin_patched = g_view && patch_call(kChrPassOriginSite, origin_k, sizeof(origin_k),
+                                            reinterpret_cast<void*>(&hk_chr_pass_origin));
+    if (g_view && !g_origin_patched) {
+        LOG_ERROR("[coop] Spectating: the character update pass did not match this build (the characters around a far "
+                  "teammate stay as seen from us)");
+    }
     return true;
+}
+
+void set_streaming(bool on) {
+    g_streaming = on;
+    LOG_INFO("[coop] Spectating a far teammate loads and draws the world around them: %s", on ? "yes" : "no");
 }
 
 void set_teammates(const std::vector<Teammate>& teammates) { g_team = teammates; }

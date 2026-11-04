@@ -530,6 +530,11 @@ double g_step_since = 0;
 double g_last_create = -100;
 double g_last_state = 0;
 double g_last_info = 0;
+// Our death and the event animation we hold, as our last report said: a change of either goes out at once, and once
+// more a moment later in case that one is lost, not with the next report of the second (1.5.0; see kPeerAliveFor).
+bool g_info_dead = false;
+int g_info_event = 0;
+double g_info_again_at = 0;
 double g_last_ping = 0;
 int g_hello_tries = 0;
 int g_search_waves = 0;
@@ -3397,6 +3402,7 @@ void send_info() {
         g_respawn = kRespawnNone;
     }
     i.dead = dead ? 1 : 0;
+    g_info_dead = dead;
     i.light = world::local_lights();
     strncpy_s(i.name, utf8(own_name()).c_str(), _TRUNCATE);
     wcsncpy_s(i.char_name, party::local_name().c_str(), _TRUNCATE);
@@ -3410,10 +3416,24 @@ void send_info() {
     const uint32_t me = game::player();
     const int held = me && !game::loading() ? motion::held_event_anim(me) : 0;
     more2.event_anim = held < 0 ? 1 : held;  // held with no id known: still "held" (-1 is "not reported")
+    g_info_event = more2.event_anim;
     more3.bones = items::count(kHomewardBone);
     more4.disguised = me && !game::loading() && world::has_effect(me, kChameleonEffect) ? 1 : 0;
     more4.max_players = static_cast<uint8_t>(g_cfg.max_players);
     broadcast(more4, false);
+}
+
+// What send_info would report now for our death and our event animation differs from what it last sent.
+bool info_changed() {
+    bool dead = g_info_dead;
+    if (world::local_dead()) {
+        dead = true;
+    } else if (game::player() && !game::loading()) {
+        dead = false;
+    }
+    const uint32_t me = game::player();
+    const int held = me && !game::loading() ? motion::held_event_anim(me) : 0;
+    return dead != g_info_dead || (held < 0 ? 1 : held) != g_info_event;
 }
 
 // The player an event is about, by their character's name when we know them (a 1.0.0 player's events carry its
@@ -3643,9 +3663,16 @@ void stray_copy_watch() {
 // inside of (it should push us away) is pointed out with it.
 std::map<uint32_t, double> g_copy_seen_at;  // another player's character here -> when it was first seen (the upkeep's)
 
+// A character made just now is set up by the game in its first frames (its entity not active, rate -1 for about
+// 0.1 s): its update rate is fixed once its entity is active and it has its physics, kCopyBuilt after it was first
+// seen, or after kCopyRateFallback whatever it shows (1.5.0; until then 2 s for every character, and the copy of a
+// player who just came back moved in jerks until then, at the game's rate 5).
+constexpr double kCopyBuilt = 0.5;
+constexpr double kCopyRateFallback = 2.0;
+
 void remote_characters_upkeep() {
     static double last = 0;
-    if (now() - last < 0.5) return;
+    if (now() - last < 0.25) return;
     last = now();
     struct Watch {
         double first = 0;
@@ -3691,7 +3718,9 @@ void remote_characters_upkeep() {
                 LOG_INFO("[coop] %s's character %08X now: %s", who.c_str(), chr, describe(c).c_str());
             }
         }
-        if (now() - w.first >= 2.0 && !((c.f1fd & 1) && c.rate == 0)) {
+        const double age = now() - w.first;
+        const bool built = age >= kCopyBuilt && c.ent_state == 2 && c.phys;
+        if ((built || age >= kCopyRateFallback) && !((c.f1fd & 1) && c.rate == 0)) {
             *ptr<uint8_t>(chr + 0x1FD) = static_cast<uint8_t>(c.f1fd | 1);
             *ptr<int32_t>(chr + 0xF4) = 0;
             if (++rate_lines <= 20) {
@@ -3762,7 +3791,7 @@ struct KnellAnimWait {
     double came = 0;  // the message
 };
 std::map<uint64_t, KnellAnimWait> g_knell_waits;
-constexpr double kCharacterBuilt = 0.5;
+constexpr double kCharacterBuilt = kCopyBuilt;  // as the upkeep fixes the rate
 
 void knell_anims_tick() {
     if (g_knell_waits.empty()) return;
@@ -4914,6 +4943,15 @@ const PeerInfo* peer_by_member_record(const std::wstring& name) {
     return found;
 }
 
+// A player counts as back once they have reported standing for kPeerAliveFor, and as up once they have reported no
+// event animation for kPeerEventFreeFor (1.5.0; until then 2 s and 1 s, over a report once a second). Their report
+// now goes out as soon as either changes (send_info_if_changed), so these are margins over the network only. The
+// rise after a respawn (6950) starts up to 0.6 s after the player stands (2026-11-03 test): kPeerAliveFor stays
+// above that, so the rise is in their report before they count as back, and their character is never made during it
+// (party.cpp: a character made then could be walked through, 2026-10-19).
+constexpr double kPeerAliveFor = 1.0;
+constexpr double kPeerEventFreeFor = 0.3;
+
 // party::tick asks with a member record's character, name and Steam id, which the game pairs itself
 // (update_remote_players): a Steam id one of our players has is the answer; else the record's name and the rest.
 party::PeerState peer_state(uint32_t chr, const std::wstring& name, uint64_t steam_id) {
@@ -4927,7 +4965,7 @@ party::PeerState peer_state(uint32_t chr, const std::wstring& name, uint64_t ste
     s.known = true;
     s.id = p->id;
     s.invader = p->invader;
-    s.alive = !p->dead && p->alive_since > 0 && now() - p->alive_since >= 2.0 && now() - p->last_seen <= 5.0;
+    s.alive = !p->dead && p->alive_since > 0 && now() - p->alive_since >= kPeerAliveFor && now() - p->last_seen <= 5.0;
     s.dead = p->dead;
     s.deaths = p->deaths;
     s.death_events = p->death_events;
@@ -4939,7 +4977,7 @@ party::PeerState peer_state(uint32_t chr, const std::wstring& name, uint64_t ste
     if (p->event_anim < 0) {
         s.settled = s.alive && s.up_for >= 6.0;
     } else if (p->event_anim == 0) {
-        s.settled = s.alive && p->event_free_since > 0 && now() - p->event_free_since >= 1.0;
+        s.settled = s.alive && p->event_free_since > 0 && now() - p->event_free_since >= kPeerEventFreeFor;
     } else {
         s.settled = s.alive && p->ceremony != 0;
     }
@@ -5691,7 +5729,9 @@ void tick() {
     copy_hold_tick();
     if (!g_flag_queue.empty()) flush_flags();
     if (g_role != Role::None && g_lobby) {
-        if (now() - g_last_info > 1.0) {
+        const bool changed = now() - g_last_info > 0.1 && info_changed();
+        if (changed || now() - g_last_info > 1.0 || (g_info_again_at > 0 && now() >= g_info_again_at)) {
+            g_info_again_at = changed ? now() + 0.15 : 0;
             g_last_info = now();
             send_info();
         }

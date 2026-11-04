@@ -36,6 +36,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.guest_world_events = settings_parse_bool(val);
         } else if (key == "bonfireanimations") {
             c.bonfire_animations = settings_parse_bool(val);
+        } else if (key == "spectatestreaming") {
+            c.spectate_streaming = settings_parse_bool(val);
         } else if (key == "sharedroppeditems") {
             c.share_items = settings_parse_bool(val);
         } else if (key == "overheadplayerdisplay") {

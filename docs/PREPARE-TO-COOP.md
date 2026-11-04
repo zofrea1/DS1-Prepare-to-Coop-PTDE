@@ -270,6 +270,23 @@ FieldArea's one-update slot (`+0x34`) every frame, when it is a collision of a b
 command "Set Network Update Rate" (2004[34], `0xD6D780`: `chr+0x1FD` bit 0, `+0xF4` = 0) does; both stop when the
 view does. The map we are in still follows our own floor.
 
+With `SpectateStreaming` (1.5.0, on by default) the view also loads what our game has not loaded around the
+teammate, and treats the characters around them as the ones around us:
+- **Their map.** A teammate in a block our game has not loaded has no floor here (2026-11-03: the Undead Burg seen
+  from the Asylum), so nothing around them was drawn. While they are followed, the block of the map they report is
+  wanted on every WorldRes update (`rules::view_map`: its `+0x61`, before each `0xDD9E30` call, as for a cutscene's
+  map), as a floor under them that connects to it would want it. Once it is in use their character finds its floor
+  there and the world is drawn from it as above; the blocks their floor connects to load as they would for us. A block
+  nobody wants any more is unloaded by the game two frames later, so it goes when the view does.
+- **The characters around them.** WorldChrMan's per-frame pass (`0xE3F630`) gives every character its update rate
+  from a camera frustum test, limited to the draw groups of the local player's character (`chr+0x274`, `0x456B70`),
+  and a rank by distance from that character (the 10 nearest every frame, the next 10 every second frame, the rest
+  every fifth: `[0x137D648]+0x28` and `+0x2C`; one off screen within 40 m every fifth, else every thirtieth). Around a far teammate the enemies failed that draw group test and ranked
+  behind everything near us. While a teammate is followed the pass takes their character for ours (`0xE3F68A`:
+  `mov ecx,[edi+3Ch]; mov eax,[ecx+28h]`, checked to be one of WorldChrMan's players each time).
+- **The Death Knell** goes to a teammate standing in a map the view loaded for itself by a load, as it did before
+  (`rules::view_only_floor`), not by a warp.
+
 **A team wipe reloads every game at once.** Each game reloads its own world after a death, so a wipe starts the
 world over in every game, but only if the games reload together. With each death going ahead on its own, the
 first game to wake in its new world met the boss and the enemies from a game still in the old one: the network
@@ -288,9 +305,16 @@ alone). A warp that replaces the waiting one (the trip home) drops the wait. Pla
 or are waited for. A player who fell counts as dead in their reports until their respawned character exists, so a
 wipe lasts through the loads. Another player's character that a load threw away is asked for again only once that player reports standing in the world: asked
 for during their load, it came out invisible and could be walked through. Nor is it asked for while they still get
-up at their bonfire (event animation 6950, about 3 s after a respawn or a Homeward Bone) or hold any other event
+up at their bonfire (event animation 6950, about 2 s long, starting up to 0.6 s after a respawn or a Homeward Bone) or hold any other event
 animation (up to 20 s after they stood): asked for then, it could be walked through and showed none of their attacks
-for as long as it lived (the host's character on the guest, made 2.3 s after the host stood again, twice). A
+for as long as it lived (the host's character on the guest, made 2.3 s after the host stood again, twice). From
+1.5.0 the waits around that are margins only: a player's report goes out at once when their death or the event
+animation they hold changes (and once more 0.15 s later, in case that one is lost), not only once a second; they
+count as back 1 s after reporting standing (above the 0.6 s before the rise begins, so the rise is in their report
+first) and as up 0.3 s after reporting no event animation; party.cpp looks four times a second, from 0.5 s after our
+own load, and asks for a rebuilt character on the first look that finds the slot empty. In the 2026-11-03 test the
+others' characters came 3.4 s after our own respawn, and ours in their games 5.3 s after we stood; now about 0.6 s,
+and the rise plus about 0.6 s. A
 character first seen while its player reports being dead or loading is rebuilt once they are back. The character
 taken out for a rebuild is remembered per player slot until the slot is seen empty (5 s at most): the new one can be
 made at the same address, and taken for the old one on its way out it was never checked again, so it lived through
@@ -697,7 +721,9 @@ collision and takes no other animation: after a player went through the Firelink
 could be walked through and showed no attacks. Each player also reports the event animation their own character
 holds (1.2.0, behind the 1.1.0 report), and a copy still holding one 3 s after its player holds none (30 s for
 players who do not report it) is stopped as the game stops its own. The rate is fixed only on a character made 2 s
-ago or more: the game sets a new one up in its first frames (its entity not active yet, rate -1).
+ago or more: the game sets a new one up in its first frames (its entity not active yet, rate -1). From 1.5.0 it is
+fixed once the character's entity is active and it has its physics, 0.5 s after it was first seen (looked at four
+times a second), or 2 s after whatever it shows.
 
 For the log, each of these characters' state (its map entity's state and flags at `[chr+0xC]+8` and `+0x14`, the
 update flags `chr+0x1FD`, `chr+0x1FE`, `chr+0x3C4`, the rate, HP, floor, physics and event animation) is written

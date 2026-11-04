@@ -222,6 +222,13 @@ int g_deferred[kSlots] = {};  // a missing character waits: 1 for its player to 
 bool g_was_loading = true;
 double g_loaded_at = 0;
 double g_last_check = 0;
+// How soon the characters are looked at, and how often (1.5.0; until then 3 s after a load and once a second). Each
+// wait added to the time before a player was seen again after a death, theirs or ours: the others' characters came
+// 3.4 s after our own respawn, and ours in their games 5.3 s after we stood (2026-11-03 test). A request still goes
+// only for a member whose data is complete and who is not waiting already, so asking sooner asks nothing twice.
+constexpr double kAfterLoad = 0.5;
+constexpr double kCheckEvery = 0.25;
+constexpr double kRequestGap = 5.0;  // a slot's next request, when the last one brought no character
 // The character we asked the game to remove from each player slot, and when (it lingers for a frame or two). The
 // slot's next character can be made at the same address: on 2026-10-28 the host's rebuilt copy on the guest took
 // the old one's, was taken for the old one on its way out, and so was never checked again. It lived through two
@@ -319,7 +326,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
         g_was_loading = false;
         g_loaded_at = now();
     }
-    if (!active || now() - g_loaded_at < 3.0 || now() - g_last_check < 1.0) return;
+    if (!active || now() - g_loaded_at < kAfterLoad || now() - g_last_check < kCheckEvery) return;
     g_last_check = now();
     const int state = game::session_state();
     if (!(state == 3 || (state == 6 && game::join_step() == 4))) return;
@@ -328,7 +335,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
     const std::vector<Remote> list = remotes();
     for (const Remote& r : list) {
         if (!r.data_ready || r.slot < 0 || r.slot >= remote_slots()) continue;
-        if (now() - g_queued_at[r.slot] < 5.0) continue;
+        if (now() - g_queued_at[r.slot] < kRequestGap) continue;
         uint32_t member = 0;
         for (const Node& n : nodes) {
             if (n.slot == r.slot) member = n.member;
@@ -410,7 +417,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
             g_removed[r.slot] = r.chr;
             g_removed_at[r.slot] = now();
             made = Made{};
-            g_queued_at[r.slot] = now() - 4.0;  // ask for the new character on the next check
+            g_queued_at[r.slot] = now() - kRequestGap;  // the new character on the first check that finds the slot empty
             LOG_INFO("[coop] %s is back after dying: their character is created again", name);
         }
     }

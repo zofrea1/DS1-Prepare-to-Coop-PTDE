@@ -3381,8 +3381,28 @@ constexpr uint32_t kWorldResUpdate = 0x00DD9E30;
 constexpr uint32_t kWorldResUpdateSites[2] = {0x00DE86C3, 0x00DE89A6};
 uint32_t g_world_res_update = kWorldResUpdate;
 
+// The spectating view's block (view_map): the block a followed teammate stands in, wanted on every update while the
+// view asks for it, as a floor under them that connects to it would (1.5.0). `ours` when it was not in use when the
+// view first asked: it is loaded for the view alone (the Death Knell then goes there by a load, not by a warp).
+struct ViewWant {
+    int map = -1;
+    int block = -1;
+    bool ours = false;
+    double since = 0;
+    double asked = 0;  // the view's last call (it lets go after kViewWantLapse without one)
+    int last_state = -2;
+} g_view_want;
+constexpr double kViewWantLapse = 1.0;
+
 void __stdcall before_world_res_update(uint32_t wr) {
     if (g_cut_wait.active && g_cut_wait.block >= 0) want_block(wr, g_cut_wait.block);
+    if (g_view_want.block >= 0) {
+        if (seconds() - g_view_want.asked > kViewWantLapse) {
+            g_view_want = ViewWant{};
+        } else {
+            want_block(wr, g_view_want.block);
+        }
+    }
 }
 
 __declspec(naked) void hk_world_res_update() {
@@ -3967,6 +3987,52 @@ bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
 // objects, characters), the area's light and the connected blocks to load. The map we are in (+0x7E8) follows
 // +0x30 only.
 constexpr uint32_t kFaFloorOnce = 0x34;
+int view_map(int map) {
+    const int area_block = map < 0 ? -1 : static_cast<int>(static_cast<uint32_t>(map) & 0xFFFF0000u);
+    if (area_block < 0) {
+        if (g_view_want.block >= 0) {
+            LOG_INFO("[coop] Spectating: map %08X no longer kept loaded for the view (%.1f s)",
+                     static_cast<uint32_t>(g_view_want.map), seconds() - g_view_want.since);
+        }
+        g_view_want = ViewWant{};
+        return -1;
+    }
+    const uint32_t wr = world_res();
+    if (g_view_want.map != area_block) {
+        const int block = map_block(wr, area_block);
+        g_view_want = ViewWant{};
+        g_view_want.map = area_block;
+        g_view_want.block = block;
+        g_view_want.since = seconds();
+        const int state = block_state(wr, block);
+        g_view_want.ours = block >= 0 && state != static_cast<int>(kBlockInUse);
+        g_view_want.last_state = state;
+        if (block < 0) {
+            LOG_INFO("[coop] Spectating: map %08X is not one this world can load", static_cast<uint32_t>(area_block));
+        } else {
+            LOG_INFO("[coop] Spectating: map %08X kept loaded for the view (block %d, state %d%s)",
+                     static_cast<uint32_t>(area_block), block, state, g_view_want.ours ? ", loading it" : ", in use");
+        }
+    }
+    g_view_want.asked = seconds();
+    if (g_view_want.block < 0) return -1;
+    const int state = block_state(wr, g_view_want.block);
+    if (state != g_view_want.last_state) {
+        LOG_INFO("[coop] Spectating: map %08X block state %d (%.1f s)", static_cast<uint32_t>(g_view_want.map), state,
+                 seconds() - g_view_want.since);
+        g_view_want.last_state = state;
+    }
+    return state;
+}
+
+bool view_only_floor(uint32_t chr) {
+    if (g_view_want.block < 0 || !g_view_want.ours) return false;
+    uint32_t hit = 0;
+    uint8_t block = 0xFF;
+    return read32(chr + 0x29C, &hit) && hit && read8(hit + 0xF, &block) &&
+           static_cast<int8_t>(block) == g_view_want.block;
+}
+
 const char* draw_from(uint32_t chr) {
     const char* why = nullptr;
     const uint32_t hit = loaded_floor(chr, &why);

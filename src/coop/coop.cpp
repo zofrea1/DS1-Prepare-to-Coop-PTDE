@@ -188,6 +188,7 @@ int can_use(int32_t id) {
 
 bool use_item(int32_t id) {
     using namespace coop;
+    if (knell::swallow_use(id)) return true;
     switch (id) {
         case items::kHost: session::host(); return true;
         case items::kJoin: session::join(); return true;

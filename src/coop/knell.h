@@ -2,13 +2,14 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #pragma once
 
-// The Death Knell (goods 389009, 1.5.0): a small bell a co-op player rings to go to another co-op player. The first
-// use (the Blessed Eye Orb's animation and effect) opens the spectating view on a teammate: D-pad left / right or the
-// arrow keys choose among every co-op player of the session; B or Esc, or a hit, closes it. A second use takes the
-// player there: at once when that teammate's character stands in our world, else through a load into their map,
+// The Death Knell (goods 389009, 1.5.0): a small bell a co-op player rings to go to another co-op player. The ring
+// (the Blessed Eye Orb's animation and effect) opens the spectating view on a teammate: D-pad left / right or the
+// arrow keys choose among every co-op player of the session; B or Esc, or a hit, closes it. The game's action prompt
+// "Summon yourself to <name>" confirms: the ring's animation plays again with the camera still on them, and the
+// player goes there: at once when that teammate's character stands in our world, else through a load into their map,
 // placed where they stand. The player arrives as a summoned phantom does (one of the game's arrival animations, at
-// random), and pays one soul level, never below their class's starting level ("! SOUL LEVEL DRAINED !" on the HUD
-// either way).
+// random); once it lets go, the poise breaks with a riposte's stab and one soul level goes, never below the class's
+// starting level ("! SOUL LEVEL DRAINED !" on the HUD either way). A guest's join plays the same arrival.
 
 #include <cstdint>
 
@@ -29,8 +30,13 @@ bool viewing();
 void note_texture(IDirect3DTexture9* texture, const void* data, unsigned size);
 // Between two frames on the render thread: writes the icon into the atlas once it is known.
 void render();
-// The HUD line of the drain (an FMG id of ours, answered through the items' dialog text).
+// The HUD line of the drain and the prompt's lines (FMG ids of ours, answered through the items' dialog text).
 constexpr uint32_t kDrainedText = 93129710;
-const wchar_t* drained_text();
+const wchar_t* text(uint32_t id);
+// We arrived in the host's world as a co-op guest (a join, not a reload): the summon arrival plays once we stand.
+void joined();
+// The ring's animation plays again for the confirmation: an item use it sets off is not the player's (it would use
+// whatever item is selected), so it is swallowed. True when `goods` is.
+bool swallow_use(int32_t goods);
 
 }  // namespace coop::knell

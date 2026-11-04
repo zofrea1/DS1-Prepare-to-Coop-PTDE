@@ -70,6 +70,26 @@ constexpr uint32_t kChrFloor = 0x29C;
 // "Praise the Sun", Solaire's); a living player arriving plays 6950 (InGameStart's AliveMotion). 6951 and 6952 fade the
 // character in from nothing (TAE event 193) with the summon sound.
 constexpr int kArrivals[] = {6951, 6952, 6950};
+// Where control comes back in each (the TAE's first JumpTable window that lets the player act again).
+double arrival_length(int anim) { return anim == 6952 ? 5.4 : anim == 6951 ? 4.55 : 2.15; }
+// The price, once the arrival has played out: the stagger of a broken poise ("Damage Middle", 2010: the damage voice
+// 999999996 at once and the hit c44443 at 0.13 s; control back at about 1.5 s), the sound of a riposte's stab (the
+// riposte 3201 of the weapon TAEs plays c999999992 as the blade goes in, the game's weapon-dependent stab), then the HUD
+// line and the drain.
+constexpr int kStagger = 2010;
+constexpr int kRiposteSoundType = 1;  // 'c', the character's
+constexpr int kRiposteSound = 999999992;
+constexpr uint32_t kPlaySe = 0x00D6EA70;  // "Play SE" (2010[02], 0xBBFD6F): stdcall(Lua events, entity, type, id)
+constexpr uint32_t kLuaEventsVar = 0x0137D790;
+// The game's action prompt, the one "Rest at bonfire" uses: 0xD40310 registers a request with the action manager
+// [0x137D7CC] for this frame and answers 1 on the frame the action button is pressed on it ("IF Action Button",
+// EcTestActionButton 0xBBD8D1, calls it every frame the player is in range). ecx = the prompt's kind (0xD5D650 makes
+// 10 of an id like ours), eax = 0xFF (no check of the player's state, as the talk prompts pass), stdcall(manager, flag
+// that disables it or -1, text id, enabled, 0, 0, 0), ret 0x1C. Its text comes through the FMG hook (ids of ours).
+constexpr uint32_t kActionRequest = 0x00D40310;
+constexpr int kActionKind = 10;
+constexpr uint32_t kPromptText = 93129720;  // .. +7: a new id for each teammate shown, so the prompt reads the name anew
+constexpr int kPromptSlots = 8;
 
 // The class's starting soul level and attributes (CharaInitParam 3000-3009: soulLv, baseVit, baseWil, baseEnd,
 // baseStr, baseDex, baseDurability, baseMag, baseFai), in the menu's order.
@@ -97,7 +117,7 @@ constexpr uint16_t kPadB = 0x2000;   // XINPUT_GAMEPAD_B
 constexpr uint16_t kPadLeft = 0x0004, kPadRight = 0x0008;
 
 // ---------------------------------------------------------------- state
-enum class State { Idle, Opening, View, Going, Loading };
+enum class State { Idle, Opening, View, Going, Loading, Arriving };
 State g_state = State::Idle;
 double g_at = 0;           // Opening / Going: when the next step is due
 double g_view_since = 0;
@@ -115,6 +135,19 @@ Destination g_dest;
 double g_load_since = 0;
 bool g_load_seen = false;
 double g_stand_since = 0;
+// The ring's own animation (the item's use, ChrCtrl+0x350 as the ring lands) and how far into it the ring lands: the
+// confirmation plays it again, and the warp waits as long.
+int g_use_anim = -1;
+double g_use_point = 0;
+int g_seen_anim = -1;       // the animation playing, followed every frame
+double g_seen_since = 0;
+// The arrival playing: its animation, since when, and whether the price follows (a join's arrival has none).
+int g_arrival_anim = 0;
+double g_arrival_at = 0;
+bool g_arrival_price = false;
+double g_join_at = 0;       // a join's arrival waits for this (0 none)
+wchar_t g_prompt[kPromptSlots][96] = {};
+int g_prompt_slot = 0;
 std::mt19937 g_rng(static_cast<uint32_t>(GetTickCount64()));
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -408,11 +441,7 @@ void hud_warning(uint32_t text_id) {
     *ptr<uint32_t>(mm + kHudWrite) = (at + 1) % kHudSlots;
 }
 
-void play_arrival() {
-    const uint32_t me = game::player();
-    if (!me) return;
-    const int anim = kArrivals[std::uniform_int_distribution<int>(0, 2)(g_rng)];
-    motion::send_knell_arrival(anim);
+bool start_event_anim(uint32_t me, int anim) {
     const uint32_t start = kEventAnimStart;
     __try {
         __asm {
@@ -427,20 +456,93 @@ void play_arrival() {
             pop esi
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_ERROR("[coop] Death Knell: the arrival animation could not be started");
-        return;
+        return false;
     }
-    LOG_INFO("[coop] Death Knell: arrival animation %d", anim);
+    return true;
+}
+
+bool play_sound(int entity, int kind, int id) {
+    uint32_t lua = 0;
+    if (!read32(kLuaEventsVar, &lua) || !lua) return false;
+    __try {
+        __asm {
+            push id
+            push kind
+            push entity
+            push lua
+            mov eax, kPlaySe
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+// The animation a character plays now (ChrCtrl+0x350, see rules.cpp action_of), -1 none.
+int playing_anim(uint32_t chr) {
+    uint32_t ctrl = 0, id = 0;
+    if (!chr || !read32(chr + 0x28, &ctrl) || !ctrl || !read32(ctrl + 0x350, &id)) return -1;
+    return static_cast<int>(id);
+}
+
+// One of the game's summon arrivals at random, which the others see too (1.5.0). Returns it, 0 when none started.
+int play_arrival(const char* why) {
+    const uint32_t me = game::player();
+    if (!me) return 0;
+    const int anim = kArrivals[std::uniform_int_distribution<int>(0, 2)(g_rng)];
+    motion::send_knell_arrival(anim);
+    if (!start_event_anim(me, anim)) {
+        LOG_ERROR("[coop] Death Knell: the arrival animation could not be started");
+        return 0;
+    }
+    LOG_INFO("[coop] Summon arrival %d (%s)", anim, why);
+    return anim;
 }
 
 void arrive() {
-    g_state = State::Idle;
-    play_arrival();
+    g_arrival_anim = play_arrival("the Death Knell");
+    g_arrival_at = now();
+    g_arrival_price = true;
+    g_state = State::Arriving;
+    LOG_INFO("[coop] Death Knell: arrived by %s; the price once the arrival is over", narrow(g_dest.name).c_str());
+}
+
+// The poise breaks, the riposte's stab sounds, the HUD says so, and the level goes.
+void pay_price() {
+    const uint32_t me = game::player();
+    if (!me) return;
+    motion::send_knell_arrival(kStagger);
+    const bool staggered = start_event_anim(me, kStagger);
+    const bool sound = play_sound(10000, kRiposteSoundType, kRiposteSound);
+    hud_warning(kDrainedText);
     const char* why = nullptr;
     const int stat = drain(&why);
     if (stat < 0) LOG_INFO("[coop] Death Knell: no soul level was taken (%s)", why ? why : "?");
-    hud_warning(kDrainedText);
-    LOG_INFO("[coop] Death Knell: arrived by %s", narrow(g_dest.name).c_str());
+    LOG_INFO("[coop] Death Knell: the price (stagger %d%s, riposte sound c%d%s)", kStagger, staggered ? "" : " FAILED",
+             kRiposteSound, sound ? "" : " FAILED");
+}
+
+// Until the arrival lets the player act again: its animation leaves ChrCtrl+0x350, or its length passes.
+void arriving_tick() {
+    const uint32_t me = game::player();
+    if (!me || game::loading()) {
+        g_state = State::Idle;
+        LOG_INFO("[coop] Arrival: interrupted by a load; no price");
+        return;
+    }
+    if (world::local_dead()) {
+        g_state = State::Idle;
+        LOG_INFO("[coop] Arrival: we fell; no price");
+        return;
+    }
+    const double t = now() - g_arrival_at;
+    if (t < 0.8) return;
+    const bool playing = g_arrival_anim && playing_anim(me) == g_arrival_anim;
+    if (playing && t < arrival_length(g_arrival_anim) + 1.0) return;
+    if (!playing && g_arrival_anim && t < arrival_length(g_arrival_anim) - 0.3) return;  // not yet where it lets go
+    g_state = State::Idle;
+    if (g_arrival_price) pay_price();
 }
 
 // ---------------------------------------------------------------- where the others are
@@ -518,6 +620,36 @@ const char* refusal() {
 
 void say(const std::wstring& line) { text::show(line); }
 
+// The prompt "Summon yourself to <name>" for this frame. True on the frame the action button is pressed on it.
+bool request_action(uint32_t mgr, uint32_t text_id) {
+    uint8_t pressed = 0;
+    __try {
+        __asm {
+            push 0
+            push 0
+            push 0
+            push 1
+            push text_id
+            push -1
+            push mgr
+            mov ecx, kActionKind
+            mov eax, 0xFF
+            mov edx, kActionRequest
+            call edx
+            mov pressed, al
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return pressed != 0;
+}
+
+void set_prompt(const std::wstring& text) {
+    g_prompt_slot = (g_prompt_slot + 1) % kPromptSlots;
+    std::wstring t = text.substr(0, 95);
+    std::memcpy(g_prompt[g_prompt_slot], t.c_str(), (t.size() + 1) * sizeof(wchar_t));
+}
+
 // The action prompt at the bottom of the screen ("Rest at bonfire"). A talk object (a bonfire) registers its request
 // with the action manager [0x137D7CC] while the player is in range, and cancels it itself (0x456C40, from 0xD4E04B)
 // when the player walks out of range. After a teleport, or a load that takes the player away, that out-of-range pass
@@ -557,7 +689,8 @@ void show_target(const spectate::Teammate& t, bool first) {
     const uint32_t chr = t.chr && remote_character(t.chr) ? t.chr : 0;
     g_shown_chr = chr;
     spectate::knell_view(chr);
-    say((first ? L"Death Knell: " : L"") + t.name + where(t) + (first ? L". Ring again to go there" : L""));
+    set_prompt(L"Summon yourself to " + t.name + where(t));
+    if (first) say(L"Death Knell: choose a co-operator with the D-pad or the arrow keys");
     LOG_INFO("[coop] Death Knell: viewing %s%s", narrow(t.name).c_str(), chr ? "" : " (not in our world: no camera)");
 }
 
@@ -601,6 +734,8 @@ void open_view() {
     show_target(*best, true);
 }
 
+void confirm();
+
 bool cancel_pressed() {
     DWORD pid = 0;
     const HWND fg = GetForegroundWindow();
@@ -643,9 +778,12 @@ void view_tick() {
         g_shown_chr = chr;
         spectate::knell_view(chr);
     }
+    uint32_t mgr = 0;
+    if (read32(kActionManVar, &mgr) && mgr && request_action(mgr, kPromptText + g_prompt_slot)) confirm();
 }
 
-// The second ring: the teammate shown is where we go.
+// The action button on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so
+// it does not swing back to us and out again, and the arrival's sound is heard where we arrive.
 void confirm() {
     const spectate::Teammate* t = find(g_target_id);
     if (!t) {
@@ -662,10 +800,14 @@ void confirm() {
     g_dest.name = t->name;
     g_dest.map = t->map;
     std::copy(std::begin(t->pos), std::end(t->pos), g_dest.pos);
-    close_view("ringing again");
+    InterlockedExchange(&g_mask_dpad, 0);
     g_state = State::Going;
-    g_at = now() + kGoDelay;
-    LOG_INFO("[coop] Death Knell: going to %s", narrow(t->name).c_str());
+    // The bell rings again: the ring's own animation and effect, and the warp as far into it as the ring landed.
+    const uint32_t me = game::player();
+    const bool again = g_use_anim > 0 && me && start_event_anim(me, g_use_anim);
+    g_at = now() + (again ? std::max(0.6, std::min(2.5, g_use_point)) + 0.3 : kGoDelay);
+    LOG_INFO("[coop] Death Knell: going to %s (the ring's animation %d %s, the warp in %.1f s)",
+             narrow(t->name).c_str(), g_use_anim, again ? "again" : "not played", g_at - now());
 }
 
 bool do_warp(uint32_t me, uint32_t fn, const float* pp, const float* pr, uint32_t floor) {
@@ -721,6 +863,7 @@ void going_tick() {
     if (const char* why = refusal()) {
         say(text::widen(why));
         LOG_INFO("[coop] Death Knell: not going (%s)", why);
+        close_view("not going");
         g_state = State::Idle;
         return;
     }
@@ -728,17 +871,21 @@ void going_tick() {
     if (!t) {
         say(L"The Death Knell finds no one there");
         LOG_INFO("[coop] Death Knell: %s is gone", narrow(g_dest.name).c_str());
+        close_view("they are gone");
         g_state = State::Idle;
         return;
     }
     if (t->chr && remote_character(t->chr) && warp_here(t->chr)) {
+        close_view("arrived");  // the camera comes back to us, beside them
         arrive();
         return;
     }
+    close_view("loading");
     // Elsewhere: a load into their map, stood where they last said they stand.
     if (!valid_map(t->map) || t->pos_at <= 0 || now() - t->pos_at > kPosFresh || !std::isfinite(t->pos[0]) ||
         !std::isfinite(t->pos[1]) || !std::isfinite(t->pos[2])) {
         say(L"The Death Knell cannot find " + t->name);
+        close_view("no position");
         LOG_INFO("[coop] Death Knell: no fresh position of %s (map %08X, %.1f s old)", narrow(t->name).c_str(),
                  static_cast<uint32_t>(t->map), t->pos_at > 0 ? now() - t->pos_at : -1.0);
         g_state = State::Idle;
@@ -916,7 +1063,7 @@ bool install() {
 }
 
 bool can_use() {
-    if (g_state == State::View) return true;  // the second ring (use() checks the teammate)
+    // One ring: while it works (the view, the way there, the arrival) the bell is greyed out.
     if (g_state != State::Idle) return false;
     return refusal() == nullptr;
 }
@@ -931,12 +1078,14 @@ void use() {
             }
             g_state = State::Opening;
             g_at = now() + kOpenDelay;
-            LOG_INFO("[coop] Death Knell: rung (the view opens after its effect)");
+            // The ring's animation, for the confirmation: the one playing as the ring lands, and how far into it.
+            const uint32_t me = game::player();
+            g_use_anim = playing_anim(me);
+            g_use_point = g_use_anim == g_seen_anim && g_seen_since > 0 ? now() - g_seen_since : 0.0;
+            LOG_INFO("[coop] Death Knell: rung (animation %d, %.2f s in; the view opens after its effect)", g_use_anim,
+                     g_use_point);
             return;
         }
-        case State::View:
-            confirm();
-            return;
         default:
             LOG_INFO("[coop] Death Knell: rung while it already works; nothing more");
             return;
@@ -950,6 +1099,21 @@ void tick() {
     const bool loading = game::loading() || !game::player();
     if (was_loading && !loading) clear_action_prompt("after a load");
     was_loading = loading;
+    const int anim = loading ? -1 : playing_anim(game::player());
+    if (anim != g_seen_anim) {
+        g_seen_anim = anim;
+        g_seen_since = now();
+    }
+    // A join's arrival: once we stand in the host's world.
+    if (g_join_at > 0 && !loading && now() >= g_join_at && g_state == State::Idle) {
+        g_join_at = 0;
+        if (!world::local_dead()) {
+            g_arrival_anim = play_arrival("joined the session");
+            g_arrival_at = now();
+            g_arrival_price = false;
+            if (g_arrival_anim) g_state = State::Arriving;
+        }
+    }
     switch (g_state) {
         case State::Idle:
             track_levels();
@@ -970,12 +1134,30 @@ void tick() {
         case State::Loading:
             loading_tick();
             break;
+        case State::Arriving:
+            arriving_tick();
+            break;
     }
 }
 
 bool viewing() { return g_state == State::View; }
 
-const wchar_t* drained_text() { return L"! SOUL LEVEL DRAINED !"; }
+const wchar_t* text(uint32_t id) {
+    if (id == kDrainedText) return L"! SOUL LEVEL DRAINED !";
+    if (id >= kPromptText && id < kPromptText + kPromptSlots) return g_prompt[id - kPromptText];
+    return nullptr;
+}
+
+bool swallow_use(int32_t goods) {
+    if (g_state != State::Going) return false;
+    LOG_INFO("[coop] Death Knell: item %d used by the ring's replayed animation: not used", goods);
+    return true;
+}
+
+void joined() {
+    g_join_at = now() + 0.6;
+    LOG_INFO("[coop] Joined: the summon arrival plays once we stand");
+}
 
 void note_texture(IDirect3DTexture9* texture, const void* data, unsigned size) {
     if (!texture || !is_atlas(data, size)) return;

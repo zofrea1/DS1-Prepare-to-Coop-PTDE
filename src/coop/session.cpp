@@ -7,6 +7,7 @@
 #include "game.h"
 #include "hook.h"
 #include "items.h"
+#include "knell.h"
 #include "log.h"
 #include "motion.h"
 #include "netrate.h"
@@ -3015,6 +3016,7 @@ void guest_arrived() {
         say(fmt(kMsgBreakInMission, std::to_wstring(defeat)));
     } else {
         say(kMsgGuestMission);
+        knell::joined();  // the summon arrival, once we stand (1.5.0)
     }
     PlayerEvent e = player_event(kArrived, steam::self(), g_invade, utf8(own_name()));
     if (g_host) send_to(g_host, e);

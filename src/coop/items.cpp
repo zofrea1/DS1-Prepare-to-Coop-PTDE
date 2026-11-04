@@ -197,7 +197,7 @@ const wchar_t* item_text(uint32_t id, text::Fmg kind) {
 }
 
 const wchar_t* dialog_text(uint32_t id) {
-    if (id == knell::kDrainedText) return knell::drained_text();
+    if (const wchar_t* t = knell::text(id)) return t;
     return (id == kParchmentDialog && g_dialog_fn) ? g_dialog_fn() : nullptr;
 }
 

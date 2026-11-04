@@ -148,6 +148,10 @@ bool g_arrival_price = false;
 double g_join_at = 0;       // a join's arrival waits for this (0 none)
 wchar_t g_prompt[kPromptSlots][96] = {};
 int g_prompt_slot = 0;
+// Our request, like a bonfire's, stays with the action manager until it is cancelled: closed without a warp (B, a hit,
+// a refusal, the time limit) the view left "Summon yourself to ..." on screen (close_view). Anything still in range
+// registers again on the next frame.
+bool g_prompt_up = false;  // our request was registered since the last clear
 std::mt19937 g_rng(static_cast<uint32_t>(GetTickCount64()));
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -673,6 +677,7 @@ bool cancel_action(uint32_t mgr) {
 }
 
 void clear_action_prompt(const char* why) {
+    g_prompt_up = false;
     uint32_t mgr = 0, mm = 0;
     if (read32(kActionManVar, &mgr) && mgr) cancel_action(mgr);
     if (read32(kMenuManVar, &mm) && mm) {
@@ -696,6 +701,10 @@ void show_target(const spectate::Teammate& t, bool first) {
 
 void close_view(const char* why) {
     if (g_state == State::View) LOG_INFO("[coop] Death Knell: view closed (%s)", why);
+    if (g_prompt_up) {
+        g_prompt_up = false;
+        clear_action_prompt("the Death Knell's view closed");
+    }
     spectate::knell_view(0);
     g_shown_chr = 0;
     InterlockedExchange(&g_mask_dpad, 0);
@@ -779,7 +788,9 @@ void view_tick() {
         spectate::knell_view(chr);
     }
     uint32_t mgr = 0;
-    if (read32(kActionManVar, &mgr) && mgr && request_action(mgr, kPromptText + g_prompt_slot)) confirm();
+    if (!read32(kActionManVar, &mgr) || !mgr) return;
+    g_prompt_up = true;
+    if (request_action(mgr, kPromptText + g_prompt_slot)) confirm();
 }
 
 // The action button on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so

@@ -1551,9 +1551,36 @@ void regrow_check(uint32_t chr) {
     }
 }
 
+// Our scaling on it already, for another player count (a partner came or went) or as an enemy that became a boss: the
+// effect it has is given the new id and the new row, as a fresh apply would leave it (the {id, row} pair the param
+// lookup hands the node, hk_fx_row: +0x28, +0x2C). Taken off and applied again, the new effect was not in force in its
+// first frame: the enemy stood at its own max, its health cut down to it, and then the whole scaling grew back onto
+// it, so an enemy above its own max came back whole until keep_share put its share back, and the host's HP report
+// carried the full bar to the other games meanwhile (Grok review f916560a). False when it has no such effect.
+int g_retargeted = 0;  // in this pass
+bool retarget(uint32_t chr, int have, int want) {
+    const int from = row_index(have), to = row_index(want);
+    const uint32_t node = from >= 0 && to >= 0 ? find_effect(chr, have, nullptr) : 0;
+    uint32_t row = 0;
+    if (!node || !read32(node + 0x2C, &row) || our_row(row, nullptr) != from) return false;
+    *ptr<int32_t>(node + 0x28) = want;
+    *ptr<uint32_t>(node + 0x2C) = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(rows_now()[to]));
+    return true;
+}
+
 void scale_tick() {
     enemy_hp_tick();
     enemy_stall_tick();
+    // An enemy whose scaling changed gets its share back in the frame the game has its new max (keep_share), not up to
+    // half a second later: in between the game's own growth stood on it, and the host's HP report took it to the
+    // other games.
+    if (!g_fill_hp.empty() && now() - g_last_scale < 0.5) {
+        each_enemy([&](uint32_t chr) {
+            const auto fill = g_fill_hp.find(chr);
+            if (fill == g_fill_hp.end()) return;
+            if (hp(chr) <= 0 || dying(chr) || keep_share(chr, fill->second)) g_fill_hp.erase(fill);
+        });
+    }
     if (now() - g_last_scale < 0.5) return;
     g_last_scale = now();
     int level = g_active ? g_players - 1 : 0;
@@ -1593,23 +1620,32 @@ void scale_tick() {
         if (!(want == have && (!want || find_effect(chr, want, nullptr)))) {
             const int before = max_hp(chr);
             const Fill was{hp(chr), before, now()};
-            if (have) remove(chr, have);
-            if (want && apply(chr, want)) {
-                if (!have && !g_base_max.count(chr)) {
-                    g_base_max[chr] = before;
-                    g_scaled_at[chr] = now();
-                }
+            if (have && want && have != want && retarget(chr, have, want)) {
+                // The game grows (or cuts) its max from the next frame; keep_share then puts its share back.
                 g_scaled[chr] = want;
                 if (!g_fill_hp.count(chr)) g_fill_hp[chr] = was;
+                if (session::guest()) g_regrow[chr] = Regrow{before, now()};
+                ++g_retargeted;
             } else {
-                g_scaled.erase(chr);
-                if (have && !g_fill_hp.count(chr)) g_fill_hp[chr] = was;
-                uint32_t handle = 0;
-                read32(chr + 0x78, &handle);
-                static int refused = 0;
-                if (want && ++refused <= 10) {
-                    LOG_INFO("[coop] The game refused the scaling on an enemy (handle %d, HP %d/%d); trying again",
-                             static_cast<int>(handle), hp(chr), max_hp(chr));
+                // The first scaling, scaling taken off, or an effect the game took off: removed and applied.
+                if (have) remove(chr, have);
+                if (want && apply(chr, want)) {
+                    if (!have && !g_base_max.count(chr)) {
+                        g_base_max[chr] = before;
+                        g_scaled_at[chr] = now();
+                    }
+                    g_scaled[chr] = want;
+                    if (!g_fill_hp.count(chr)) g_fill_hp[chr] = was;
+                } else {
+                    g_scaled.erase(chr);
+                    if (have && !g_fill_hp.count(chr)) g_fill_hp[chr] = was;
+                    uint32_t handle = 0;
+                    read32(chr + 0x78, &handle);
+                    static int refused = 0;
+                    if (want && ++refused <= 10) {
+                        LOG_INFO("[coop] The game refused the scaling on an enemy (handle %d, HP %d/%d); trying again",
+                                 static_cast<int>(handle), hp(chr), max_hp(chr));
+                    }
                 }
             }
         } else if (want) {
@@ -1625,6 +1661,14 @@ void scale_tick() {
                      g_bloody);
         }
         g_followed = 0;
+    }
+    if (g_retargeted) {
+        static int lines = 0;
+        if (++lines <= 40) {
+            LOG_INFO("[coop] Enemy scaling level %d: %d living enemies' scaling changed in place (their share of health "
+                     "kept; the dead keep theirs)", level, g_retargeted);
+        }
+        g_retargeted = 0;
     }
     for (auto it = g_scaled.begin(); it != g_scaled.end();) {
         it = seen.count(it->first) ? std::next(it) : g_scaled.erase(it);

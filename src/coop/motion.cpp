@@ -170,13 +170,16 @@ void queue(const Anim& a) {
 
 void __stdcall note_anim_start(uint32_t chr, int anim, uint32_t loop) {
     if (chr && !g_replaying && chr != game::player()) rules::note_event_anim(chr, anim, (loop & 0xFF) != 0);
-    if (g_replaying || !g_enabled || !chr || chr != game::player()) return;
+    if (g_replaying || !chr || chr != game::player()) return;
     const bool looped = (loop & 0xFF) != 0;
+    // The Death Knell's arrival and its price are the knell's, not a bonfire's: shown to the others whatever
+    // BonfireAnimations says.
     if (anim == g_knell_send && knell_anim(anim) && GetTickCount64() - g_knell_send_at < 2000) {
         g_knell_send = 0;
         queue(Anim{0, anim, 0});
         return;
     }
+    if (!g_enabled) return;
     if (!synced_anim(anim)) {
         // Something else replaces our ceremony: the others let go of it too.
         if (g_local_open) queue(Anim{1, 0, 0});
@@ -418,7 +421,7 @@ void set_bonfire_animations(bool on) { g_enabled = on; }
 
 bool play_remote_anim(uint32_t chr, const Anim& a) {
     // A stop is always carried out: it only ever puts a character back to normal.
-    if (!chr || chr == game::player() || (!g_enabled && a.kind == 0)) return false;
+    if (!chr || chr == game::player() || (!g_enabled && a.kind == 0 && !knell_anim(a.anim))) return false;
     if (a.kind == 0 && !synced_anim(a.anim) && !knell_anim(a.anim)) return false;
     // The functions need the character's controller and its animation object.
     uint32_t ctrl = 0, request = 0, hp = 0;

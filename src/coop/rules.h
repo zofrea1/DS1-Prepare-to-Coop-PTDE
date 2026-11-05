@@ -147,8 +147,11 @@ const char* draw_from(uint32_t chr, bool stream = false, bool* streamed = nullpt
 // under them connecting to it would: its block is wanted on every WorldRes update. -1 lets it go (so does a second
 // without a call). The block's state (7 in use), -1 when this world cannot load that map.
 int view_map(int map);
-// The character stands on a floor of the block the view loaded for itself (not in use before it asked).
+// The character stands on a floor of a block the view loaded for itself (not in use before it asked), as long as that
+// block stays loaded and we have not come into it ourselves.
 bool view_only_floor(uint32_t chr);
+// A collision (HitIns) loaded enough to stand on, as the game asks of the floor after a load (0xDE3000).
+bool floor_ready(uint32_t hit);
 // Spectating: the collision under another player's character (a shape cast down from it, as the game finds the local
 // player's floor), given to it as its floor (SetFloor) when it is a block's in use and not its floor already. Null when
 // it has that floor (`changed` when it was given just now), else why not.
@@ -158,7 +161,8 @@ void clear_floor(uint32_t chr);
 // The collision under a point (x, y, z) of a block in use here, by the same cast; 0 none.
 uint32_t floor_at(const float* pos);
 // A lasting effect of the game's (id: 100 a white summon sign) at a point, held by `handle` (0x18 bytes that must stay
-// where they are while it lasts); true when it was made. effect_end ends it (nothing when it is gone already).
+// where they are while it lasts); true when it was made. effect_end ends it (nothing when it is gone already) and
+// takes the handle out of the game's lists: only then may the handle be used again or its memory freed.
 bool effect_at(uint8_t* handle, int id, const float* pos);
 void effect_end(uint8_t* handle);
 // The map's block (area << 24 | block << 16) is loaded and in use in our game.

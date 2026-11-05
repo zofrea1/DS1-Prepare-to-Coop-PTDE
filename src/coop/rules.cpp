@@ -3497,6 +3497,11 @@ uint32_t g_world_res_update = kWorldResUpdate;
 // The spectating view's block (view_map): the block a followed teammate stands in, wanted on every update while the
 // view asks for it, as a floor under them that connects to it would (1.5.0). `ours` when it was not in use when the
 // view first asked: it is loaded for the view alone (the Death Knell then goes there by a load, not by a warp).
+// g_view_loaded remembers every block the view loaded for itself until the block is let go or we stand in it: a
+// teammate on a map boundary reported the Undead Burg for a moment and Firelink again, the view asked anew for
+// Firelink, found it "in use" (its own doing) and took it for ours; the Death Knell then warped onto a floor there
+// whose collision was not loaded, and the player fell 53 m to their death (2026-11-04, 21:00:44).
+uint64_t g_view_loaded = 0;  // bit per block index
 struct ViewWant {
     int map = -1;
     int block = -1;
@@ -4113,6 +4118,21 @@ constexpr uint32_t kFaFloorOnce = 0x34;
 constexpr uint32_t kFaStreamExtra = 0x44;
 constexpr int kFaStreamExtraSlots = 8;
 constexpr uint32_t kHitStreams = 0x78;  // byte: bit 2, the floor adds its groups to the streaming mask (0xDE2AE3)
+// The blocks the view loaded for itself stay marked until they are let go (not in use any more) or our own floor is
+// in one of them (we came there ourselves).
+void view_loaded_tick(uint32_t wr) {
+    if (!g_view_loaded || !wr) return;
+    int own = -1;
+    const uint32_t me = game::player();
+    uint32_t hit = 0;
+    uint8_t block = 0xFF;
+    if (me && read32(me + 0x29C, &hit) && hit && read8(hit + 0xF, &block)) own = static_cast<int8_t>(block);
+    for (int b = 0; b < 64; ++b) {
+        if (!((g_view_loaded >> b) & 1)) continue;
+        if (b == own || block_state(wr, b) != static_cast<int>(kBlockInUse)) g_view_loaded &= ~(1ull << b);
+    }
+}
+
 int view_map(int map) {
     const int area_block = map < 0 ? -1 : static_cast<int>(static_cast<uint32_t>(map) & 0xFFFF0000u);
     if (area_block < 0) {
@@ -4131,7 +4151,9 @@ int view_map(int map) {
         g_view_want.block = block;
         g_view_want.since = seconds();
         const int state = block_state(wr, block);
-        g_view_want.ours = block >= 0 && state != static_cast<int>(kBlockInUse);
+        g_view_want.ours = block >= 0 && (state != static_cast<int>(kBlockInUse) ||
+                                          (block < 64 && ((g_view_loaded >> block) & 1) != 0));
+        if (g_view_want.ours && block < 64) g_view_loaded |= 1ull << block;
         g_view_want.last_state = state;
         if (block < 0) {
             LOG_INFO("[coop] Spectating: map %08X is not one this world can load", static_cast<uint32_t>(area_block));
@@ -4141,6 +4163,7 @@ int view_map(int map) {
         }
     }
     g_view_want.asked = seconds();
+    view_loaded_tick(wr);
     if (g_view_want.block < 0) return -1;
     const int state = block_state(wr, g_view_want.block);
     if (state != g_view_want.last_state) {
@@ -4202,14 +4225,52 @@ void clear_floor(uint32_t chr) {
 }
 
 // A lasting effect at a point, made as the bloodstain's marker is (0xDB6010: 0xD34C20(handle, 0x60, transform), cdecl)
-// and held by its handle (0x18 bytes, vtable 0x11E69E0: the effect at +8, linked into the effect's list, so it stays
-// where it is while the effect lives); 0x547820 (esi = the handle) ends it and empties the handle, and does nothing
-// when the effect is gone already (0x9727F0 finds it no more). The transform is the bloodstain's: the point, four
+// and held by its handle (0x18 bytes, vtable 0x11E69E0: +4 the effect manager, +8 the effect, +0xC/+0x10 the links of
+// the effect's list of handles (its +0x64 -> +0x10 the head), +0x14 the effect that follows it). 0x547820 (esi = the
+// handle) ends the effect, and does nothing when it is gone already (0x9727F0: its +0x68 bit 30 off); but when the
+// ended effect hands over to one that follows it (its +0x8C, the fading out), the handle is linked into THAT one's
+// list. Only the handle's destructor (0x547410 -> 0x547570, ecx = the handle) takes it out of a list; 0xD34C20 does not
+// (it fills the handle from nothing). Ending a sign and making it again in the same handle linked one node into two
+// lists, and both games hung for good the moment a moved sign was drawn again (2026-11-04, the second White Sign
+// Soapstone use: "Summon sign of ours drawn" and no frame after). effect_end now takes the handle out as the destructor
+// does, and effect_at does so first for a handle still in use. The transform is the bloodstain's: the point, four
 // words not read, and the identity quaternion. The summon signs' own effect (0xDB1B8A) is id 100, white; 118 the
 // Warrior of Sunlight's gold.
 constexpr uint32_t kEffectAt = 0x00D34C20;
 constexpr uint32_t kEffectEnd = 0x00547820;
+constexpr uint32_t kEffectUnlink = 0x00547570;
 constexpr uint32_t kEffectHandleVt = 0x011E69E0;
+constexpr uint32_t kEffectState = 0x68;
+constexpr uint32_t kEffectAlive = 0x40000000;
+
+// The effect a handle points to still lives (as 0x9727F0 asks).
+bool effect_alive(uint32_t effect) {
+    uint32_t state = 0;
+    return effect && read32(effect + kEffectState, &state) && (state & kEffectAlive) != 0;
+}
+
+// The handle out of whichever list holds it (0x547570, the destructor's part), then emptied. A link to an effect that
+// is gone is only forgotten: its list is not the handle's any more.
+void effect_release(uint8_t* handle) {
+    const uint32_t h = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle));
+    uint32_t vt = 0, effect = 0, next = 0;
+    if (!read32(h, &vt) || vt != kEffectHandleVt) return;
+    read32(h + 8, &effect);
+    read32(h + 0x14, &next);
+    if ((effect && effect_alive(effect)) || (next && effect_alive(next))) {
+        if (effect && !effect_alive(effect)) *ptr<uint32_t>(h + 8) = 0;
+        if (next && !effect_alive(next)) *ptr<uint32_t>(h + 0x14) = 0;
+        __try {
+            __asm {
+                mov ecx, h
+                mov eax, kEffectUnlink
+                call eax
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    std::memset(handle + 4, 0, 0x14);
+}
 struct alignas(16) EffectXform {
     float pos[4];
     float unused[4];
@@ -4218,6 +4279,7 @@ struct alignas(16) EffectXform {
 alignas(16) EffectXform g_fx_xform;
 
 bool effect_at(uint8_t* handle, int id, const float* p) {
+    effect_release(handle);  // a handle still linked somewhere is taken out first (0xD34C20 would not)
     g_fx_xform = EffectXform{{p[0], p[1], p[2], 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
     uint32_t effect = 0;
     __try {
@@ -4250,6 +4312,7 @@ void effect_end(uint8_t* handle) {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+    effect_release(handle);  // out of the list of the effect it handed over to
 }
 
 bool map_in_use(int map) {
@@ -4259,11 +4322,25 @@ bool map_in_use(int map) {
 }
 
 bool view_only_floor(uint32_t chr) {
-    if (g_view_want.block < 0 || !g_view_want.ours) return false;
+    view_loaded_tick(world_res());
     uint32_t hit = 0;
     uint8_t block = 0xFF;
-    return read32(chr + 0x29C, &hit) && hit && read8(hit + 0xF, &block) &&
-           static_cast<int8_t>(block) == g_view_want.block;
+    if (!read32(chr + 0x29C, &hit) || !hit || !read8(hit + 0xF, &block)) return false;
+    const int b = static_cast<int8_t>(block);
+    return b >= 0 && b < 64 && ((g_view_loaded >> b) & 1) != 0;
+}
+
+// The game's own test of a floor to stand on after a load (0xDE3000): its collision in the physics world (+0x50 state
+// 6), and its high one too unless it has none (+0x78 bit 3, else +0x68 state 6). A block in use can hold collisions
+// that are not loaded (0xDD2EE0 loads them by the groups streamed from our floor): a character put there falls.
+bool floor_ready(uint32_t hit) {
+    uint32_t vt = 0;
+    uint8_t lo = 0, hi = 0, flags = 0;
+    if (!hit || !read32(hit, &vt) || vt != kHitInsVtable || !read8(hit + 0x50, &lo) || !read8(hit + 0x68, &hi) ||
+        !read8(hit + 0x78, &flags)) {
+        return false;
+    }
+    return lo == 6 && ((flags & 8) != 0 || hi == 6);
 }
 
 const char* draw_from(uint32_t chr, bool stream, bool* streamed) {

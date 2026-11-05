@@ -1237,6 +1237,11 @@ bool warp_here(uint32_t target) {
                  narrow(g_dest.name).c_str());
         return false;
     }
+    // Nor onto a floor whose collision is not loaded here (we would fall through it): a load places us properly.
+    if (!rules::floor_ready(floor)) {
+        LOG_INFO("[coop] Death Knell: the floor under %s is not loaded here: going by a load", narrow(g_dest.name).c_str());
+        return false;
+    }
     if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z)) return false;
     alignas(16) float pos[4] = {q.x, q.y, q.z, 1.0f};
     alignas(16) float rot[4] = {0.0f, angle, 0.0f, 0.0f};
@@ -1272,6 +1277,11 @@ bool warp_to_point(const float* p, float angle) {
     if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) return false;
     const uint32_t floor = rules::floor_at(p);
     if (!floor) return false;
+    if (!rules::floor_ready(floor)) {
+        LOG_INFO("[coop] Death Knell: the floor under %s's summon sign is not loaded here: going by a load",
+                 narrow(g_dest.name).c_str());
+        return false;
+    }
     game::Vec3 mine{};
     game::position(&mine, nullptr);
     alignas(16) float pos[4] = {p[0], p[1], p[2], 1.0f};

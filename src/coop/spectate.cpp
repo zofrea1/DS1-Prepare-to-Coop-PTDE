@@ -104,6 +104,13 @@ uint32_t g_knell_chr = 0;     // the Death Knell's view: the teammate it shows (
 bool g_streaming = true;      // SpectateStreaming
 bool g_origin_patched = false;
 volatile uint32_t g_pass_origin = 0;  // the character WorldChrMan's pass takes instead of ours (0: ours)
+// The pass's visibility test is a draw group overlap with that character (0x456B70 copies its chr+0x274, 0x42DB10 /
+// 0x42DAA0 test ours against it), not the camera: far from the teammate our own character failed it, and the pass gave
+// it rate 5 (its LOD path, vt+0xA0), so it was updated every fifth frame. The camera, which turns by our character's
+// input, then barely turned, and the Death Knell's prompt missed the button (2026-11-04: "only worked in the vicinity
+// of the player"). Our own rate is fixed at every frame while the pass takes the teammate (as the teammate's is).
+uint32_t g_own_fixed_chr = 0;   // our character whose rate we fixed (0 none)
+bool g_own_was_fixed = false;
 int g_view_map = -1;          // the followed teammate's map kept loaded for the view (-1 none)
 // Their floor, found by a cast (rules::find_floor) where their character never touches the collision: in a map loaded
 // for the view, their character had no floor at all (2026-11-04). The character given one, to take it back from when
@@ -330,6 +337,27 @@ void fix_rate(uint32_t chr) {
     g_rate_chr = chr;
 }
 
+// Our own character's update rate fixed at every frame while `on` (put back after, as it was).
+void fix_own_rate(bool on) {
+    const uint32_t me = game::player();
+    if (g_own_fixed_chr && (!on || g_own_fixed_chr != me)) {
+        if (g_own_fixed_chr == me && !g_own_was_fixed) {
+            uint8_t flags = 0;
+            if (read8(me + kChrRateFlags, &flags)) *ptr<uint8_t>(me + kChrRateFlags) = flags & ~1;
+        }
+        g_own_fixed_chr = 0;
+    }
+    if (!on || !me) return;
+    uint8_t flags = 0;
+    if (!read8(me + kChrRateFlags, &flags)) return;
+    if (g_own_fixed_chr != me) {
+        g_own_was_fixed = (flags & 1) != 0;
+        g_own_fixed_chr = me;
+    }
+    *ptr<uint8_t>(me + kChrRateFlags) = flags | 1;  // every frame: the game clears it at times (a death)
+    *ptr<int32_t>(me + kChrRate) = 0;
+}
+
 // Every frame while we follow a teammate: the world is drawn from their floor (the reason when not is logged once
 // per change).
 void view_extras() {
@@ -358,6 +386,7 @@ void view_extras() {
     }
     if (!chr) {
         g_pass_origin = 0;
+        fix_own_rate(false);
         g_drawn_for = 0;
         return;
     }
@@ -385,6 +414,7 @@ void view_extras() {
     }
     // Only from a floor of theirs that is loaded here: their draw groups come from it.
     g_pass_origin = g_streaming && g_origin_patched && !why ? chr : 0;
+    fix_own_rate(g_pass_origin != 0);
     if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why)) {
         g_drawn_for = chr;
         g_drawn_why = why ? why : "";

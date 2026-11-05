@@ -155,6 +155,12 @@ const char* find_floor(uint32_t chr, bool* changed);
 void clear_floor(uint32_t chr);
 // The collision under a point (x, y, z) of a block in use here, by the same cast; 0 none.
 uint32_t floor_at(const float* pos);
+// A lasting effect of the game's (id: 100 a white summon sign) at a point, held by `handle` (0x18 bytes that must stay
+// where they are while it lasts); true when it was made. effect_end ends it (nothing when it is gone already).
+bool effect_at(uint8_t* handle, int id, const float* pos);
+void effect_end(uint8_t* handle);
+// The map's block (area << 24 | block << 16) is loaded and in use in our game.
+bool map_in_use(int map);
 // An event animation starts on a character other than ours (motion.cpp's hook): bosses and watched enemies are
 // followed for a few seconds in the log (diagnostic), and the game whose own event run began it moves the character
 // until it ends (the others are told through set_event_lead_listener).

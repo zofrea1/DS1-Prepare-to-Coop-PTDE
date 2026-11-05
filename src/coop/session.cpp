@@ -3821,6 +3821,17 @@ struct SignInfo {
 SignInfo g_my_sign;
 double g_my_sign_sent = 0;
 std::map<uint64_t, SignInfo> g_signs;  // the others', by owner
+// Each sign is drawn with the game's own summon sign effect (rules::effect_at, id 100, as the game's signs are) in
+// every game where its block is in use, ours as well; the soapstone's own sign (its UseGoods effect) is not made, as it
+// would offer us to the game's own summoning. Its handle is the game's and must not move while the effect lasts: the
+// map's nodes do not.
+constexpr int kSignEffect = 100;
+struct SignFx {
+    alignas(4) uint8_t handle[0x18] = {};
+    bool on = false;
+    uint32_t serial = 0;
+};
+std::map<uint64_t, SignFx> g_sign_fx;  // by owner (ours under our own id)
 
 bool coop_in_world() {
     return (g_role == Role::Host && (g_step == Step::Hosting || g_step == Step::Closing)) ||
@@ -3844,7 +3855,49 @@ void send_sign() {
     g_my_sign_sent = now();
 }
 
+void sign_fx_end(SignFx& fx) {
+    if (fx.on) rules::effect_end(fx.handle);
+    fx.on = false;
+}
+
+// The effects follow the signs, twice a second; a load ends them all (they are made again where their block is in use).
+void sign_fx_tick() {
+    static double last = 0;
+    if (now() - last < 0.5 && !game::loading()) return;
+    last = now();
+    const bool show = coop_in_world() && game::in_game() && !game::loading() && game::player();
+    std::map<uint64_t, const SignInfo*> want;
+    if (show) {
+        if (g_my_sign.map != -1) want[steam::self()] = &g_my_sign;
+        for (const auto& [owner, sign] : g_signs) want[owner] = &sign;
+    }
+    for (auto it = g_sign_fx.begin(); it != g_sign_fx.end();) {
+        const auto w = want.find(it->first);
+        const bool keep = w != want.end() && rules::map_in_use(w->second->map);
+        if (!keep || it->second.serial != (w == want.end() ? 0 : w->second->serial)) sign_fx_end(it->second);
+        if (w == want.end()) {
+            it = g_sign_fx.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& [owner, sign] : want) {
+        SignFx& fx = g_sign_fx[owner];
+        if (fx.on || !rules::map_in_use(sign->map)) continue;
+        const float at[3] = {sign->pos[0], sign->pos[1] + 0.05f, sign->pos[2]};
+        fx.on = rules::effect_at(fx.handle, kSignEffect, at);
+        fx.serial = sign->serial;
+        static int lines = 0;
+        if (++lines <= 40) {
+            LOG_INFO("[coop] Summon sign of %s %s at (%.1f, %.1f, %.1f)",
+                     owner == steam::self() ? "ours" : steam::persona(owner).c_str(), fx.on ? "drawn" : "NOT drawn",
+                     at[0], at[1], at[2]);
+        }
+    }
+}
+
 void signs_tick() {
+    sign_fx_tick();
     if (!coop_in_world()) {
         if (g_my_sign.map != -1 || !g_signs.empty()) {
             LOG_INFO("[coop] Summon signs: ours and %d of the others' gone (the session ended)",

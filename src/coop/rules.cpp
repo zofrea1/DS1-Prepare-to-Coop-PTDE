@@ -4188,6 +4188,63 @@ void clear_floor(uint32_t chr) {
     }
 }
 
+// A lasting effect at a point, made as the bloodstain's marker is (0xDB6010: 0xD34C20(handle, 0x60, transform), cdecl)
+// and held by its handle (0x18 bytes, vtable 0x11E69E0: the effect at +8, linked into the effect's list, so it stays
+// where it is while the effect lives); 0x547820 (esi = the handle) ends it and empties the handle, and does nothing
+// when the effect is gone already (0x9727F0 finds it no more). The transform is the bloodstain's: the point, four
+// words not read, and the identity quaternion. The summon signs' own effect (0xDB1B8A) is id 100, white; 118 the
+// Warrior of Sunlight's gold.
+constexpr uint32_t kEffectAt = 0x00D34C20;
+constexpr uint32_t kEffectEnd = 0x00547820;
+constexpr uint32_t kEffectHandleVt = 0x011E69E0;
+struct alignas(16) EffectXform {
+    float pos[4];
+    float unused[4];
+    float rot[4];
+};
+alignas(16) EffectXform g_fx_xform;
+
+bool effect_at(uint8_t* handle, int id, const float* p) {
+    g_fx_xform = EffectXform{{p[0], p[1], p[2], 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
+    uint32_t effect = 0;
+    __try {
+        __asm {
+            lea eax, g_fx_xform
+            push eax
+            push id
+            push handle
+            mov eax, kEffectAt
+            call eax
+            add esp, 0xC
+        }
+        effect = *reinterpret_cast<uint32_t*>(handle + 8);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return effect != 0;
+}
+
+void effect_end(uint8_t* handle) {
+    uint32_t vt = 0;
+    if (!read32(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle)), &vt) || vt != kEffectHandleVt) return;
+    __try {
+        __asm {
+            push esi
+            mov esi, handle
+            mov eax, kEffectEnd
+            call eax
+            pop esi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool map_in_use(int map) {
+    const uint32_t wr = world_res();
+    const int block = map_block(wr, static_cast<int>(static_cast<uint32_t>(map) & 0xFFFF0000u));
+    return block >= 0 && block_state(wr, block) == static_cast<int>(kBlockInUse);
+}
+
 bool view_only_floor(uint32_t chr) {
     if (g_view_want.block < 0 || !g_view_want.ours) return false;
     uint32_t hit = 0;

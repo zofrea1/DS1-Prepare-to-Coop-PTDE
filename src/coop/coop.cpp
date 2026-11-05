@@ -274,10 +274,7 @@ void bloody_items_tick() {
         if (want > have) items::give(items::kBloody, want - have);
         LOG_INFO("[coop] Bloody Marys in the inventory: %d -> %d", have, items::count(items::kBloody));
     }
-    if (want > g_bloody_told) {
-        items::announce(items::kGoodsCategory, items::kBloody, want - g_bloody_told);
-        text::show(L"A Bloody Mary blooms: the world's enemies grow stronger");
-    }
+    if (want > g_bloody_told) items::announce(items::kGoodsCategory, items::kBloody, want - g_bloody_told);
     g_bloody_told = want;
 }
 

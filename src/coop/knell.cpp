@@ -204,6 +204,158 @@ DWORD WINAPI hk_xinput_get_state(DWORD index, void* state) {
     return r;
 }
 
+// The arrow keys choose too (spectate::switch_step reads them through our own import of GetAsyncKeyState); the game
+// reads the keyboard through DirectInput (DirectInput8Create) and USER32's GetAsyncKeyState / GetKeyboardState, and
+// switched weapons with them while the view was open (2026-11-04, on the keyboard). While the D-pad is masked, left
+// and right are hidden from those reads too: the game's two USER32 imports are wrapped, and so is every DirectInput
+// device's GetDeviceState and GetDeviceData (slots 9 and 10, patched in dinput8's own vtables, found through a device
+// made here: the game's were made before us), for a keyboard's 256-byte state and its key events.
+using GetAsyncKeyStateFn = SHORT(WINAPI*)(int);
+using GetKeyboardStateFn = BOOL(WINAPI*)(PBYTE);
+using DevGetStateFn = HRESULT(WINAPI*)(void*, DWORD, void*);
+using DevGetDataFn = HRESULT(WINAPI*)(void*, DWORD, void*, DWORD*, DWORD);
+GetAsyncKeyStateFn g_get_async = nullptr;
+GetKeyboardStateFn g_get_keyboard = nullptr;
+constexpr int kDiSlots = 2;  // the A and the W device vtables
+void** g_di_vtables[kDiSlots] = {};
+DevGetStateFn g_di_get_state[kDiSlots] = {};
+DevGetDataFn g_di_get_data[kDiSlots] = {};
+constexpr uint8_t kDikLeft = 0xCB, kDikRight = 0xCD;
+
+bool arrow_vk(int vk) { return vk == VK_LEFT || vk == VK_RIGHT; }
+
+SHORT WINAPI hk_get_async_key_state(int vk) {
+    const SHORT r = g_get_async(vk);
+    return g_mask_dpad && arrow_vk(vk) ? 0 : r;
+}
+
+BOOL WINAPI hk_get_keyboard_state(PBYTE keys) {
+    const BOOL r = g_get_keyboard(keys);
+    if (r && keys && g_mask_dpad) {
+        keys[VK_LEFT] = 0;
+        keys[VK_RIGHT] = 0;
+    }
+    return r;
+}
+
+int di_slot(void* dev) {
+    void** vt = dev ? *reinterpret_cast<void***>(dev) : nullptr;
+    for (int i = 0; i < kDiSlots; ++i) {
+        if (g_di_vtables[i] && g_di_vtables[i] == vt) return i;
+    }
+    return 0;
+}
+
+HRESULT WINAPI hk_di_get_state(void* dev, DWORD size, void* data) {
+    const int i = di_slot(dev);
+    const HRESULT r = g_di_get_state[i](dev, size, data);
+    if (SUCCEEDED(r) && data && size == 256 && g_mask_dpad) {
+        static_cast<uint8_t*>(data)[kDikLeft] = 0;
+        static_cast<uint8_t*>(data)[kDikRight] = 0;
+    }
+    return r;
+}
+
+// DIDEVICEOBJECTDATA (dwOfs, dwData, dwTimeStamp, dwSequence, uAppData: 20 bytes in DirectInput 8): a keyboard's
+// events carry the DIK code in dwOfs; those of the two arrows are taken out.
+HRESULT WINAPI hk_di_get_data(void* dev, DWORD cb, void* data, DWORD* inout, DWORD flags) {
+    const int i = di_slot(dev);
+    const HRESULT r = g_di_get_data[i](dev, cb, data, inout, flags);
+    if (SUCCEEDED(r) && data && inout && cb >= 8 && g_mask_dpad) {
+        uint8_t* p = static_cast<uint8_t*>(data);
+        DWORD kept = 0;
+        for (DWORD k = 0; k < *inout; ++k) {
+            DWORD ofs = 0;
+            std::memcpy(&ofs, p + k * cb, 4);
+            if (ofs == kDikLeft || ofs == kDikRight) continue;
+            if (kept != k) std::memmove(p + kept * cb, p + k * cb, cb);
+            ++kept;
+        }
+        *inout = kept;
+    }
+    return r;
+}
+
+// The game's import of `name` from a DLL whose name starts with `dll` points at `hook` (the old target in `*orig`).
+bool patch_import(const char* dll, const char* name, void* hook, void** orig) {
+    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return false;
+    for (auto* imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); imp->Name; ++imp) {
+        if (_strnicmp(reinterpret_cast<const char*>(base + imp->Name), dll, std::strlen(dll)) != 0 ||
+            !imp->OriginalFirstThunk) {
+            continue;
+        }
+        auto* names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imp->OriginalFirstThunk);
+        auto* slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imp->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++slots) {
+            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
+            const auto* by_name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
+            if (std::strcmp(reinterpret_cast<const char*>(by_name->Name), name) != 0) continue;
+            DWORD old = 0;
+            if (!VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), PAGE_READWRITE, &old)) return false;
+            *orig = reinterpret_cast<void*>(slots->u1.Function);
+            slots->u1.Function = reinterpret_cast<ULONG_PTR>(hook);
+            VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), old, &old);
+            return *orig != nullptr;
+        }
+    }
+    return false;
+}
+
+bool patch_vtable_slot(void** vt, int slot, void* hook, void** orig) {
+    DWORD old = 0;
+    if (!VirtualProtect(&vt[slot], sizeof(void*), PAGE_READWRITE, &old)) return false;
+    *orig = vt[slot];
+    vt[slot] = hook;
+    VirtualProtect(&vt[slot], sizeof(void*), old, &old);
+    return true;
+}
+
+// dinput8's device vtables, through a keyboard device made here with each interface (A and W), released again.
+int patch_dinput_devices() {
+    HMODULE di = LoadLibraryW(L"dinput8.dll");
+    if (!di) return 0;
+    using CreateFn = HRESULT(WINAPI*)(HINSTANCE, DWORD, const GUID&, void**, void*);
+    auto create = reinterpret_cast<CreateFn>(GetProcAddress(di, "DirectInput8Create"));
+    if (!create) return 0;
+    static const GUID kIidA = {0xBF798030, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
+    static const GUID kIidW = {0xBF798031, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
+    static const GUID kSysKeyboard = {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+    const GUID* iids[kDiSlots] = {&kIidA, &kIidW};
+    int patched = 0;
+    for (int i = 0; i < kDiSlots; ++i) {
+        void* dinput = nullptr;
+        if (FAILED(create(GetModuleHandleW(nullptr), 0x0800, *iids[i], &dinput, nullptr)) || !dinput) continue;
+        void** dvt = *reinterpret_cast<void***>(dinput);
+        using CreateDeviceFn = HRESULT(WINAPI*)(void*, const GUID&, void**, void*);
+        void* dev = nullptr;
+        if (SUCCEEDED(reinterpret_cast<CreateDeviceFn>(dvt[3])(dinput, kSysKeyboard, &dev, nullptr)) && dev) {
+            void** vt = *reinterpret_cast<void***>(dev);
+            bool seen = false;
+            for (int k = 0; k < i; ++k) seen = seen || g_di_vtables[k] == vt;
+            if (!seen) {
+                g_di_vtables[i] = vt;
+                void* o1 = nullptr;
+                void* o2 = nullptr;
+                if (patch_vtable_slot(vt, 9, reinterpret_cast<void*>(&hk_di_get_state), &o1) &&
+                    patch_vtable_slot(vt, 10, reinterpret_cast<void*>(&hk_di_get_data), &o2)) {
+                    g_di_get_state[i] = reinterpret_cast<DevGetStateFn>(o1);
+                    g_di_get_data[i] = reinterpret_cast<DevGetDataFn>(o2);
+                    ++patched;
+                }
+            }
+            using ReleaseFn = ULONG(WINAPI*)(void*);
+            reinterpret_cast<ReleaseFn>((*reinterpret_cast<void***>(dev))[2])(dev);
+        }
+        using ReleaseFn = ULONG(WINAPI*)(void*);
+        reinterpret_cast<ReleaseFn>(dvt[2])(dinput);
+    }
+    return patched;
+}
+
 bool patch_xinput_import() {
     auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
@@ -1271,6 +1423,14 @@ bool install() {
         LOG_ERROR("[coop] Death Knell: the game's XInput import was not found; D-pad left/right also switch weapons "
                   "while its view is open");
     }
+    void* o = nullptr;
+    const bool async = patch_import("user32", "GetAsyncKeyState", reinterpret_cast<void*>(&hk_get_async_key_state), &o);
+    if (async) g_get_async = reinterpret_cast<GetAsyncKeyStateFn>(o);
+    const bool state = patch_import("user32", "GetKeyboardState", reinterpret_cast<void*>(&hk_get_keyboard_state), &o);
+    if (state) g_get_keyboard = reinterpret_cast<GetKeyboardStateFn>(o);
+    const int devices = patch_dinput_devices();
+    LOG_INFO("[coop] Death Knell: the arrow keys hidden from the game while its view is open (USER32 %s/%s, DirectInput "
+             "%d device table(s))", async ? "yes" : "no", state ? "yes" : "no", devices);
     return true;
 }
 

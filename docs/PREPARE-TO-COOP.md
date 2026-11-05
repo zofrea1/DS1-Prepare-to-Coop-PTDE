@@ -310,6 +310,22 @@ teammate, and treats the characters around them as the ones around us:
   view or after our death) both reads take their character (`0xEFE4C9` `mov eax,[esi+0xEC]`, `0xEFE4EF`
   `mov esi,[esi+0xEC]`), the debug player still first, so we see their area as they do; without a floor under them,
   ours as before.
+- **The enemies there.** Around a teammate in another map the enemies were not there at all (2026-11-05). A character
+  is updated, and its model placed (`0xE6AA30` hands the model its display groups), only while its map entity is
+  active (`[chr+0xC]+8` == 2; WorldChrMan's pass gives any other rate -1). Every frame the streaming update
+  (`0xDE7C30`) builds each block's streaming mask from the floors' draw groups (`0xDE2AE0`, needing `HitIns+0x78`
+  bit 2: the floors in the extra slots at FieldArea `+0x44` and our own `+0x3C`, else what the back-read around us
+  wants), writes it to that block's WorldBlockChr (WorldChrMan `+0x20`, 0x98 each, `+0x1C`), and asks for each
+  character's entity (`0xE3E870`: `[chr+0xC]+0xC` = 2 when its display groups `chr+0x264` meet its block's mask; the
+  entity's state machine `0xE6AC50`, run for every character from the field update `0xE3EB40`, follows the ask).
+  The teammate's floor is in an extra slot while we follow them, so their block's characters should be asked for
+  already; after the game's own asks (its call at `0xDE81F0`) the same rule is applied again with their floor's draw
+  groups (`HitIns+0x20`) to the characters of their floor's block. The pass gives a character that fails its draw
+  group test the rate of the block we stand in only (FieldArea `+0x14`, compared with `chr+0x5C` at `0xE3F966`:
+  every 5th frame near the origin, every 30th farther, else none); the teammate's block counts as ours there while
+  the pass takes their character. While we follow a teammate the log says every 4 s what the characters of their
+  block are doing here (alive, near them, entity active, asked for, groups meeting their floor's, updated, seen, with
+  a model, and the nearest one), so a test shows which step leaves them out if they still are.
 - **The Death Knell** goes to a teammate standing in a map the view loaded for itself by a load, as it did before
   (`rules::view_only_floor`), not by a warp.
 

@@ -15,6 +15,8 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace coop::spectate {
@@ -88,6 +90,24 @@ constexpr uint32_t kChrRate = 0xF4;
 //    us. While we follow a teammate the pass takes their character instead (0xE3F68A: mov ecx,[edi+3Ch]; mov eax,
 //    [ecx+28h]), checked to be one of WorldChrMan's players every time.
 constexpr uint32_t kChrPassOriginSite = 0x00E3F68A;
+//  * The enemies there (2026-11-05: around a teammate in another map they were "not there at all"). A character is
+//    updated, and its model placed (0xE6AA30 hands the model its display groups), only while its map entity is active
+//    ([chr+0xC]+8 == 2; the pass gives any other rate -1). Every frame the streaming update (0xDE7C30) builds each
+//    block's streaming mask (the floors' draw groups, 0xDE2AE0: the floors of the extra slots at FieldArea+0x44 and our
+//    own, else what the back-read around us wants), writes it to that block's WorldBlockChr (WorldChrMan+0x20, 0x98
+//    each, +0x1C), and asks for each character's entity (0xE3E870: [chr+0xC]+0xC = 2 when its display groups chr+0x264
+//    meet its block's mask, else 0; the entity's state machine 0xE6AC50, run for every character from the field
+//    update 0xE3EB40, follows the ask). The teammate's floor is in an extra slot while we follow them, so their block's
+//    characters should be asked for: after the game's own asks (its call at 0xDE81F0) the same rule is applied once
+//    more with their floor's draw groups (HitIns+0x20) to the characters of their floor's block, and the log counts
+//    what that changed. And the pass gives a character that fails its draw group test the rate of the block we stand in
+//    only (FieldArea+0x14, compared at 0xE3F966 with chr+0x5C: every 5th frame near the origin, every 30th farther,
+//    else none): the teammate's block counts as ours there while the pass takes their character. While we follow a
+//    teammate the log says, every few seconds, what the characters of their block are doing here.
+constexpr uint32_t kActivationCallSite = 0x00DE81F0;  // call 0xE3E870: stdcall(WorldChrMan) -> al, every entity ready
+constexpr uint32_t kActivation = 0x00E3E870;
+constexpr uint32_t kBlockTestSite = 0x00E3F966;       // mov ecx,[esp+0xA0] ; cmp [esi+0x5C],ecx (then jne 0xE3FC48)
+constexpr uint32_t kNoBlock = 0x7FFFFFFF;             // no character's block (chr+0x5C)
 
 constexpr double kViewDelay = 3.0;      // the death animation plays before the camera moves on
 constexpr double kFightOffFor = 1.5;    // the fight counts as over once it has been over this long
@@ -405,6 +425,162 @@ __declspec(naked) void hk_chr_pass_origin() {
     }
 }
 
+// ---------------------------------------------------------------- the enemies around a far teammate
+volatile uint32_t g_view_block = kNoBlock;  // their floor's block while the pass takes their character
+bool g_block_test = false;                  // the pass's block test is patched (kBlockTestSite)
+int g_asked_more = 0;                       // characters of their block our rule asked for this frame (the game had not)
+
+// WorldChrMan's character sets: {set, block, WorldBlockChr} at +0xE4, the count at +0xE0; a set is {count, entries of
+// 0x20 with the character first}.
+constexpr uint32_t kWcmSets = 0xE4;
+constexpr uint32_t kWcmSetCount = 0xE0;
+
+// The characters of `block` (their set), 0 when the block has none here.
+uint32_t block_set(uint32_t wcm, uint32_t block) {
+    uint32_t n = 0;
+    if (!wcm || !read32(wcm + kWcmSetCount, &n) || n > 64) return 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t set = 0, b = 0;
+        if (read32(wcm + kWcmSets + i * 12, &set) && read32(wcm + kWcmSets + i * 12 + 4, &b) && b == block) return set;
+    }
+    return 0;
+}
+
+bool overlaps(uint32_t a, uint32_t b) {
+    for (uint32_t k = 0; k < 16; k += 4) {
+        uint32_t x = 0, y = 0;
+        if (read32(a + k, &x) && read32(b + k, &y) && (x & y)) return true;
+    }
+    return false;
+}
+
+// After the game's own asks: the characters of the followed teammate's block whose display groups meet their floor's
+// draw groups are asked for, as the game asks for them when their floor is ours (0xE3E870: not one it asks for
+// whatever the masks, chr+0x15 / chr+0x54 / its vt+0xA0 and +0xA4, nor one it never asks for, chr+0x14).
+void ask_view_block(uint32_t wcm) {
+    g_asked_more = 0;
+    const uint32_t chr = g_pass_origin;
+    uint32_t hit = 0, count = 0, arr = 0;
+    uint8_t b = 0xFF;
+    if (!chr || !read32(chr + 0x29C, &hit) || !hit || !read8(hit + 0xF, &b) || b >= 64) return;
+    const uint32_t set = block_set(wcm, b);
+    if (!set || !read32(set, &count) || !read32(set + 4, &arr) || !arr || count > 4096) return;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t c = 0, ent = 0, ask = 0, attached = 0;
+        uint8_t never = 1, always = 1;
+        if (!read32(arr + i * 0x20, &c) || !c || !read8(c + 0x14, &never) || !read8(c + 0x15, &always) ||
+            !read32(c + 0x54, &attached) || !read32(c + 0xC, &ent) || !ent || !read32(ent + 0xC, &ask)) {
+            continue;
+        }
+        if (never || always || !attached || ask == 2 || !overlaps(c + 0x264, hit + 0x20)) continue;
+        *ptr<uint32_t>(ent + 0xC) = 2;
+        ++g_asked_more;
+    }
+}
+
+using ActivationFn = uint8_t(__stdcall*)(uint32_t);
+
+uint8_t __stdcall hk_activation(uint32_t wcm) {
+    const uint8_t ready = reinterpret_cast<ActivationFn>(kActivation)(wcm);
+    __try {
+        ask_view_block(wcm);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_asked_more = 0;
+    }
+    return ready;
+}
+
+// mov ecx,[esp+0xA0] ; cmp [esi+0x5C],ecx: the block the pass counts as ours, or the followed teammate's. The jne after
+// it takes ZF.
+__declspec(naked) void hk_block_test() {
+    __asm {
+        mov ecx, dword ptr [esp + 0xA4]  // the game's [esp+0xA0], past our return address
+        push eax
+        mov eax, dword ptr [esi + 0x5C]
+        cmp eax, ecx
+        je done
+        cmp eax, g_view_block
+    done:
+        pop eax
+        ret
+    }
+}
+
+// What the characters of the followed teammate's block are doing here, every few seconds while we follow them (the
+// log's answer to "the enemies around them are not there").
+void view_block_report() {
+    static double last = 0;
+    static int lines = 0;
+    const uint32_t chr = g_pass_origin;
+    if (!chr || lines >= 40 || now() - last < 4.0) return;
+    last = now();
+    uint32_t wcm = 0, hit = 0, fa = 0, ours = 0xFFFFFFFF, count = 0, arr = 0;
+    uint8_t b = 0xFF, flags = 0;
+    if (!read32(kWorldChrManVar, &wcm) || !wcm || !read32(chr + 0x29C, &hit) || !hit || !read8(hit + 0xF, &b)) return;
+    read8(hit + 0x78, &flags);
+    if (read32(0x01378520, &fa) && fa) read32(fa + 0x14, &ours);
+    const uint32_t set = block_set(wcm, b);
+    ++lines;
+    if (!set || !read32(set, &count) || !read32(set + 4, &arr) || !arr) {
+        LOG_INFO("[coop] Spectating: the followed teammate's block %u has no characters here (our block %d)", b,
+                 static_cast<int>(ours));
+        return;
+    }
+    game::Vec3 them{};
+    game::chr_position(chr, &them);
+    int alive = 0, active = 0, asked = 0, updated = 0, none = 0, seen = 0, model = 0, meet = 0, close = 0;
+    float best = 1e9f;
+    uint32_t best_chr = 0;
+    for (uint32_t i = 0; i < count && i < 4096; ++i) {
+        uint32_t c = 0, ent = 0, state = 0, ask = 0, hp = 0, mdl = 0;
+        int32_t rate = 0;
+        uint8_t f1fd = 0;
+        if (!read32(arr + i * 0x20, &c) || !c || !read32(c + 0xC, &ent) || !ent) continue;
+        read32(ent + 8, &state);
+        read32(ent + 0xC, &ask);
+        read32(c + 0x2D4, &hp);
+        read32(c + 0x24, &mdl);
+        read32(c + 0xF4, reinterpret_cast<uint32_t*>(&rate));
+        read8(c + 0x1FD, &f1fd);
+        alive += static_cast<int>(hp) > 0;
+        active += state == 2;
+        asked += ask == 2;
+        updated += rate >= 0;
+        none += rate == -1;
+        seen += (f1fd & 8) != 0;
+        model += mdl != 0;
+        meet += overlaps(c + 0x264, hit + 0x20);
+        game::Vec3 at{};
+        if (static_cast<int>(hp) > 0 && game::chr_position(c, &at)) {
+            const float dx = at.x - them.x, dy = at.y - them.y, dz = at.z - them.z;
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            close += d < 40.0f;
+            if (d < best) {
+                best = d;
+                best_chr = c;
+            }
+        }
+    }
+    char nearest[160] = "none alive";
+    if (best_chr) {
+        uint32_t ent = 0, state = 0, ask = 0;
+        int32_t rate = 0;
+        read32(best_chr + 0xC, &ent);
+        if (ent) {
+            read32(ent + 8, &state);
+            read32(ent + 0xC, &ask);
+        }
+        read32(best_chr + 0xF4, reinterpret_cast<uint32_t*>(&rate));
+        std::snprintf(nearest, sizeof(nearest), "%.0f m from them: entity %u (asked %u), rate %d, groups %s their floor's",
+                      best, state, ask, rate, overlaps(best_chr + 0x264, hit + 0x20) ? "meet" : "miss");
+    }
+    LOG_INFO("[coop] Spectating: the followed teammate's block %u here (our block %d; their floor streams: %s): %u "
+             "characters, %d alive, %d within 40 m; entity active %d, asked for %d (%d by the view's rule this frame), "
+             "groups meeting their floor's %d; updated %d, never %d, seen %d, with a model %d; nearest: %s",
+             b, static_cast<int>(ours), (flags & 4) ? "yes" : "no", count, alive, close, active, asked, g_asked_more,
+             meet, updated, none, seen, model, nearest);
+}
+
 // Puts back the update rate of the teammate we stop following (if they are still here) and fixes the new one's.
 void fix_rate(uint32_t chr) {
     if (chr == g_rate_chr) return;
@@ -473,6 +649,7 @@ void view_extras() {
     }
     if (!chr) {
         g_pass_origin = 0;
+        g_view_block = kNoBlock;
         fix_own_rate(false);
         g_drawn_for = 0;
         return;
@@ -546,6 +723,12 @@ void view_extras() {
     }
     // Only from a floor of theirs that is loaded here: their draw groups come from it.
     g_pass_origin = g_streaming && g_origin_patched && !why ? chr : 0;
+    uint32_t their_floor = 0;
+    uint8_t their_block = 0xFF;
+    g_view_block = g_pass_origin && g_block_test && read32(chr + 0x29C, &their_floor) && their_floor &&
+                           read8(their_floor + 0xF, &their_block) && their_block < 64
+                       ? their_block
+                       : kNoBlock;
     fix_own_rate(g_pass_origin != 0);
     if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why) || (!why && streamed != g_drawn_streamed)) {
         g_drawn_for = chr;
@@ -773,6 +956,18 @@ bool install() {
         LOG_ERROR("[coop] Spectating: the character update pass did not match this build (the characters around a far "
                   "teammate stay as seen from us)");
     }
+    // The enemies around a far teammate: their block's characters asked for after the game's asks, and their block
+    // counted as ours by the pass.
+    static const uint8_t block_k[10] = {0x8B, 0x8C, 0x24, 0xA0, 0x00, 0x00, 0x00, 0x39, 0x4E, 0x5C};
+    if (g_origin_patched) {
+        const bool asks = redirect_call(kActivationCallSite, kActivation, reinterpret_cast<void*>(&hk_activation));
+        g_block_test = patch_call(kBlockTestSite, block_k, sizeof(block_k), reinterpret_cast<void*>(&hk_block_test));
+        if (!asks || !g_block_test) {
+            LOG_ERROR("[coop] Spectating: the character activation (%s) or the pass's block test (%s) did not match this "
+                      "build (the enemies around a far teammate may stay out)",
+                      asks ? "in" : "no match", g_block_test ? "in" : "no match");
+        }
+    }
     return true;
 }
 
@@ -786,6 +981,7 @@ void set_teammates(const std::vector<Teammate>& teammates) { g_team = teammates;
 void tick() {
     if (!g_installed) return;
     view_extras();
+    view_block_report();
     if (game::player() && !world::local_dead()) {
         if (g_hold) {
             g_hold = false;

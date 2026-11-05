@@ -3859,7 +3859,7 @@ void remote_characters_upkeep() {
 }
 
 // ---------------------------------------------------------------- summon signs (1.5.0)
-// A co-op player's White Sign Soapstone, in a session, leaves a summon sign where they stand, one per player (a new one
+// A co-op player's Vigil Soapstone, in a session, leaves a summon sign where they stand, one per player (a new one
 // replaces the last); the Death Knell can take anyone else there (knell.cpp). Each player sends their own on a change
 // and every kSignResend, through the host as the other world news, so a player who joins later has them within that;
 // one not heard of for kSignLapse is gone (its owner left), and the end of the session takes them all.
@@ -3876,9 +3876,10 @@ SignInfo g_my_sign;
 double g_my_sign_sent = 0;
 std::map<uint64_t, SignInfo> g_signs;  // the others', by owner
 // Each sign is drawn with the game's own summon sign effect (rules::effect_at, id 100, as the game's signs are) in
-// every game where its block is in use, ours as well; the soapstone's own sign (its UseGoods effect) is not made, as it
-// would offer us to the game's own summoning. Its handle is the game's and must not move while the effect lasts: the
-// map's nodes do not.
+// every game where its block is in use, ours as well; the game makes no sign of its own (the Vigil Soapstone is our
+// item: the White Sign Soapstone's sign, its UseGoods effect, would offer us to the game's own summoning, and that
+// soapstone stays the game's). Its handle is the game's and must not move while the effect lasts: the map's nodes do
+// not.
 constexpr int kSignEffect = 100;
 struct SignFx {
     alignas(4) uint8_t handle[0x18] = {};

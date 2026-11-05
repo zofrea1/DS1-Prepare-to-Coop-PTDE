@@ -26,9 +26,10 @@ void use();
 void tick();
 // The view is open (the camera may be on a teammate).
 bool viewing();
-// A texture the game made from data in memory (title.cpp's D3DX hook): the icon atlas gets the bell's art.
+// A texture the game made from data in memory (title.cpp's D3DX hook): the icon atlas gets the Death Knell's and the
+// Vigil Soapstone's icons.
 void note_texture(IDirect3DTexture9* texture, const void* data, unsigned size);
-// Between two frames on the render thread: writes the icon into the atlas once it is known.
+// Between two frames on the render thread: writes the icons into the atlas once it is known.
 void render();
 // The HUD line of the drain and the prompt's lines (FMG ids of ours, answered through the items' dialog text).
 constexpr uint32_t kDrainedText = 93129710;

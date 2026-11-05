@@ -31,7 +31,7 @@ namespace coop::knell {
 
 namespace {
 
-#include "death_knell_art.inc"
+#include "icon_art.inc"
 
 // ---------------------------------------------------------------- addresses
 // The level-up menu's apply (0xC75DD0, from the confirm at 0xC76328: eax = the menu's stats at +0x148, ecx = the
@@ -734,7 +734,7 @@ void arrive() {
 // The poise breaks, the riposte's stab sounds, and the bell takes its price (1.5.0, the user's design): the mod's death
 // debuffs, a Crimson Blossom for us and a Bloody Mary for the whole session (the host counts it), as a death gives
 // them; and going to a teammate also takes every soul and all humanity we carry, as the Darksign does (no bloodstain).
-// A summon sign one of them left (White Sign Soapstone) is the co-operative way: the debuffs only. With
+// A summon sign one of them left (Vigil Soapstone) is the co-operative way: the debuffs only. With
 // DeathKnellSoulLevel, going to a teammate takes a soul level instead of the souls and humanity (the first price).
 // The price's line names only what was taken (Grok dcb9359e): the souls and humanity (going to a teammate), the
 // Crimson Blossom when one was given (not with DeathDebuffs off, while invading, or with five held), and the hardier
@@ -897,7 +897,7 @@ const spectate::Teammate* find(uint64_t id) {
 }
 
 // The places the bell can take us (1.5.0): every co-op teammate standing, then every summon sign the others left
-// (session::summon_signs, their White Sign Soapstones), each by player. Good for the frame they are made in.
+// (session::summon_signs, their Vigil Soapstones), each by player. Good for the frame they are made in.
 struct Choice {
     uint64_t id = 0;
     bool sign = false;
@@ -1421,10 +1421,11 @@ void loading_tick() {
     arrive();
 }
 
-// ---------------------------------------------------------------- the icon
-// The atlas the icon's sprite reads (Icon21: menu/menu_4.tpf, 1024 x 512 DXT5, 11 levels), as the game hands it to
-// D3DX. EquIcon_2159's cell is empty in it; the bell is laid over the cell's blocks level by level (the patches are
-// built by tools/build_death_knell_icon.py, see death_knell_art.inc).
+// ---------------------------------------------------------------- the icons
+// The atlas the icons' sprites read (Icon21: menu/menu_4.tpf, 1024 x 512 DXT5, 11 levels), as the game hands it to
+// D3DX. EquIcon_2159's and EquIcon_2160's cells are empty in it; the Death Knell's bell and the Vigil Soapstone are laid
+// over their cells' blocks level by level, one after the other (the patches are built by tools/build_icons.py, see
+// icon_art.inc; at the smaller levels the two share a block, each laid over what is there).
 constexpr unsigned kAtlasSize = 699216;
 constexpr uint32_t kAtlasHash = 0xB4985C7C;  // FNV-1a
 constexpr DWORD kFilterNone = 1;            // D3DX_FILTER_NONE
@@ -1483,7 +1484,7 @@ bool is_atlas(const void* data, unsigned size) {
     }
 }
 
-bool paint_level(IDirect3DTexture9* t, const KnellLevel& lv, LoadFromMemoryFn load) {
+bool paint_level(IDirect3DTexture9* t, const IconLevel& lv, const unsigned char* icon_art, LoadFromMemoryFn load) {
     D3DSURFACE_DESC d{};
     if (FAILED(t->GetLevelDesc(lv.level, &d)) || d.Format != D3DFMT_DXT5 || d.Width != (1024u >> lv.level) ||
         d.Height != (512u >> lv.level)) {
@@ -1504,8 +1505,8 @@ bool paint_level(IDirect3DTexture9* t, const KnellLevel& lv, LoadFromMemoryFn lo
         }
     }
     t->UnlockRect(lv.level);
-    // The bell over what is there (straight alpha).
-    const uint8_t* art = kKnellArt + lv.offset;
+    // The art over what is there (straight alpha).
+    const uint8_t* art = icon_art + lv.offset;
     for (int i = 0; i < w * h; ++i) {
         const float sa = art[i * 4 + 3] / 255.0f, da = px[i * 4 + 3] / 255.0f;
         const float oa = sa + da * (1 - sa);
@@ -1523,9 +1524,9 @@ bool paint_level(IDirect3DTexture9* t, const KnellLevel& lv, LoadFromMemoryFn lo
     return SUCCEEDED(hr);
 }
 
-bool paint_level_guarded(IDirect3DTexture9* t, const KnellLevel& lv, LoadFromMemoryFn load) {
+bool paint_level_guarded(IDirect3DTexture9* t, const IconLevel& lv, const unsigned char* art, LoadFromMemoryFn load) {
     __try {
-        return paint_level(t, lv, load);
+        return paint_level(t, lv, art, load);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -1706,21 +1707,23 @@ void render() {
         const HMODULE d3dx = GetModuleHandleW(L"d3dx9_43.dll");
         load = d3dx ? reinterpret_cast<LoadFromMemoryFn>(GetProcAddress(d3dx, "D3DXLoadSurfaceFromMemory")) : nullptr;
     }
-    int painted = 0;
-    if (load) {
-        for (const KnellLevel& lv : kKnellLevels) {
-            if (!paint_level_guarded(t, lv, load)) break;
-            ++painted;
+    for (const IconArt& icon : kIcons) {
+        int painted = 0;
+        if (load) {
+            for (int i = 0; i < icon.count; ++i) {
+                if (!paint_level_guarded(t, icon.levels[i], icon.art, load)) break;
+                ++painted;
+            }
+        }
+        if (painted == icon.count) {
+            LOG_INFO("[coop] %s: its icon is painted into the menu atlas (%d levels)", icon.name, painted);
+        } else if (!g_icon_failed) {
+            g_icon_failed = true;
+            LOG_ERROR("[coop] %s: its icon could not be painted (%d level(s) done%s)", icon.name, painted,
+                      load ? "" : "; no D3DXLoadSurfaceFromMemory");
         }
     }
     t->Release();
-    if (painted == static_cast<int>(sizeof(kKnellLevels) / sizeof(kKnellLevels[0]))) {
-        LOG_INFO("[coop] Death Knell: its icon is painted into the menu atlas (%d levels)", painted);
-    } else if (!g_icon_failed) {
-        g_icon_failed = true;
-        LOG_ERROR("[coop] Death Knell: its icon could not be painted (%d level(s) done%s)", painted,
-                  load ? "" : "; no D3DXLoadSurfaceFromMemory");
-    }
 }
 
 }  // namespace coop::knell

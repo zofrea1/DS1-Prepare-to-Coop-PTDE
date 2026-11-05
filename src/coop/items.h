@@ -2,8 +2,8 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #pragma once
 
-// The seamless co-op items (goods 389000-389008), as in Remastered Seamless Co-op, and the Death Knell (389009, 1.5.0,
-// knell.cpp): extra EquipParamGoods rows
+// The seamless co-op items (goods 389000-389008), as in Remastered Seamless Co-op, and Prepare to Co-op's own (1.5.0:
+// the Death Knell, knell.cpp; the Bloody Mary; the Vigil Soapstone): extra EquipParamGoods rows
 // served by the goods param getter, their texts through the FMG hook, whether they can be used decided in the
 // game's own item check (0xEADCA0), and their effect caught in PlayerIns::UseGoods. They behave like any other
 // item: equipped to a quick slot, used with the item animation, refused (greyed out) when not usable.
@@ -26,8 +26,9 @@ enum Id : int32_t {
     kParchment = 389008,  // Parchment of Deliverance: revive certain NPCs
     kKnell = 389009,      // Death Knell (1.5.0): go to another co-op player, for a soul level (knell.cpp)
     kBloody = 389010,     // Bloody Mary (1.5.0): the session's deaths strengthen its enemies (key item, never used)
+    kVigil = 389011,      // Vigil Soapstone (1.5.0): a summon sign where one stands, for the others' Death Knells
     kFirst = kHost,
-    kLast = kBloody,
+    kLast = kVigil,
 };
 
 // The Parchment's yes/no dialog (event text FMG id), answered with the soul cost.

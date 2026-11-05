@@ -2,7 +2,7 @@
 the game's own goods icons (80 x 90, a soft shadow at the lower right). Painted at 4x and scaled down.
 
 usage: paint_death_knell.py <out.png> [preview.png]   (the shipped art is assets/DeathKnell.png)
-Then run build_death_knell_icon.py and rebuild. Needs numpy, scipy and Pillow.
+Then run build_icons.py and rebuild. Needs numpy, scipy and Pillow.
 """
 # SPDX-License-Identifier: GPL-3.0-or-later
 import math

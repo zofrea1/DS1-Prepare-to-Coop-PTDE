@@ -124,6 +124,15 @@ const Def kDefs[kCount] = {
      L"A blood-red flower that drinks from every death in the\nworld it grows in.\n\nOne blooms for everyone in the "
      L"session with each\ndeath, and the world's enemies grow hardier. They\nwither when anyone rests at a bonfire, "
      L"or when the\nwhole party has fallen."},
+    // 1.5.0: the summon signs the Death Knell goes to (session.cpp), in place of the White Sign Soapstone, which stays
+    // the game's own. The soapstone's effect (sfx 80) and its animation (6, as these items'); icon 2160, the next empty
+    // cell of Icon21 after the Death Knell's: the soapstone's own icon in the Death Knell's cord and feathers
+    // (tools/paint_vigil_soapstone.py), painted in at run time as the bell is (knell.cpp).
+    {-91, 80, 2160, L"Vigil Soapstone", L"Leave a sign for the Death Knell",
+     L"Pale soapstone bound in the Death Knell's cord and\nhung with feathers of the bell's tail.\n\n"
+     L"The bell tolls for those gone hollow, yet it is\nthose who keep vigil that it finds.\n\n"
+     L"Use in a co-operative session to leave a sign\nwhere you stand. An ally who rings the Death Knell\n"
+     L"may come to it, for less than to your side. One\nsign is kept; a new one replaces the last."},
 };
 
 void put32(uint8_t* r, int off, int32_t v) { std::memcpy(r + off, &v, 4); }
@@ -175,7 +184,7 @@ __declspec(naked) void hk_goods_row() {
     __asm {
         cmp edi, 389000
         jl orig
-        cmp edi, 389010  // kLast
+        cmp edi, 389011  // kLast
         jg orig
         push edi
         call our_row

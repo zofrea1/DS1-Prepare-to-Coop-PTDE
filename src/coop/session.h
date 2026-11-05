@@ -117,7 +117,7 @@ bool in_session();
 uint64_t world_owner();
 bool hosting();
 bool guest();
-// Summon signs (1.5.0): a co-op player's White Sign Soapstone in a session leaves one where they stand, one per player
+// Summon signs (1.5.0): a co-op player's Vigil Soapstone in a session leaves one where they stand, one per player
 // (a new one replaces the last); the Death Knell can take anyone else there (knell.cpp).
 struct SummonSign {
     uint64_t owner = 0;
@@ -128,9 +128,9 @@ struct SummonSign {
 };
 // The other co-op players' signs (not ours).
 std::vector<SummonSign> summon_signs();
-// Our White Sign Soapstone: our sign where we stand, in place of the last. Null when placed, else why not.
+// Our Vigil Soapstone: our sign where we stand, in place of the last. Null when placed, else why not.
 const char* place_summon_sign();
-// Why the White Sign Soapstone cannot be used now (null: it can).
+// Why the Vigil Soapstone cannot be used now (null: it can).
 const char* sign_refusal();
 // The Death Knell took us somewhere: a Bloody Mary for the session (the host counts it; a guest's game tells the
 // host's). `sign`: to a summon sign. Added: our count went up (host); Asked: the host's game was told, and decides

@@ -39,6 +39,9 @@ works.
   together from the letters of the game's own YOU DIED and other text effects, © Bandai Namco Entertainment
   Inc. and FromSoftware, Inc. Not covered by the GNU GPL or the MIT License; included only so the mod can show
   it in the game after a team wipe.
+- **Vigil Soapstone icon** (`assets/VigilSoapstone.png`, and its part of `src/coop/icon_art.inc`): the game's own
+  White Sign Soapstone icon, recoloured and with feathers added, © Bandai Namco Entertainment Inc. and FromSoftware,
+  Inc. Not covered by the GNU GPL or the MIT License; included only so the mod can show the item in the game.
 
 Dark Souls is a trademark of Bandai Namco Entertainment Inc. This mod is not affiliated with or endorsed by
 Bandai Namco Entertainment or FromSoftware.

@@ -326,6 +326,26 @@ teammate, and treats the characters around them as the ones around us:
   the pass takes their character. While we follow a teammate the log says every 4 s what the characters of their
   block are doing here (alive, near them, entity active, asked for, groups meeting their floor's, updated, seen, with
   a model, and the nearest one), so a test shows which step leaves them out if they still are.
+  The 2026-11-05 evening test's log showed it: in New Londo seen from Darkroot the game asked for the enemies around
+  the teammate itself (8 asked, none by our rule), and they stayed at entity state 1, 107 of 108 with no model; once
+  we stood in New Londo, 10 went active with their models. State 1 waits for the character's resources (`vt+0x28` =
+  `0xE67E30`: its load machine `[chr+0x18]+0x10` at 6) and for its floor's collision in the physics world (`0xE68DB0`:
+  `[chr+0x29C]+0x50` == 6, unless `chr+0x1FD` bit 5). Which collisions are in the physics world is decided per block
+  every frame by `0xDD2EE0` (from `0xDD43A0`, called by the streaming update's `0xDD1C40` with FieldArea's streaming
+  floor `+0x3C` and the block we stand in `+0x14`): a collision is needed (`HitIns+0x7A`) when its groups meet the
+  masks the back-read around us wants, when it is our floor (fully), or, in the block we stand in, always (its low
+  collision). The teammate's block was none of these, so their enemies' floors were never loaded. While a teammate is
+  followed, that call for their block (`0xDD43D7`) is given their block as the one we stand in and their floor as the
+  one loaded fully: their block's collisions are in the physics world as they are for them, the enemies on them come
+  in, and their floor is ready for the Death Knell's warp.
+- **The hero light.** The point light the game keeps around the local player (`ChrLanternSlot`: its light from the
+  floor part's lantern id, `+0xC`, updated by `0xDF9960`, on while the character is active and seen and `chr+0x1FE`
+  bit 7 is set, which the in-game step sets on every player who is not a phantom) is attached in each update of the
+  local player only (`0xE79770`: `vt+0xA4` is "is the local player", then `0xE05760` with `eax` = `chr+0x2B4`, its
+  attach slots, and two variant flags), and a slot nobody asks for in a frame goes. Another player's character never
+  had one, so a teammate followed far from us stood in the dark (2026-11-05). While a teammate is followed their
+  character is given it every frame as the game gives ours (the plain light, both variants off); it goes by itself
+  when the view ends.
 - **The Death Knell** goes to a teammate standing in a map the view loaded for itself by a load, as it did before
   (`rules::view_only_floor`), not by a warp.
 

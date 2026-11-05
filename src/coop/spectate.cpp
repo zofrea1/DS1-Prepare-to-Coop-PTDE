@@ -104,6 +104,29 @@ constexpr uint32_t kChrPassOriginSite = 0x00E3F68A;
 //    only (FieldArea+0x14, compared at 0xE3F966 with chr+0x5C: every 5th frame near the origin, every 30th farther,
 //    else none): the teammate's block counts as ours there while the pass takes their character. While we follow a
 //    teammate the log says, every few seconds, what the characters of their block are doing here.
+//    The 2026-11-05 evening test's log: in New Londo seen from Darkroot the game asked for the enemies around them
+//    itself (8 asked, none by our rule), and they stayed at entity state 1, 107 of 108 with no model; standing in New
+//    Londo ourselves, 10 went active with their models. State 1 waits (0xE6AC50 case 1) for the character's resources
+//    (vt+0x28 = 0xE67E30: its load machine [chr+0x18]+0x10 at 6) and for its floor's collision in the physics world
+//    (0xE68DB0: [chr+0x29C]+0x50 == 6 for a character with a floor, unless chr+0x1FD bit 5). Which collisions are in
+//    the physics world is decided per block, every frame, by 0xDD2EE0 (from 0xDD43A0, called by the streaming update
+//    0xDD1C40 with FieldArea's streaming floor +0x3C and the block we stand in +0x14): a collision is needed (HitIns+0x7A)
+//    when its groups meet the masks the back-read around us wants, it is our floor (fully), or, in the block we stand
+//    in, always (its low collision). The teammate's block was none of these, so their enemies' floors were never
+//    loaded and the enemies never became active. While we follow a teammate, that call for their block is given their
+//    block as the one we stand in and their floor as the one fully loaded (the call at 0xDD43D7): their block's
+//    collisions are in the physics world as they are for them, the enemies on them come in, and their floor is ready
+//    for the Death Knell to warp onto.
+constexpr uint32_t kCollisionCallSite = 0x00DD43D7;   // call 0xDD2EE0 (fastcall; stack: block entry, the floor, block)
+constexpr uint32_t kCollisionDecide = 0x00DD2EE0;
+// The hero light: the point light the game keeps around the local player (ChrLanternSlot, its light from the floor's
+// lantern id, the part's +0xC, 0xDF9960) is attached in each update of the local player only (0xE79770: vt+0xA4 is "is
+// the local player", then 0xE05760 with eax = chr+0x2B4, its attach slots, and two variant flags), and a slot nobody
+// asks for in a frame goes (0xDF9960 clears its live bit). Another player's character never had one, so the teammate
+// we follow stood in the dark far from us (2026-11-05). While we follow a teammate their character is given it every
+// frame, as the game gives ours (the plain light: both variants off); it goes by itself when the view ends.
+constexpr uint32_t kAttachLantern = 0x00E05760;  // eax = chr+0x2B4, stdcall(variant 8, variant 0x10) ret 8
+constexpr uint32_t kChrAttach = 0x2B4;
 constexpr uint32_t kActivationCallSite = 0x00DE81F0;  // call 0xE3E870: stdcall(WorldChrMan) -> al, every entity ready
 constexpr uint32_t kActivation = 0x00E3E870;
 constexpr uint32_t kBlockTestSite = 0x00E3F966;       // mov ecx,[esp+0xA0] ; cmp [esi+0x5C],ecx (then jne 0xE3FC48)
@@ -428,6 +451,49 @@ __declspec(naked) void hk_chr_pass_origin() {
 // ---------------------------------------------------------------- the enemies around a far teammate
 volatile uint32_t g_view_block = kNoBlock;  // their floor's block while the pass takes their character
 bool g_block_test = false;                  // the pass's block test is patched (kBlockTestSite)
+// The collision decision for the followed teammate's block (kCollisionCallSite).
+bool g_collision_patched = false;
+volatile uint32_t g_collision_block = kNoBlock;  // their floor's block (kNoBlock: none)
+volatile uint32_t g_collision_floor = 0;         // their floor
+uint32_t g_collision_decide = kCollisionDecide;
+
+// At 0xDD43D7, the call deciding one block's collisions: [esp+4] the block's entry, [esp+8] the floor loaded fully,
+// [esp+0xC] the block we stand in. For the followed teammate's block (not ours), theirs.
+__declspec(naked) void hk_collision_block() {
+    __asm {
+        push eax
+        mov eax, dword ptr [esp + 8]      // the block's entry
+        mov eax, dword ptr [eax + 4]
+        mov eax, dword ptr [eax + 0x10]   // its block
+        cmp eax, g_collision_block
+        jne go
+        cmp eax, dword ptr [esp + 0x10]   // ours already
+        je go
+        mov dword ptr [esp + 0x10], eax   // their block counts as the one we stand in
+        mov eax, g_collision_floor
+        test eax, eax
+        jz go
+        mov dword ptr [esp + 0xC], eax    // and their floor is the one loaded fully
+    go:
+        pop eax
+        jmp dword ptr [g_collision_decide]
+    }
+}
+
+// The hero light on the character we follow, for this frame.
+void give_lantern(uint32_t chr) {
+    const uint32_t attach = chr + kChrAttach;
+    __try {
+        __asm {
+            push 0
+            push 0
+            mov eax, attach
+            mov ecx, kAttachLantern
+            call ecx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 int g_asked_more = 0;                       // characters of their block our rule asked for this frame (the game had not)
 
 // WorldChrMan's character sets: {set, block, WorldBlockChr} at +0xE4, the count at +0xE0; a set is {count, entries of
@@ -561,9 +627,10 @@ void view_block_report() {
             }
         }
     }
-    char nearest[160] = "none alive";
+    char nearest[220] = "none alive";
     if (best_chr) {
-        uint32_t ent = 0, state = 0, ask = 0;
+        uint32_t ent = 0, state = 0, ask = 0, loader = 0, loaded = 0xFFFFFFFF, floor = 0;
+        uint8_t physics = 0xFF;
         int32_t rate = 0;
         read32(best_chr + 0xC, &ent);
         if (ent) {
@@ -571,8 +638,14 @@ void view_block_report() {
             read32(ent + 0xC, &ask);
         }
         read32(best_chr + 0xF4, reinterpret_cast<uint32_t*>(&rate));
-        std::snprintf(nearest, sizeof(nearest), "%.0f m from them: entity %u (asked %u), rate %d, groups %s their floor's",
-                      best, state, ask, rate, overlaps(best_chr + 0x264, hit + 0x20) ? "meet" : "miss");
+        if (read32(best_chr + 0x18, &loader) && loader) read32(loader + 0x10, &loaded);
+        if (read32(best_chr + 0x29C, &floor) && floor) read8(floor + 0x50, &physics);
+        std::snprintf(nearest, sizeof(nearest),
+                      "%.0f m from them: entity %u (asked %u), rate %d, groups %s their floor's, resources %d (6 ready), "
+                      "its floor %s",
+                      best, state, ask, rate, overlaps(best_chr + 0x264, hit + 0x20) ? "meet" : "miss",
+                      static_cast<int>(loaded),
+                      !floor ? "none" : physics == 6 ? "in the physics world" : "not in the physics world");
     }
     LOG_INFO("[coop] Spectating: the followed teammate's block %u here (our block %d; their floor streams: %s): %u "
              "characters, %d alive, %d within 40 m; entity active %d, asked for %d (%d by the view's rule this frame), "
@@ -650,6 +723,8 @@ void view_extras() {
     if (!chr) {
         g_pass_origin = 0;
         g_view_block = kNoBlock;
+        g_collision_block = kNoBlock;
+        g_collision_floor = 0;
         fix_own_rate(false);
         g_drawn_for = 0;
         return;
@@ -729,6 +804,15 @@ void view_extras() {
                            read8(their_floor + 0xF, &their_block) && their_block < 64
                        ? their_block
                        : kNoBlock;
+    if (g_pass_origin && g_collision_patched && read32(chr + 0x29C, &their_floor) && their_floor &&
+        read8(their_floor + 0xF, &their_block) && their_block < 64) {
+        g_collision_floor = their_floor;
+        g_collision_block = their_block;
+    } else {
+        g_collision_block = kNoBlock;
+        g_collision_floor = 0;
+    }
+    give_lantern(chr);
     fix_own_rate(g_pass_origin != 0);
     if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why) || (!why && streamed != g_drawn_streamed)) {
         g_drawn_for = chr;
@@ -962,6 +1046,12 @@ bool install() {
     if (g_origin_patched) {
         const bool asks = redirect_call(kActivationCallSite, kActivation, reinterpret_cast<void*>(&hk_activation));
         g_block_test = patch_call(kBlockTestSite, block_k, sizeof(block_k), reinterpret_cast<void*>(&hk_block_test));
+        g_collision_patched =
+            redirect_call(kCollisionCallSite, kCollisionDecide, reinterpret_cast<void*>(&hk_collision_block));
+        if (!g_collision_patched) {
+            LOG_ERROR("[coop] Spectating: the collision decision did not match this build (the enemies around a far "
+                      "teammate stay out)");
+        }
         if (!asks || !g_block_test) {
             LOG_ERROR("[coop] Spectating: the character activation (%s) or the pass's block test (%s) did not match this "
                       "build (the enemies around a far teammate may stay out)",

@@ -298,6 +298,18 @@ teammate, and treats the characters around them as the ones around us:
   then failed the test far from them and was updated every fifth frame (its LOD path, `vt+0xA0`), so the camera,
   which turns by our character's input, barely turned and the Death Knell's prompt missed the button (2026-11-04):
   our own rate is fixed at every frame meanwhile (`chr+0x1FD` bit 0, `+0xF4` = 0), and put back after.
+- **Their area's look.** The colour grading and the other draw parameters that follow the player come from the floor
+  of one character, the debug "player" (`[0x137D648]+0xEC`) or else the local player: the in-game step (`0xEFE4C3`)
+  hands its floor (`chr+0x29C`) to `0xEAF340`, which sets the lens flare, shadow, depth of field, tone map and tone
+  correction ids of that floor's MSB part (`HitIns+8`: the part's ids at `+0x58` `+7`..`+0xB`, made area << 8 | id
+  with the area at `HitIns+0xE` by `0x42E430`), each blended in over 0.5 s (`0x10002F0`), and puts the character's
+  `+0x294` (the floor's value SetFloor writes, `0xE6E68A`) in the draw state's `+0x38`. Every area's
+  `a%02d_DrawParam.parambnd` is loaded with the world (`0xDE7AA0`), so a floor in another area gives that area's
+  look. Far away the teammate's area was drawn with ours (2026-11-05: "the color grading / the lighting looks
+  incorrect when spectating someone from far away"): while a teammate with a floor is followed (the Death Knell's
+  view or after our death) both reads take their character (`0xEFE4C9` `mov eax,[esi+0xEC]`, `0xEFE4EF`
+  `mov esi,[esi+0xEC]`), the debug player still first, so we see their area as they do; without a floor under them,
+  ours as before.
 - **The Death Knell** goes to a teammate standing in a map the view loaded for itself by a load, as it did before
   (`rules::view_only_floor`), not by a warp.
 

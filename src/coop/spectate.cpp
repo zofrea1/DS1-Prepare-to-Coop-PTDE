@@ -37,6 +37,17 @@ constexpr int kLocalPlayer = 10000;            // LOCAL_PLAYER
 // sets it, a revival clears it). While we spectate, the follow camera gets the teammate, and the death camera's
 // flag reads clear for that character only; the game's own value stays as it is for when the death goes ahead.
 constexpr uint32_t kCamChrSite = 0x00EFDB1F;   // mov edx,[0x137D648] ; mov ecx,[edx+0xEC]
+// The area's look: later in the same step (0xEFE4C3) the frame's draw parameters are taken from the floor of the same
+// character, the debug "player" or else the local player: 0xEAF340 (eax = its floor, chr+0x29C) sets the lens flare,
+// shadow, depth of field, tone map and tone correction (the colour grading) of that floor's MSB part (HitIns+8: its
+// part's ids at +0x58 +7..+0xB, made area << 8 | id with the area at HitIns+0xE by 0x42E430), each blended in over
+// 0.5 s (0x10002F0); and the draw state's +0x38 takes the character's +0x294 (SetFloor's value of the floor,
+// 0xE6E68A). A floor in another area takes that area's DrawParam (every area's a%02d_DrawParam.parambnd is loaded
+// with the world, 0xDE7AA0), so the far teammate's floor gives their area's grading. While we follow a teammate both
+// reads take them, as the camera does: the look of their area was ours before (2026-11-05: "the color grading / the
+// lighting looks incorrect when spectating someone from far away").
+constexpr uint32_t kDrawChrSite = 0x00EFE4C9;     // mov eax,[esi+0xEC] (esi = [0x137D648]): the floor's character
+constexpr uint32_t kDrawChrSite2 = 0x00EFE4EF;    // mov esi,[esi+0xEC]: the same for +0x294
 constexpr uint32_t kCamDeadSite = 0x00F1457A;  // mov al,[esi+0x40] ; setne [esp+0x6F]  (esi = WorldChrMan)
 constexpr uint32_t kDebugChrVar = 0x0137D648;
 constexpr uint32_t kWorldChrManVar = 0x0137D644;  // +0x24 player characters, +0x28 their array (0x20 each)
@@ -198,6 +209,62 @@ uint32_t __cdecl camera_chr() {
     if (!want || !player_character(want)) return 0;
     g_followed = want;
     return want;
+}
+
+// The character whose floor gives the frame's draw parameters (kDrawChrSite): the game's debug choice as before, else
+// the teammate the camera follows while they have a floor, else 0 (the game then takes the local player, as it did).
+uint32_t __cdecl draw_chr(uint32_t debug_chr) {
+    if (debug_chr) return debug_chr;
+    const uint32_t want = g_hold ? g_target : g_knell_chr;
+    uint32_t hit = 0;
+    uint8_t area = 0;
+    const bool floor = want && player_character(want) && read32(want + 0x29C, &hit) && hit && read8(hit + 0xE, &area);
+    const uint32_t chr = floor ? want : 0;
+    // The log notes a change (this runs twice a frame).
+    static uint32_t s_chr = 0;
+    static int s_area = -1;
+    if (chr != s_chr || (chr && area != s_area)) {
+        if (chr) {
+            LOG_INFO("[coop] Spectating: the colour grading and lighting are the followed teammate's (area %d, from "
+                     "their floor)", area);
+        } else if (s_chr) {
+            LOG_INFO("[coop] Spectating: the colour grading and lighting are ours again");
+        }
+        s_chr = chr;
+        s_area = chr ? area : -1;
+    }
+    return chr;
+}
+
+// mov eax,[esi+0xEC]
+__declspec(naked) void hk_draw_chr() {
+    __asm {
+        push ecx
+        push edx
+        push dword ptr [esi + 0xEC]
+        call draw_chr
+        add esp, 4
+        pop edx
+        pop ecx
+        ret
+    }
+}
+
+// mov esi,[esi+0xEC]
+__declspec(naked) void hk_draw_chr2() {
+    __asm {
+        push eax
+        push ecx
+        push edx
+        push dword ptr [esi + 0xEC]
+        call draw_chr
+        add esp, 4
+        mov esi, eax
+        pop edx
+        pop ecx
+        pop eax
+        ret
+    }
 }
 
 __declspec(naked) void hk_cam_chr() {
@@ -685,6 +752,16 @@ bool install() {
              patch_call(kCamDeadSite, dead_k, sizeof(dead_k), reinterpret_cast<void*>(&hk_cam_dead)) &&
              patch_call(kCamChrSite, chr_k, sizeof(chr_k), reinterpret_cast<void*>(&hk_cam_chr));
     if (!g_view) LOG_ERROR("[coop] Spectating: the camera code did not match this build (the camera stays on us)");
+    static const uint8_t draw_k[6] = {0x8B, 0x86, 0xEC, 0x00, 0x00, 0x00};   // mov eax,[esi+0xEC]
+    static const uint8_t draw2_k[6] = {0x8B, 0xB6, 0xEC, 0x00, 0x00, 0x00};  // mov esi,[esi+0xEC]
+    const bool look = g_view && bytes_match(kDrawChrSite, draw_k, sizeof(draw_k)) &&
+                      bytes_match(kDrawChrSite2, draw2_k, sizeof(draw2_k)) &&
+                      patch_call(kDrawChrSite, draw_k, sizeof(draw_k), reinterpret_cast<void*>(&hk_draw_chr)) &&
+                      patch_call(kDrawChrSite2, draw2_k, sizeof(draw2_k), reinterpret_cast<void*>(&hk_draw_chr2));
+    if (g_view && !look) {
+        LOG_ERROR("[coop] Spectating: the draw parameter pick did not match this build (a far teammate's area keeps "
+                  "our colour grading)");
+    }
     static const uint8_t tint_k[5] = {0x8A, 0x40, 0x14, 0x24, 0x01};
     if (!patch_call(kDeathTintTest, tint_k, sizeof(tint_k), reinterpret_cast<void*>(&hk_death_tint))) {
         LOG_ERROR("[coop] Spectating: the death tint test did not match this build (the picture greys while spectating)");

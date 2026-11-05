@@ -150,6 +150,8 @@ int view_map(int map);
 // The character stands on a floor of a block the view loaded for itself (not in use before it asked), as long as that
 // block stays loaded and we have not come into it ourselves.
 bool view_only_floor(uint32_t chr);
+// The view's own blocks forgotten (the session ended, or the trip home began: the loads that follow are ours).
+void view_loaded_clear();
 // A collision (HitIns) loaded enough to stand on, as the game asks of the floor after a load (0xDE3000).
 bool floor_ready(uint32_t hit);
 // A floor collision named the same way in every game: its map (area << 24 | block << 16) and its place among that

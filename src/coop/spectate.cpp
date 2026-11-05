@@ -124,6 +124,17 @@ uint32_t g_cast_chr = 0;
 double g_cast_at = 0;
 const char* g_cast_why = "";
 const char* g_give_why = "";  // why the reported floor was last not given (logged once per change)
+// The reported floor we last gave and when: when their character's own physics takes another floor back within
+// kTakenBackWithin, it touches that collision here (a seam between two maps, both loaded), and the view leaves its floor
+// to the physics for kSeamHold unless it has none at all. Both games' floors were right there, and the view and the
+// physics took turns every frame for 0.1 s (2026-11-04 22:04:15, New Londo and Darkroot).
+uint32_t g_gave_chr = 0;
+uint32_t g_gave_hit = 0;
+double g_gave_at = 0;
+double g_seam_until = 0;
+uint32_t g_gave_logged = 0;  // the floor the last "given" line was about
+constexpr double kTakenBackWithin = 0.5;
+constexpr double kSeamHold = 2.0;
 constexpr double kCastEvery = 0.2;
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -412,15 +423,29 @@ void view_extras() {
         read32(chr + 0x29C, &have);
         const bool other_map = have && read8(have + 0xF, &have_block) && read8(reported + 0xF, &their_block) &&
                                have_block != their_block;
-        if (have != reported && (why || other_map || !rules::floor_ready(have) || rules::view_only_floor(chr))) {
+        if (g_gave_chr == chr && g_gave_hit && have && have != g_gave_hit && now() - g_gave_at < kTakenBackWithin) {
+            if (now() >= g_seam_until) {
+                LOG_INFO("[coop] Spectating: the followed teammate's character took its own floor back (its physics "
+                         "touches it here): left to it for %.0f s", kSeamHold);
+            }
+            g_seam_until = now() + kSeamHold;
+            g_gave_hit = 0;
+        }
+        const bool stale = other_map || !rules::floor_ready(have) || rules::view_only_floor(chr);
+        if (have != reported && (why || (stale && now() >= g_seam_until))) {
             bool changed = false;
             const char* give_why = rules::give_floor(chr, reported, &changed);
             if (changed) {
                 g_cast_chr = chr;
+                g_gave_chr = chr;
+                g_gave_hit = reported;
+                g_gave_at = now();
                 const char* was = why;
                 why = rules::draw_from(chr, g_streaming, &streamed);
                 static int lines = 0;
-                if ((was || other_map) && ++lines <= 60) {
+                const bool tell = reported != g_gave_logged;
+                g_gave_logged = reported;
+                if ((was || other_map) && tell && ++lines <= 60) {
                     LOG_INFO("[coop] Spectating: the followed teammate's character given the floor their game reports "
                              "(map %08X, collision %d; %s)", static_cast<uint32_t>(mate->floor_map), mate->floor_index,
                              was ? "it had none here" : "its own was in another map");

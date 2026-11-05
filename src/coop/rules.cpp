@@ -3527,7 +3527,13 @@ uint32_t g_world_res_update = kWorldResUpdate;
 // teammate on a map boundary reported the Undead Burg for a moment and Firelink again, the view asked anew for
 // Firelink, found it "in use" (its own doing) and took it for ours; the Death Knell then warped onto a floor there
 // whose collision was not loaded, and the player fell 53 m to their death (2026-11-04, 21:00:44).
-uint64_t g_view_loaded = 0;  // bit per block index
+// A block's bit is set from the view's first ask until the block has left "in use" (seen in use, then not), and
+// also kept while the view still wants it before it arrives; it goes when our own floor is in that block, or when the
+// session ends. It is kept every frame with WorldRes's update (Grok e33ae84d: it was dropped in the same call that set
+// it, as a block being loaded is not in use yet, so no block the view loaded counted as the view's).
+uint64_t g_view_loaded = 0;   // bit per block index
+uint64_t g_view_arrived = 0;  // of those, the blocks seen in use since
+void view_loaded_tick(uint32_t wr);
 struct ViewWant {
     int map = -1;
     int block = -1;
@@ -3547,6 +3553,7 @@ void __stdcall before_world_res_update(uint32_t wr) {
             want_block(wr, g_view_want.block);
         }
     }
+    view_loaded_tick(wr);
 }
 
 __declspec(naked) void hk_world_res_update() {
@@ -4122,6 +4129,40 @@ int install_one(const char* what, bool ok) {
     return ok ? 0 : 1;
 }
 
+// Every WorldRes update (and on each of the view's asks): the block the view wants for itself is marked; a marked
+// block stays so until it has been in use and is not any more, or the view stops waiting for one that never came, or
+// our own floor is in it (we came there ourselves: it is ours).
+void view_loaded_tick(uint32_t wr) {
+    if (!wr) return;
+    const int want = g_view_want.ours ? g_view_want.block : -1;
+    if (want >= 0 && want < 64) g_view_loaded |= 1ull << want;
+    if (!g_view_loaded) return;
+    int own = -1;
+    const uint32_t me = game::player();
+    uint32_t hit = 0;
+    uint8_t block = 0xFF;
+    if (me && !game::loading() && read32(me + 0x29C, &hit) && hit && read8(hit + 0xF, &block)) {
+        own = static_cast<int8_t>(block);
+    }
+    for (int b = 0; b < 64; ++b) {
+        const uint64_t bit = 1ull << b;
+        if (!(g_view_loaded & bit)) continue;
+        const bool in_use = block_state(wr, b) == static_cast<int>(kBlockInUse);
+        if (in_use) g_view_arrived |= bit;
+        bool drop = false;
+        if (b == own) {
+            drop = true;  // we came there ourselves: it is ours now
+            if (b == want) g_view_want.ours = false;
+        } else if (!in_use) {
+            drop = (g_view_arrived & bit) != 0 || b != want;  // it left in use, or the view no longer waits for it
+        }
+        if (drop) {
+            g_view_loaded &= ~bit;
+            g_view_arrived &= ~bit;
+        }
+    }
+}
+
 }  // namespace
 
 bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
@@ -4144,19 +4185,10 @@ constexpr uint32_t kFaFloorOnce = 0x34;
 constexpr uint32_t kFaStreamExtra = 0x44;
 constexpr int kFaStreamExtraSlots = 8;
 constexpr uint32_t kHitStreams = 0x78;  // byte: bit 2, the floor adds its groups to the streaming mask (0xDE2AE3)
-// The blocks the view loaded for itself stay marked until they are let go (not in use any more) or our own floor is
-// in one of them (we came there ourselves).
-void view_loaded_tick(uint32_t wr) {
-    if (!g_view_loaded || !wr) return;
-    int own = -1;
-    const uint32_t me = game::player();
-    uint32_t hit = 0;
-    uint8_t block = 0xFF;
-    if (me && read32(me + 0x29C, &hit) && hit && read8(hit + 0xF, &block)) own = static_cast<int8_t>(block);
-    for (int b = 0; b < 64; ++b) {
-        if (!((g_view_loaded >> b) & 1)) continue;
-        if (b == own || block_state(wr, b) != static_cast<int>(kBlockInUse)) g_view_loaded &= ~(1ull << b);
-    }
+void view_loaded_clear() {
+    g_view_loaded = 0;
+    g_view_arrived = 0;
+    g_view_want.ours = false;
 }
 
 int view_map(int map) {
@@ -4348,12 +4380,13 @@ bool map_in_use(int map) {
 }
 
 bool view_only_floor(uint32_t chr) {
-    view_loaded_tick(world_res());
     uint32_t hit = 0;
     uint8_t block = 0xFF;
     if (!read32(chr + 0x29C, &hit) || !hit || !read8(hit + 0xF, &block)) return false;
     const int b = static_cast<int8_t>(block);
-    return b >= 0 && b < 64 && ((g_view_loaded >> b) & 1) != 0;
+    if (b < 0) return false;
+    if (g_view_want.ours && b == g_view_want.block) return true;
+    return b < 64 && ((g_view_loaded >> b) & 1) != 0;
 }
 
 // The game's own test of a floor to stand on after a load (0xDE3000): its collision in the physics world (+0x50 state

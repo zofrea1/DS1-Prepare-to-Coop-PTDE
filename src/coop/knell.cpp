@@ -1681,6 +1681,7 @@ void joined() {
 }
 
 void left_session(const char* why) {
+    rules::view_loaded_clear();  // the loads that follow are ours, whatever the view had loaded
     if (g_join_at <= 0) return;
     g_join_at = 0;
     LOG_INFO("[coop] Joined: the summon arrival is dropped (%s)", why);

@@ -152,6 +152,14 @@ int view_map(int map);
 bool view_only_floor(uint32_t chr);
 // A collision (HitIns) loaded enough to stand on, as the game asks of the floor after a load (0xDE3000).
 bool floor_ready(uint32_t hit);
+// A floor collision named the same way in every game: its map (area << 24 | block << 16) and its place among that
+// map's collisions. floor_id: false when the collision is none of a block in use here. floor_by_id: the collision, 0
+// when its map is not in use here (or the place is not one of its collisions).
+bool floor_id(uint32_t hit, int* map, int* index);
+uint32_t floor_by_id(int map, int index);
+// The character given `hit` as its floor (SetFloor, as find_floor does). Null when it has it (`changed` when given
+// just now), else why not.
+const char* give_floor(uint32_t chr, uint32_t hit, bool* changed);
 // Spectating: the collision under another player's character (a shape cast down from it, as the game finds the local
 // player's floor), given to it as its floor (SetFloor) when it is a block's in use and not its floor already. Null when
 // it has that floor (`changed` when it was given just now), else why not.

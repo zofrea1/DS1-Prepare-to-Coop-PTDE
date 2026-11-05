@@ -260,6 +260,15 @@ struct InfoMore4 {
     uint8_t max_players;  // 1.4.0: the players the sender's game can hold (MaxPlayers, players.cpp); 0 = the game's 4
     uint8_t spare[2];
 };
+// 1.5.0, behind InfoMore4 the same way: the floor collision the sender's game has them on, as its map and its place
+// among that map's collisions (rules::floor_id; the same in every game, which loads the same map file). A game that
+// spectates them across a map boundary has no floor of its own for their character there (its physics never touched
+// that map's collisions, which were not loaded): with this it draws and streams the world from where they stand.
+struct InfoMore5 {
+    InfoMore4 more4;
+    int32_t floor_map;    // -1 none
+    int32_t floor_index;
+};
 struct BonfireMsg {
     Header h;
     int32_t bonfire;
@@ -560,6 +569,9 @@ double g_last_info = 0;
 // more a moment later in case that one is lost, not with the next report of the second (1.5.0; see kPeerAliveFor).
 bool g_info_dead = false;
 int g_info_event = 0;
+int g_info_floor_map = -1;  // our floor as our last report gave it (a change goes out within kFloorReportGap)
+int g_info_floor_index = -1;
+constexpr double kFloorReportGap = 0.25;
 double g_info_again_at = 0;
 double g_last_ping = 0;
 int g_hello_tries = 0;
@@ -3425,8 +3437,21 @@ int32_t reported_event_anim() {
     return held < 0 ? 1 : held;
 }
 
+// Our own floor collision as the report gives it (-1 none).
+void own_floor_id(int* map, int* index) {
+    *map = -1;
+    *index = -1;
+    const uint32_t me = game::player();
+    uint32_t hit = 0;
+    if (!me || game::loading() || !read32(me + 0x29C, &hit) || !hit || !rules::floor_id(hit, map, index)) {
+        *map = -1;
+        *index = -1;
+    }
+}
+
 void send_info() {
-    InfoMore4 more4{};
+    InfoMore5 more5{};
+    InfoMore4& more4 = more5.more4;
     InfoMore3& more3 = more4.more3;
     InfoMore2& more2 = more3.more2;
     InfoMore& more = more2.more;
@@ -3469,7 +3494,17 @@ void send_info() {
     more3.bones = items::count(kHomewardBone);
     more4.disguised = me && !game::loading() && world::has_effect(me, kChameleonEffect) ? 1 : 0;
     more4.max_players = static_cast<uint8_t>(g_cfg.max_players);
-    broadcast(more4, false);
+    own_floor_id(&g_info_floor_map, &g_info_floor_index);
+    more5.floor_map = g_info_floor_map;
+    more5.floor_index = g_info_floor_index;
+    broadcast(more5, false);
+}
+
+// Our floor differs from what our last report said.
+bool floor_changed() {
+    int map = -1, index = -1;
+    own_floor_id(&map, &index);
+    return map != g_info_floor_map || index != g_info_floor_index;
 }
 
 // What send_info would report now for our death and our event animation differs from what it last sent.
@@ -4258,6 +4293,12 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             InfoMore4 more4{};
             p->disguised = as(&more4) && more4.disguised != 0;
             if (as(&more4) && more4.max_players >= 4) p->max_players = more4.max_players;
+            InfoMore5 more5{};
+            if (as(&more5)) {
+                p->floor_map = more5.floor_map;
+                p->floor_index = more5.floor_index;
+                p->floor_at = now();
+            }
             p->boss_fight = more_ok && more.boss_fight != 0;
             p->team_respawn = more_ok && more.team_respawn != 0;
             if (more_ok && (more.respawn & kRespawnPhase) == kRespawnWent && g_role == Role::Guest && from == g_host) {
@@ -5918,6 +5959,10 @@ void tick() {
                     t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
                     t.cutscene = p.event_anim == kReportCutscene && now() - p.last_seen <= 5.0;
                     t.loading = p.event_anim == kReportLoading && now() - p.last_seen <= 5.0;
+                    if (p.floor_at > 0 && now() - p.floor_at <= 3.0) {
+                        t.floor_map = p.floor_map;
+                        t.floor_index = p.floor_index;
+                    }
                     team.push_back(t);
                 }
                 all_dead = false;  // the co-op team's wipe rules are not ours
@@ -5938,6 +5983,10 @@ void tick() {
                     t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
                     t.cutscene = p.event_anim == kReportCutscene && now() - p.last_seen <= 5.0;
                     t.loading = p.event_anim == kReportLoading && now() - p.last_seen <= 5.0;
+                    if (p.floor_at > 0 && now() - p.floor_at <= 3.0) {
+                        t.floor_map = p.floor_map;
+                        t.floor_index = p.floor_index;
+                    }
                     team.push_back(t);
                 }
             }
@@ -5991,7 +6040,8 @@ void tick() {
     if (!g_flag_queue.empty()) flush_flags();
     if (g_role != Role::None && g_lobby) {
         const bool changed = now() - g_last_info > 0.1 && info_changed();
-        if (changed || now() - g_last_info > 1.0 || (g_info_again_at > 0 && now() >= g_info_again_at)) {
+        const bool floor = now() - g_last_info > kFloorReportGap && floor_changed();
+        if (changed || floor || now() - g_last_info > 1.0 || (g_info_again_at > 0 && now() >= g_info_again_at)) {
             g_info_again_at = changed ? now() + 0.15 : 0;
             g_last_info = now();
             send_info();

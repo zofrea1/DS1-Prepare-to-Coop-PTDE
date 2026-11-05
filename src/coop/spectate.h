@@ -29,6 +29,9 @@ struct Teammate {
     bool boss_fight = false;  // a boss gauge is up in their game
     bool cutscene = false;    // a cutscene plays in their game (where they stand and their map do not go together)
     bool loading = false;     // they are in a load (no character of theirs anywhere; their position is not yet theirs)
+    // The floor collision their own game has them on (rules::floor_by_id), -1 unknown; as fresh as their reports.
+    int floor_map = -1;
+    int floor_index = -1;
 };
 
 bool install();

@@ -1373,12 +1373,18 @@ void going_tick() {
         g_state = State::Idle;
         return;
     }
-    g_dest.map = t->map;
+    // The map of the floor their game has them on when they report it: on a map boundary the game's own map can still
+    // name the one they came from (the elevator between Firelink and the Undead Burg).
+    g_dest.map = valid_map(t->floor_map) ? t->floor_map : t->map;
+    if (g_dest.map != t->map) {
+        LOG_INFO("[coop] Death Knell: %s stands on a floor of map %08X (their game's map is %08X): loading into that "
+                 "one", narrow(t->name).c_str(), static_cast<uint32_t>(g_dest.map), static_cast<uint32_t>(t->map));
+    }
     std::copy(std::begin(t->pos), std::end(t->pos), g_dest.pos);
     float angle = 0;
     game::Vec3 mine{};
     game::position(&mine, &angle);
-    load_into(t->map, g_dest.pos, angle, t->name);
+    load_into(g_dest.map, g_dest.pos, angle, t->name);
 }
 
 void loading_tick() {

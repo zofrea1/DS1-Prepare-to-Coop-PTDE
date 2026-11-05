@@ -3404,6 +3404,32 @@ uint32_t floor_cast(uint32_t chr) {
     return floor_cast_from_start();
 }
 
+// Every block's collisions (HitIns, 0x84 bytes each, built in place by 0xDD64F0 from the map file's collision parts in
+// their order): the collision manager [0x137D6B8] +0x24 holds one 0x68-byte entry per block, in WorldRes's order (the
+// draw and streaming masks are written to it by block index, 0xDE2C60 and 0xDE7C30), with the count at +0x3C and the
+// collisions at +0x40 (0xDD2EE0, 0xDD3EB0). The HitIns are there for as long as their block is in use, whether or
+// not their shapes are in the physics world (+0x50/+0x68), and their +0xF is that block.
+constexpr uint32_t kHitManVar = 0x0137D6B8;
+constexpr uint32_t kHitManBlocks = 0x24;
+constexpr uint32_t kHitBlockSize = 0x68;
+constexpr uint32_t kHitBlockCount = 0x3C;
+constexpr uint32_t kHitBlockArray = 0x40;
+constexpr uint32_t kHitInsSize = 0x84;
+
+// The block's collisions (array, count), false when the block is not in use here.
+bool block_hits(int block, uint32_t* array, uint32_t* count) {
+    const uint32_t wr = world_res();
+    uint32_t n = 0, man = 0, blocks = 0;
+    if (block < 0 || !wr || !read32(wr + kWrBlockCount, &n) || static_cast<uint32_t>(block) >= n ||
+        block_state(wr, block) != static_cast<int>(kBlockInUse) || !read32(kHitManVar, &man) || !man ||
+        !read32(man + kHitManBlocks, &blocks) || !blocks) {
+        return false;
+    }
+    const uint32_t entry = blocks + static_cast<uint32_t>(block) * kHitBlockSize;
+    return read32(entry + kHitBlockCount, count) && read32(entry + kHitBlockArray, array) && *array &&
+           *count > 0 && *count < 100000;
+}
+
 // A collision (HitIns) of a block in use here, else why not.
 const char* floor_in_use(uint32_t hit) {
     uint32_t vt = 0, n = 0;
@@ -4333,6 +4359,56 @@ bool view_only_floor(uint32_t chr) {
 // The game's own test of a floor to stand on after a load (0xDE3000): its collision in the physics world (+0x50 state
 // 6), and its high one too unless it has none (+0x78 bit 3, else +0x68 state 6). A block in use can hold collisions
 // that are not loaded (0xDD2EE0 loads them by the groups streamed from our floor): a character put there falls.
+bool floor_id(uint32_t hit, int* map, int* index) {
+    uint32_t vt = 0, array = 0, count = 0, id = 0, infos = 0;
+    uint8_t b = 0xFF;
+    if (!hit || !read32(hit, &vt) || vt != kHitInsVtable || !read8(hit + 0xF, &b)) return false;
+    const int block = static_cast<int8_t>(b);
+    if (!block_hits(block, &array, &count) || hit < array || (hit - array) % kHitInsSize != 0 ||
+        (hit - array) / kHitInsSize >= count) {
+        return false;
+    }
+    const uint32_t wr = world_res();
+    if (!read32(wr + kWrBlockInfos, &infos) || !infos ||
+        !read32(infos + static_cast<uint32_t>(block) * kBlockInfoSize + 4, &id)) {
+        return false;
+    }
+    *map = static_cast<int>(id);
+    *index = static_cast<int>((hit - array) / kHitInsSize);
+    return true;
+}
+
+uint32_t floor_by_id(int map, int index) {
+    if (map == -1 || index < 0) return 0;
+    const int block = map_block(world_res(), static_cast<int>(static_cast<uint32_t>(map) & 0xFFFF0000u));
+    uint32_t array = 0, count = 0, vt = 0;
+    uint8_t b = 0xFF;
+    if (!block_hits(block, &array, &count) || static_cast<uint32_t>(index) >= count) return 0;
+    const uint32_t hit = array + static_cast<uint32_t>(index) * kHitInsSize;
+    if (!read32(hit, &vt) || vt != kHitInsVtable || !read8(hit + 0xF, &b) || static_cast<int8_t>(b) != block) return 0;
+    return hit;
+}
+
+const char* give_floor(uint32_t chr, uint32_t hit, bool* changed) {
+    *changed = false;
+    uint32_t have = 0;
+    if (!chr || !hit) return "no floor";
+    if (const char* why = floor_in_use(hit)) return why;
+    if (read32(chr + 0x29C, &have) && have == hit) return nullptr;
+    __try {
+        __asm {
+            push hit
+            mov ecx, chr
+            mov eax, kSetFloorFn
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "their floor could not be set";
+    }
+    *changed = read32(chr + 0x29C, &have) && have == hit;
+    return *changed ? nullptr : "the game kept their floor";
+}
+
 bool floor_ready(uint32_t hit) {
     uint32_t vt = 0;
     uint8_t lo = 0, hi = 0, flags = 0;

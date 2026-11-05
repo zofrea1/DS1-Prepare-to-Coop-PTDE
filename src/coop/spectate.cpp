@@ -123,6 +123,7 @@ int g_view_map = -1;          // the followed teammate's map kept loaded for the
 uint32_t g_cast_chr = 0;
 double g_cast_at = 0;
 const char* g_cast_why = "";
+const char* g_give_why = "";  // why the reported floor was last not given (logged once per change)
 constexpr double kCastEvery = 0.2;
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -369,12 +370,15 @@ void view_extras() {
     const uint32_t want = g_hold ? g_target : g_knell_chr;
     const uint32_t chr = want && player_character(want) ? want : 0;
     fix_rate(chr);
-    // Their map, as they report it, kept loaded while we follow them.
+    // Their map, as they report it, kept loaded while we follow them: the one of the floor their game has them on when
+    // they report it (on a map boundary the game's map and the floor's can differ for a while).
     int map = -1;
+    const Teammate* mate = nullptr;
     if (chr && g_streaming) {
         for (const Teammate& t : g_team) {
-            if (t.chr == chr) map = t.map;
+            if (t.chr == chr) mate = &t;
         }
+        if (mate) map = mate->floor_map != -1 ? mate->floor_map : mate->map;
     }
     // The floor we gave a character goes again before the view lets its map go (the game unloads a block nobody wants
     // two frames later), as the game takes the party's floors at a map switch (0xDE36E0): nothing else would.
@@ -397,9 +401,39 @@ void view_extras() {
     }
     bool streamed = false;
     const char* why = rules::draw_from(chr, g_streaming, &streamed);
+    // The floor their own game has them on (1.5.0 reports it), given to their character here when it has none, or one
+    // from another map than theirs, or one whose collision is not loaded here (their character touches no collision
+    // there, so its floor stays where it last did): across a map boundary their character had no floor here at all,
+    // so nothing around them was drawn or streamed in (2026-11-04, "no floor under them" for 46 s in Firelink).
+    const uint32_t reported = mate && mate->floor_map != -1 ? rules::floor_by_id(mate->floor_map, mate->floor_index) : 0;
+    if (g_streaming && reported) {
+        uint32_t have = 0;
+        uint8_t have_block = 0xFF, their_block = 0xFF;
+        read32(chr + 0x29C, &have);
+        const bool other_map = have && read8(have + 0xF, &have_block) && read8(reported + 0xF, &their_block) &&
+                               have_block != their_block;
+        if (have != reported && (why || other_map || !rules::floor_ready(have) || rules::view_only_floor(chr))) {
+            bool changed = false;
+            const char* give_why = rules::give_floor(chr, reported, &changed);
+            if (changed) {
+                g_cast_chr = chr;
+                const char* was = why;
+                why = rules::draw_from(chr, g_streaming, &streamed);
+                static int lines = 0;
+                if ((was || other_map) && ++lines <= 60) {
+                    LOG_INFO("[coop] Spectating: the followed teammate's character given the floor their game reports "
+                             "(map %08X, collision %d; %s)", static_cast<uint32_t>(mate->floor_map), mate->floor_index,
+                             was ? "it had none here" : "its own was in another map");
+                }
+            } else if (give_why && std::strcmp(give_why, g_give_why) != 0) {
+                g_give_why = give_why;
+                LOG_INFO("[coop] Spectating: the floor the followed teammate's game reports not given (%s)", give_why);
+            }
+        }
+    }
     // No floor of theirs here, or one in the view's own map (their character never touches its collision, so the floor
-    // does not follow them there): the one under them, by a cast.
-    if (g_streaming && (why || rules::view_only_floor(chr)) && now() - g_cast_at >= kCastEvery) {
+    // does not follow them there), and none reported (an older game): the one under them, by a cast.
+    if (g_streaming && !reported && (why || rules::view_only_floor(chr)) && now() - g_cast_at >= kCastEvery) {
         g_cast_at = now();
         bool changed = false;
         const char* cast_why = rules::find_floor(chr, &changed);

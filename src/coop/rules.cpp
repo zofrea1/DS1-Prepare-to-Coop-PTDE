@@ -4100,6 +4100,19 @@ bool prepare_warp_kick(bool dead) { return kick_prepare(dead); }
 // objects, characters), the area's light and the connected blocks to load. The map we are in (+0x7E8) follows
 // +0x30 only.
 constexpr uint32_t kFaFloorOnce = 0x34;
+// What is drawn is only what is there: the streaming update before it (0xDE7C30, every frame from the in-game step,
+// 0xEFE089) builds every block's other mask (+0x1C of the map pieces' 0x137D5F4 blocks, the characters', objects',
+// collisions', WorldBlockRes+0x20) from the floor at +0x3C, which the step sets to the local player's chr+0x29C each
+// frame (0xEFE07B), and up to eight more at +0x44..+0x60 (0xDE2AE0 each, for a floor with +0x78 bit 2), which it
+// clears after (0xDE8201). A map piece goes into the scene only while its draw groups meet that mask (0xE9CB80: +0x3D
+// 2 loads and adds it, 0 takes it out), whatever the draw mask says. The view drew from the teammate's floor but kept
+// only what our own floor streams: large parts of the world around them were missing, the same block included
+// (2026-11-04: "entire, large parts of the world geometry won't display"). The cutscenes show their far collision the
+// same way (0xD00210: their collisions into these slots, theirs at +0x34). Our own floor at +0x3C stays: the
+// collision we stand on keeps loading as it does.
+constexpr uint32_t kFaStreamExtra = 0x44;
+constexpr int kFaStreamExtraSlots = 8;
+constexpr uint32_t kHitStreams = 0x78;  // byte: bit 2, the floor adds its groups to the streaming mask (0xDE2AE3)
 int view_map(int map) {
     const int area_block = map < 0 ? -1 : static_cast<int>(static_cast<uint32_t>(map) & 0xFFFF0000u);
     if (area_block < 0) {
@@ -4253,14 +4266,26 @@ bool view_only_floor(uint32_t chr) {
            static_cast<int8_t>(block) == g_view_want.block;
 }
 
-const char* draw_from(uint32_t chr) {
+const char* draw_from(uint32_t chr, bool stream, bool* streamed) {
     const char* why = nullptr;
     const uint32_t hit = loaded_floor(chr, &why);
     uint32_t fa = 0;
+    if (streamed) *streamed = false;
     if (!hit) return why;
     if (!read32(kFieldAreaVar, &fa) || !fa) return "no field";
     __try {
         *ptr<uint32_t>(fa + kFaFloorOnce) = hit;
+        // The streaming mask too, in the first free slot (as 0xDE1DF0 adds one: none twice).
+        for (int i = 0; stream && i < kFaStreamExtraSlots; ++i) {
+            const uint32_t slot = fa + kFaStreamExtra + static_cast<uint32_t>(i) * 4;
+            const uint32_t have = *ptr<uint32_t>(slot);
+            if (have == hit) break;
+            if (have == 0) {
+                *ptr<uint32_t>(slot) = hit;
+                break;
+            }
+        }
+        if (streamed) *streamed = stream && (*ptr<uint8_t>(hit + kHitStreams) & 4) != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "the field could not be written";
     }

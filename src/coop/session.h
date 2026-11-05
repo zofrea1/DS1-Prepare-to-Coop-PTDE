@@ -128,8 +128,13 @@ const char* place_summon_sign();
 // Why the White Sign Soapstone cannot be used now (null: it can).
 const char* sign_refusal();
 // The Death Knell took us somewhere: a Bloody Mary for the session (the host counts it; a guest's game tells the
-// host's). `sign`: to a summon sign.
-void knell_bloody_mary(bool sign);
+// host's). `sign`: to a summon sign. Added: our count went up (host); Asked: the host's game was told, and decides
+// (knell_bloody_mary_answer); None: nothing (BloodyMary off, five already, no session).
+enum class KnellMary { None, Added, Asked };
+KnellMary knell_bloody_mary(bool sign);
+// After Asked: 1 once the host's count went up, -1 when it did not within a few seconds (or nothing was asked), 0 still
+// waiting.
+int knell_bloody_mary_answer();
 // We stand in the host's world as a co-op guest: arrived, not invading, not on the way home.
 bool coop_guest_in_world();
 bool active();       // any role, including searching and joining

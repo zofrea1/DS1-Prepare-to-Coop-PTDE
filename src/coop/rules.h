@@ -139,8 +139,10 @@ void arm_reset_reload();
 // The next load follows the host's Homeward Bone or Darksign: the host's world's temporary flags start over in it.
 void arm_trip_reload();
 // Spectating: this frame's world is drawn as from the floor `chr` stands on (the draw groups, the area's light, the
-// connected blocks), instead of ours. Null when done, else why not (no floor, its block not loaded here).
-const char* draw_from(uint32_t chr);
+// connected blocks), instead of ours. With `stream`, what that floor shows is streamed in too (map pieces, objects,
+// characters), besides what ours keeps. Null when done, else why not (no floor, its block not loaded here).
+// `streamed`: the floor added to what is streamed (a collision that does not leaves it to ours).
+const char* draw_from(uint32_t chr, bool stream = false, bool* streamed = nullptr);
 // Spectating: `map` (a teammate's, as they report it) is kept loaded while this is called every frame, as a floor
 // under them connecting to it would: its block is wanted on every WorldRes update. -1 lets it go (so does a second
 // without a call). The block's state (7 in use), -1 when this world cannot load that map.

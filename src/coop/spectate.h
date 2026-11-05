@@ -28,6 +28,7 @@ struct Teammate {
     double pos_at = 0;     // when map and pos came (GetTickCount64 seconds), 0 never
     bool boss_fight = false;  // a boss gauge is up in their game
     bool cutscene = false;    // a cutscene plays in their game (where they stand and their map do not go together)
+    bool loading = false;     // they are in a load (no character of theirs anywhere; their position is not yet theirs)
 };
 
 bool install();

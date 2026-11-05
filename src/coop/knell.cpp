@@ -68,8 +68,21 @@ constexpr uint32_t kChrFloor = 0x29C;
 // The summon arrivals (global_event.lua): a summoned phantom or invader plays SummonMotion_wait's GetSummonAnimId
 // (0xD60890): 6951, or 6952 when the player is a Warrior of Sunlight (PlayerGameData+0x10B == 3: the arrival with
 // "Praise the Sun", Solaire's); a living player arriving plays 6950 (InGameStart's AliveMotion). 6951 and 6952 fade the
-// character in from nothing (TAE event 193) with the summon sound.
-constexpr int kArrivals[] = {6951, 6952, 6950};
+// character in from nothing (TAE event 193) with the summon sound. The arrival is one of the two summons: 6950, the
+// plain rise at a bonfire, was a third choice until the 2026-11-04 test, where it came up in 9 of 15 arrivals and read
+// as the summon effect missing ("just the default get up from bonfire").
+constexpr int kArrivals[] = {6951, 6952};
+constexpr int kArrivalCount = static_cast<int>(sizeof(kArrivals) / sizeof(kArrivals[0]));
+constexpr int kWhiteArrival = 6951;
+// The white arrival's glow is TAE event 120 (0xE61580), which picks its effect by the character's type (chr+0x70): the
+// event's third value (120, the white glow) for a white phantom (1) or a hollow (8), the fourth (130, red) for a black
+// phantom or an intruder (2, 12), and for anyone else what 0xE6A400 says of them (1 white, 2 black: their player
+// data's +0x12D), else its first value, 0 for 6951: no effect. So a player arriving human had no glow and a hollow one
+// had it (2026-11-04 test: "the white summon effect won't appear", some of the time). While a character plays the
+// white arrival, a type with no effect of its own takes the white one (1.5.0).
+constexpr uint32_t kChrTypeFxSite = 0x00E615E3;  // mov ecx,edi; call 0xE6A400; sub eax,1; je; sub eax,1; jne
+constexpr uint32_t kChrTypeFxBack = 0x00E615FC;  // ebx = the effect, esi = the event's values, edi = the character
+constexpr uint32_t kChrTypeFxSide = 0x00E6A400;  // ecx = character: 1 white, 2 black, else 0
 // Where control comes back in each (the TAE's first JumpTable window that lets the player act again).
 double arrival_length(int anim) { return anim == 6952 ? 5.4 : anim == 6951 ? 4.55 : 2.15; }
 // The price, once the arrival has played out: the stagger of a broken poise ("Damage Middle", 2010: the damage voice
@@ -653,11 +666,53 @@ int playing_anim(uint32_t chr) {
     return static_cast<int>(id);
 }
 
+// The white arrival's glow for any character type (kChrTypeFxSite): asked only when the type gave no effect.
+bool __stdcall white_arrival(uint32_t chr) {
+    return playing_anim(chr) == kWhiteArrival || motion::held_event_anim(chr) == kWhiteArrival;
+}
+
+__declspec(naked) void hk_chr_type_fx() {
+    __asm {
+        mov ecx, edi
+        mov eax, kChrTypeFxSide
+        call eax
+        cmp eax, 1
+        je fx_white
+        cmp eax, 2
+        je fx_black
+        test ebx, ebx         // the event's first value: the effect of a type with none of its own
+        jnz fx_back
+        push edi
+        call white_arrival    // stdcall
+        test al, al
+        jz fx_back
+    fx_white:
+        mov ebx, dword ptr [esi + 8]
+        jmp fx_back
+    fx_black:
+        mov ebx, dword ptr [esi + 0Ch]
+    fx_back:
+        mov eax, kChrTypeFxBack
+        jmp eax
+    }
+}
+
+bool patch_chr_type_fx() {
+    static const uint8_t expect[17] = {0x8B, 0xCF, 0xE8, 0x16, 0x8E, 0x00, 0x00, 0x83, 0xE8,
+                                       0x01, 0x74, 0x0A, 0x83, 0xE8, 0x01, 0x75, 0x08};
+    uint8_t code[17];
+    std::memset(code, 0x90, sizeof(code));
+    code[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_chr_type_fx) - (kChrTypeFxSite + 5));
+    std::memcpy(code + 1, &rel, 4);
+    return patch(kChrTypeFxSite, expect, code, sizeof(code));
+}
+
 // One of the game's summon arrivals at random, which the others see too (1.5.0). Returns it, 0 when none started.
 int play_arrival(const char* why) {
     const uint32_t me = game::player();
     if (!me) return 0;
-    const int anim = kArrivals[std::uniform_int_distribution<int>(0, 2)(g_rng)];
+    const int anim = kArrivals[std::uniform_int_distribution<int>(0, kArrivalCount - 1)(g_rng)];
     motion::send_knell_arrival(anim);
     if (!start_event_anim(me, anim)) {
         LOG_ERROR("[coop] Death Knell: the arrival animation could not be started");
@@ -681,6 +736,40 @@ void arrive() {
 // them; and going to a teammate also takes every soul and all humanity we carry, as the Darksign does (no bloodstain).
 // A summon sign one of them left (White Sign Soapstone) is the co-operative way: the debuffs only. With
 // DeathKnellSoulLevel, going to a teammate takes a soul level instead of the souls and humanity (the first price).
+// The price's line names only what was taken (Grok dcb9359e): the souls and humanity (going to a teammate), the
+// Crimson Blossom when one was given (not with DeathDebuffs off, while invading, or with five held), and the hardier
+// enemies when the session's Bloody Marys went up (not with BloodyMary off, or five already). Empty when nothing was.
+std::wstring price_line(bool souls, bool blossom, bool mary) {
+    std::wstring what;
+    if (souls) what = L"your souls, your humanity";
+    if (blossom) what += what.empty() ? L"a Crimson Blossom" : L" and a Crimson Blossom";
+    if (mary) what += what.empty() ? L"the enemies grow hardier" : L"; the enemies grow hardier";
+    return what.empty() ? std::wstring() : L"The Death Knell's price: " + what;
+}
+
+// A guest's price line waits for the host's answer about the Bloody Mary (its next State), as long as
+// session::knell_bloody_mary_answer allows.
+struct PendingPrice {
+    bool waiting = false;
+    bool souls = false;
+    bool blossom = false;
+};
+PendingPrice g_pending_price;
+
+void show_price(bool souls, bool blossom, bool mary) {
+    const std::wstring line = price_line(souls, blossom, mary);
+    if (!line.empty()) text::show(line);
+}
+
+void pending_price_tick() {
+    if (!g_pending_price.waiting) return;
+    const int answer = session::knell_bloody_mary_answer();
+    if (answer == 0) return;
+    g_pending_price.waiting = false;
+    show_price(g_pending_price.souls, g_pending_price.blossom, answer > 0);
+    LOG_INFO("[coop] Death Knell: the host's game %s the Bloody Mary", answer > 0 ? "counted" : "did not count");
+}
+
 void pay_price() {
     const uint32_t me = game::player();
     if (!me) return;
@@ -689,28 +778,35 @@ void pay_price() {
     const bool sound = play_sound(10000, kRiposteSoundType, kRiposteSound);
     const bool sign = g_dest.sign;
     const bool blossom = world::give_knell_blossom();
-    session::knell_bloody_mary(sign);
+    const session::KnellMary mary = session::knell_bloody_mary(sign);
+    bool souls = false;
     if (!sign && g_soul_level) {
         hud_warning(kDrainedText);
         const char* why = nullptr;
         const int stat = drain(&why);
         if (stat < 0) LOG_INFO("[coop] Death Knell: no soul level was taken (%s)", why ? why : "?");
     } else {
-        hud_warning(kDebuffedText);
         if (!sign) {
-            const int souls = game::souls(), humanity = game::humanity();
+            const int was_souls = game::souls(), was_humanity = game::humanity();
             game::set_souls(0);
             game::set_humanity(0);
-            LOG_INFO("[coop] Death Knell: %d souls and %d humanity lost, as to the Darksign", souls, humanity);
+            souls = true;
+            LOG_INFO("[coop] Death Knell: %d souls and %d humanity lost, as to the Darksign", was_souls, was_humanity);
         }
-        text::show(sign ? L"The Death Knell's price: a Crimson Blossom, and the enemies grow hardier"
-                        : L"The Death Knell's price: your souls, your humanity and a Crimson Blossom; the enemies "
-                          L"grow hardier");
+        if (souls || blossom || mary != session::KnellMary::None) hud_warning(kDebuffedText);
+        if (mary == session::KnellMary::Asked) {
+            g_pending_price = PendingPrice{true, souls, blossom};
+        } else {
+            show_price(souls, blossom, mary == session::KnellMary::Added);
+        }
     }
-    LOG_INFO("[coop] Death Knell: the price for %s (stagger %d%s, riposte sound c%d%s, Crimson Blossom %s, a Bloody Mary "
-             "for the session)", sign ? "a summon sign" : g_soul_level ? "a teammate, a soul level" : "a teammate",
+    LOG_INFO("[coop] Death Knell: the price for %s (stagger %d%s, riposte sound c%d%s, Crimson Blossom %s, Bloody Mary "
+             "%s)", sign ? "a summon sign" : g_soul_level ? "a teammate, a soul level" : "a teammate",
              kStagger, staggered ? "" : " FAILED", kRiposteSound, sound ? "" : " FAILED",
-             blossom ? "given" : "not given (DeathDebuffs off, or five held)");
+             blossom ? "given" : "not given (DeathDebuffs off, invading, or five held)",
+             mary == session::KnellMary::Added   ? "counted"
+             : mary == session::KnellMary::Asked ? "asked of the host's game"
+                                                 : "not counted (BloodyMary off, or five already)");
 }
 
 // Until the arrival lets the player act again: its animation leaves ChrCtrl+0x350, or its length passes.
@@ -1076,10 +1172,12 @@ void confirm() {
         return;
     }
     // Where they stand and the map they report do not go together during a cutscene (the crow's flight: Firelink's
-    // landing point in the Asylum's map; the load put us there in the Asylum, and we fell, 2026-11-04).
-    if (t->cutscene) {
-        say(t->name + L" is in a cutscene");
-        LOG_INFO("[coop] Death Knell: %s is in a cutscene; not going", narrow(t->name).c_str());
+    // landing point in the Asylum's map; the load put us there in the Asylum, and we fell, 2026-11-04), nor during a
+    // load (no character of theirs: no position yet).
+    if (t->cutscene || t->loading) {
+        say(t->name + (t->cutscene ? L" is in a cutscene" : L" is travelling"));
+        LOG_INFO("[coop] Death Knell: %s is %s; not going", narrow(t->name).c_str(),
+                 t->cutscene ? "in a cutscene" : "in a load");
         return;
     }
     g_dest = Destination{};
@@ -1241,10 +1339,11 @@ void going_tick() {
         g_state = State::Idle;
         return;
     }
-    if (t->cutscene) {
-        say(t->name + L" is in a cutscene");
-        LOG_INFO("[coop] Death Knell: %s went into a cutscene; not going", narrow(t->name).c_str());
-        close_view("their cutscene");
+    if (t->cutscene || t->loading) {
+        say(t->name + (t->cutscene ? L" is in a cutscene" : L" is travelling"));
+        LOG_INFO("[coop] Death Knell: %s went into a %s; not going", narrow(t->name).c_str(),
+                 t->cutscene ? "cutscene" : "load");
+        close_view(t->cutscene ? "their cutscene" : "their load");
         g_state = State::Idle;
         return;
     }
@@ -1431,6 +1530,12 @@ bool install() {
     const int devices = patch_dinput_devices();
     LOG_INFO("[coop] Death Knell: the arrow keys hidden from the game while its view is open (USER32 %s/%s, DirectInput "
              "%d device table(s))", async ? "yes" : "no", state ? "yes" : "no", devices);
+    if (patch_chr_type_fx()) {
+        LOG_INFO("[coop] Summon arrivals: the white arrival glows on every character (human ones too)");
+    } else {
+        LOG_ERROR("[coop] Summon arrivals: the effect-by-type code did not match this build (the white arrival glows "
+                  "only on hollow characters)");
+    }
     return true;
 }
 
@@ -1476,6 +1581,7 @@ void tick() {
         g_seen_anim = anim;
         g_seen_since = now();
     }
+    pending_price_tick();
     // A join's arrival: the moment the game starts its own rise at the host's bonfire (6950, 0.2 to 0.8 s after the
     // load in the 2026-11-04 test), it is replaced by the arrival, or after kJoinRiseWait standing if no rise comes.
     // Only while we are still a co-op guest there (a leave meanwhile is a load: the arrival would start at home, with

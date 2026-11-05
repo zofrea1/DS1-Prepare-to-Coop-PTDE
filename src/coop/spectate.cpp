@@ -66,6 +66,10 @@ constexpr uint32_t kChrRate = 0xF4;
 //    (2026-11-03: "no floor under them" in the Undead Burg, seen from the Asylum). Their block is asked for on every
 //    WorldRes update while we follow them (rules::view_map), as a floor under them connecting to it would; once it is
 //    in use their character finds its floor there and the world is drawn from it (above).
+//  * What is there to draw: the game streams map pieces, objects and characters in by the groups our own floor shows
+//    (FieldArea+0x3C), and a map piece outside them is not in the scene at all, whatever is drawn from. Their floor
+//    is added to that streaming while we follow them, as the cutscenes add theirs (rules::draw_from with `stream`):
+//    without it large parts of the world around them were missing, in our own block too (2026-11-04).
 //  * The characters around them: WorldChrMan's per-frame pass (0xE3F630) decides every character's update rate from
 //    a camera frustum test and a rank by distance, both taken from the local player's character ([WorldChrMan+0x3C]:
 //    its position, and its draw groups chr+0x274 that the frustum test is limited to, 0x456B70). The enemies around a
@@ -100,6 +104,7 @@ uint32_t g_rate_chr = 0;      // the teammate whose update rate we fixed (0 none
 bool g_rate_was_fixed = false;
 uint32_t g_drawn_for = 0;     // the teammate the view's last "drawn from" line was about
 const char* g_drawn_why = "";
+bool g_drawn_streamed = false;  // and whether that floor added to what is streamed
 uint32_t g_knell_chr = 0;     // the Death Knell's view: the teammate it shows (knell.cpp), 0 none
 bool g_streaming = true;      // SpectateStreaming
 bool g_origin_patched = false;
@@ -390,7 +395,8 @@ void view_extras() {
         g_drawn_for = 0;
         return;
     }
-    const char* why = rules::draw_from(chr);
+    bool streamed = false;
+    const char* why = rules::draw_from(chr, g_streaming, &streamed);
     // No floor of theirs here, or one in the view's own map (their character never touches its collision, so the floor
     // does not follow them there): the one under them, by a cast.
     if (g_streaming && (why || rules::view_only_floor(chr)) && now() - g_cast_at >= kCastEvery) {
@@ -401,7 +407,7 @@ void view_extras() {
             g_cast_chr = chr;
             g_cast_why = "";
             const char* was = why;
-            why = rules::draw_from(chr);
+            why = rules::draw_from(chr, g_streaming, &streamed);
             static int lines = 0;
             if (was && ++lines <= 40) {
                 LOG_INFO("[coop] Spectating: the floor under the followed teammate found by a cast (%s)",
@@ -415,13 +421,17 @@ void view_extras() {
     // Only from a floor of theirs that is loaded here: their draw groups come from it.
     g_pass_origin = g_streaming && g_origin_patched && !why ? chr : 0;
     fix_own_rate(g_pass_origin != 0);
-    if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why)) {
+    if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why) || (!why && streamed != g_drawn_streamed)) {
         g_drawn_for = chr;
         g_drawn_why = why ? why : "";
+        g_drawn_streamed = streamed;
         if (why) {
             LOG_INFO("[coop] Spectating: the world stays drawn from our own floor (%s)", why);
         } else {
-            LOG_INFO("[coop] Spectating: the world is drawn from the followed teammate's floor");
+            LOG_INFO("[coop] Spectating: the world is drawn from the followed teammate's floor, and %s",
+                     streamed       ? "what it shows is streamed in"
+                     : g_streaming ? "only what our own floor streams is there (their floor adds nothing to it)"
+                                   : "only what our own floor streams is there (SpectateStreaming off)");
         }
     }
 }

@@ -350,11 +350,19 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
             if (waiting(member)) continue;
             // Only once they stand in the world again. After a team wipe the guest's game asked for the host's
             // character while the host was still loading after its own death: it came out invisible and could be
-            // walked through, and stayed so after the host was back (2026-10-17 test).
-            if (ps.known && !ps.invader && !ps.alive) {
-                if (g_deferred[r.slot] != 1) {
-                    g_deferred[r.slot] = 1;
-                    LOG_INFO("[coop] %s's character is missing: it is created once they are back in the world", name);
+            // walked through, and stayed so after the host was back (2026-10-17 test). A living load (a Homeward Bone,
+            // bonfire travel) or a cutscene is waited out the same way: they report it (1.5.0, Grok dcb9359e), and
+            // no time limit applies, as no character of theirs stands anywhere meanwhile.
+            if (ps.known && !ps.invader && (!ps.alive || ps.away)) {
+                const int why = ps.alive ? 3 : 1;
+                if (g_deferred[r.slot] != why) {
+                    g_deferred[r.slot] = why;
+                    if (ps.alive) {
+                        LOG_INFO("[coop] %s's character is missing: it is created once they are back in the world "
+                                 "(they load or watch a cutscene: event animation %d)", name, ps.event_anim);
+                    } else {
+                        LOG_INFO("[coop] %s's character is missing: it is created once they are back in the world", name);
+                    }
                 }
                 continue;
             }
@@ -407,7 +415,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
         // Their character here died. Rebuild it once that player reports being alive (they respawned) and the
         // party is done with it; a character no player can be matched to stays as it is. The old character goes
         // first; a later check finds the slot empty and asks for the new one, which then takes the same slot.
-        if (!ps.known || !ps.alive) continue;
+        if (!ps.known || !ps.alive || ps.away) continue;
         if (party_reads_character(r.chr)) {
             static int told = 0;
             if (++told <= 10) LOG_INFO("[coop] %s's character is still in use by the party: not rebuilt", name);

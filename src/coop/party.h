@@ -41,6 +41,7 @@ struct PeerState {
     double up_for = 0;      // how long they have reported being alive (0 dead or unknown)
     int event_anim = -1;    // the event animation their own character holds, as they report it (0 none, -1 unknown)
     bool settled = false;   // alive and out of event animations (the rise after a respawn included) for a moment
+    bool away = false;      // in a load or a cutscene, as they report it: no character of theirs in the world yet
 };
 
 // Every frame on the game thread while a seamless session is established. `peer` answers for a member record (its

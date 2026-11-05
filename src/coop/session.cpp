@@ -244,6 +244,11 @@ struct InfoMore2 {
 // their map changed, and a Death Knell to them loaded into the Asylum there and fell through it (2026-11-04). Older
 // players take it for an event animation they hold, as they should.
 constexpr int32_t kReportCutscene = 2;
+// event_anim 3 (none of the game's either): the sender is in a load and has no character (1.5.0). It used to report
+// 0 then, and a living load (a Homeward Bone, bonfire travel, the load after the crow's flight) counted as standing
+// with no event animation: 0.3 s into it the others' games took the sender for settled and made their missing
+// character during the load, one that was then kept (Grok dcb9359e). Older players take it for a held event animation.
+constexpr int32_t kReportLoading = 3;
 // 1.3.0, behind InfoMore2 the same way.
 struct InfoMore3 {
     InfoMore2 more2;
@@ -780,12 +785,19 @@ int g_bloody = 0;       // host: the count
 int g_host_bloody = 0;  // guest: the host's
 bool g_bloody_on = true;
 
-void bloody_add(const char* who, const char* what = "fell") {
-    if (!g_bloody_on || g_bloody >= kMaxBloody) return;
+// True when the count went up.
+bool bloody_add(const char* who, const char* what = "fell") {
+    if (!g_bloody_on || g_bloody >= kMaxBloody) return false;
     ++g_bloody;
     g_last_state = 0;  // the guests hear it now, so their enemies grow when the host's do
     LOG_INFO("[coop] Bloody Mary: %s %s; the session has %d", who, what, g_bloody);
+    return true;
 }
+// Guest: our Death Knell's Bloody Mary asked of the host (kKnellPrice) at this time (0 none), and the host's count
+// then: the price's line says the enemies grow hardier only once the host's count is seen going up.
+double g_knell_mary_at = 0;
+int g_knell_mary_from = 0;
+constexpr double kKnellMaryWait = 3.0;
 
 void bloody_reset(const char* why) {
     if (g_bloody == 0) return;
@@ -3397,10 +3409,17 @@ void guest_tick() {
 
 // ---------------------------------------------------------------- shared
 // The event animation our report gives: the one our character holds (1 held with no id known: still "held", -1 is
-// "not reported"), kReportCutscene while a cutscene plays or waits for its map.
+// "not reported"), kReportCutscene while a cutscene plays or waits for its map, kReportLoading during a load (still
+// kReportCutscene for a load that follows a cutscene), so the others count us as back only once our character stands
+// here and reports a real 0.
 int32_t reported_event_anim() {
-    if (game::loading()) return 0;
-    if (rules::cutscene_playing() || rules::cutscene_loading()) return kReportCutscene;
+    static bool cutscene = false;  // the last report was a cutscene's
+    if (rules::cutscene_playing() || rules::cutscene_loading()) {
+        cutscene = true;
+        return kReportCutscene;
+    }
+    if (game::loading()) return cutscene ? kReportCutscene : kReportLoading;
+    cutscene = false;
     const uint32_t me = game::player();
     const int held = me ? motion::held_event_anim(me) : 0;
     return held < 0 ? 1 : held;
@@ -5208,6 +5227,7 @@ party::PeerState peer_state(uint32_t chr, const std::wstring& name, uint64_t ste
     s.map = p->map;
     s.up_for = !p->dead && p->alive_since > 0 ? now() - p->alive_since : 0;
     s.event_anim = p->event_anim;
+    s.away = p->event_anim == kReportLoading || p->event_anim == kReportCutscene;
     // Up: out of every event animation for a second (sitting at a bonfire aside, which is shown on the character),
     // or, for a player who does not report theirs, standing for 6 s (the rise after a respawn takes about 3 s).
     if (p->event_anim < 0) {
@@ -5897,6 +5917,7 @@ void tick() {
                     t.pos_at = p.pos_at;
                     t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
                     t.cutscene = p.event_anim == kReportCutscene && now() - p.last_seen <= 5.0;
+                    t.loading = p.event_anim == kReportLoading && now() - p.last_seen <= 5.0;
                     team.push_back(t);
                 }
                 all_dead = false;  // the co-op team's wipe rules are not ours
@@ -5916,6 +5937,7 @@ void tick() {
                     t.pos_at = p.pos_at;
                     t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
                     t.cutscene = p.event_anim == kReportCutscene && now() - p.last_seen <= 5.0;
+                    t.loading = p.event_anim == kReportLoading && now() - p.last_seen <= 5.0;
                     team.push_back(t);
                 }
             }
@@ -6278,17 +6300,31 @@ const char* place_summon_sign() {
     return nullptr;
 }
 
-void knell_bloody_mary(bool sign) {
+KnellMary knell_bloody_mary(bool sign) {
     const char* what = sign ? "rang the Death Knell to a summon sign" : "rang the Death Knell";
-    if (g_role == Role::Host) {
-        bloody_add("we", what);
-    } else if (g_role == Role::Guest && !g_invade && g_host) {
+    if (g_role == Role::Host) return bloody_add("we", what) ? KnellMary::Added : KnellMary::None;
+    if (g_role == Role::Guest && !g_invade && g_host) {
         KnellPriceMsg m{};
         fill_header(&m, kKnellPrice);
         m.sign = sign ? 1 : 0;
         send_to(g_host, m);
+        g_knell_mary_at = now();
+        g_knell_mary_from = g_host_bloody;
         LOG_INFO("[coop] Death Knell: the host's game is told of our price (a Bloody Mary for the session)");
+        return KnellMary::Asked;
     }
+    return KnellMary::None;
+}
+
+int knell_bloody_mary_answer() {
+    if (g_knell_mary_at <= 0) return -1;
+    if (g_host_bloody > g_knell_mary_from) {
+        g_knell_mary_at = 0;
+        return 1;
+    }
+    if (now() - g_knell_mary_at < kKnellMaryWait && g_role == Role::Guest) return 0;
+    g_knell_mary_at = 0;
+    return -1;
 }
 
 bool trip_slot_busy() { return now() - g_travel_started < kTravelGap || g_homeward_at > 0 || homeward_asked(); }

@@ -124,6 +124,9 @@ enum MsgType : uint8_t {
     kSign = 42,          // 1.5.0, co-op player -> all (through the host): my summon sign (SignMsg), on a change and
                          // every kSignResend; one not heard of for kSignLapse is gone
     kKnellPrice = 43,    // 1.5.0, co-op guest -> host: my Death Knell's price, a Bloody Mary for the session
+    kNear = 44,          // 1.5.0, co-op player -> everyone: the enemies my game runs (VicinityScaling; a u16 count, then
+                         // that many net handles), on a change and every kNearResend; one not heard again for
+                         // kNearLapse counts for nothing
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -208,6 +211,12 @@ struct StateMore4 {
 struct StateMore5 {
     StateMore4 more4;
     uint8_t bloody;
+};
+// 1.5.0, behind StateMore5: 1 while the host's VicinityScaling is on for its session (host_vicinity): each enemy is
+// scaled for the co-op players whose games run it (kNear). An older host leaves it 0: every enemy for the session.
+struct StateMore6 {
+    StateMore5 more5;
+    uint8_t vicinity;
 };
 struct Info {
     Header h;
@@ -639,6 +648,8 @@ uint64_t g_homeward_bumped = 0;  // the guest whose waiting travel it replaced (
 uint64_t g_homeward_by = 0;      // the co-op guest who used it (kHomewardAsk), 0 ourselves
 double g_homeward_told = 0;      // when our menu holding up that guest's trip was last pointed out (0 not yet)
 bool g_host_homeward = false;    // guest: the host takes our Homeward Bones, Darksign and miracle (StateMore4)
+bool g_host_vicinity = false;    // guest: the host's VicinityScaling is on for its session (StateMore6)
+bool host_vicinity();
 double g_homeward_asked = 0;     // guest: when our Homeward ask went to the host's game (0: none open; homeward_asked)
 bool g_homeward_waits = false;   // guest: the host's game said that ask waits for its menu (kTravelWaiting)
 // Guest: the host's Homeward Bone, warp to this bonfire at g_follow_at.
@@ -790,6 +801,7 @@ double now() { return GetTickCount64() / 1000.0; }
 
 // ---------------------------------------------------------------- the Bloody Mary (1.5.0)
 // The host counts the session's co-op deaths (its own and its co-op guests', up to five) while BloodyMary is on, and
+// every Death Knell's price whatever BloodyMary says (the setting is about deaths; the knell's price is its own), and
 // says the count in every State; any rest and a team wipe set it back to none. world.cpp raises the enemies' health
 // with it and coop.cpp keeps the Bloody Mary items in step.
 constexpr int kMaxBloody = 5;
@@ -797,9 +809,9 @@ int g_bloody = 0;       // host: the count
 int g_host_bloody = 0;  // guest: the host's
 bool g_bloody_on = true;
 
-// True when the count went up.
-bool bloody_add(const char* who, const char* what = "fell") {
-    if (!g_bloody_on || g_bloody >= kMaxBloody) return false;
+// True when the count went up. `knell`: a Death Knell's price, counted with BloodyMary off too.
+bool bloody_add(const char* who, const char* what = "fell", bool knell = false) {
+    if ((!g_bloody_on && !knell) || g_bloody >= kMaxBloody) return false;
     ++g_bloody;
     g_last_state = 0;  // the guests hear it now, so their enemies grow when the host's do
     LOG_INFO("[coop] Bloody Mary: %s %s; the session has %d", who, what, g_bloody);
@@ -1608,6 +1620,7 @@ void finish(const std::wstring& why) {
     g_homeward_at = 0;
     g_homeward_by = 0;
     g_host_homeward = false;
+    g_host_vicinity = false;
     g_homeward_asked = 0;
     g_follow_bonfire = -1;
     g_bone_owed = false;
@@ -2578,7 +2591,8 @@ void host_tick() {
     if (now() - g_last_state > 1.0) {
         g_last_state = now();
         const auto& st = rules::state();
-        StateMore5 more5{};
+        StateMore6 more6{};
+        StateMore5& more5 = more6.more5;
         StateMore4& more4 = more5.more4;
         StateMore3& more3 = more4.more3;
         StateMore2& more2 = more3.more2;
@@ -2605,9 +2619,10 @@ void host_tick() {
         }
         more4.guest_homeward = 1;
         more5.bloody = static_cast<uint8_t>(g_bloody);
+        more6.vicinity = host_vicinity() ? 1 : 0;
         rules::state().invader_present = invader;
         g_host_coop_players = coop;
-        broadcast(more5);
+        broadcast(more6);
     }
 }
 
@@ -3893,6 +3908,81 @@ bool coop_in_world() {
            (g_role == Role::Guest && !g_invade && g_step == Step::InWorld);
 }
 
+// ---------------------------------------------------------------- enemy scaling by vicinity (1.5.0)
+// With the host's VicinityScaling each enemy is scaled for the co-op players whose games run it (world.cpp, the
+// scaling by vicinity). Every game must give an enemy the same max HP, so each co-op player's game tells every other
+// game, the invaders' too, which enemies it runs (kNear: their net handles, the same in every game), and each game
+// counts the same lists. Sent straight to everyone, as kInfo is. A list not heard again for kNearLapse (a player who
+// left or lost the link) counts for nothing; a load sends an empty one.
+constexpr double kNearResend = 2.0;  // our list again this often, changed or not
+constexpr double kNearGap = 0.5;     // a changed list goes no sooner than this after the last one
+constexpr double kNearLapse = 6.0;
+constexpr size_t kNearMax = 1024;
+struct NearList {
+    std::vector<uint16_t> handles;  // sorted
+    double heard = 0;
+};
+std::map<uint64_t, NearList> g_near;  // the other co-op players' lists
+std::vector<uint16_t> g_near_sent;    // ours, as last sent
+double g_near_sent_at = 0;
+
+// Host: VicinityScaling for our session. On while every co-op guest's game sends and counts the lists (1.5.0 or
+// later): an older guest's game scales every enemy for the whole session, and the games would part on the enemies'
+// health. An invader of an older version counts none of it and is not counted, so it does not turn it off.
+bool host_vicinity() {
+    if (!g_cfg.vicinity_scaling) return false;
+    for (const auto& p : g_peers) {
+        if (p.invader || !admitted(p.id) || now() - p.last_seen > 10.0) continue;
+        if (compare_versions(p.mod, "1.5.0") < 0) return false;
+    }
+    return true;
+}
+
+void send_near(const std::vector<uint16_t>& list) {
+    std::vector<uint8_t> msg(sizeof(Header) + 2 + list.size() * 2);
+    const Header h{kMagic, kNear};
+    std::memcpy(msg.data(), &h, sizeof(h));
+    const uint16_t n = static_cast<uint16_t>(list.size());
+    std::memcpy(msg.data() + sizeof(h), &n, 2);
+    if (n) std::memcpy(msg.data() + sizeof(h) + 2, list.data(), list.size() * 2);
+    broadcast_raw(msg.data(), static_cast<uint32_t>(msg.size()));
+    g_near_sent = list;
+    g_near_sent_at = now();
+}
+
+void near_tick() {
+    const bool invader_here = g_role == Role::Guest && g_invade && g_step == Step::InWorld;
+    if (!coop_in_world() && !invader_here) {
+        g_near.clear();
+        g_near_sent.clear();
+        g_near_sent_at = 0;
+        return;
+    }
+    if (invader_here) return;  // an invader's game counts the co-op players' lists and sends none
+    std::vector<uint16_t> list;
+    world::near_handles(&list);  // empty while we load
+    if (list.size() > kNearMax) list.resize(kNearMax);
+    const double t = now();
+    if (t - g_near_sent_at >= kNearResend || (list != g_near_sent && t - g_near_sent_at >= kNearGap)) send_near(list);
+}
+
+void on_near(uint64_t from, const uint8_t* data, uint32_t size) {
+    uint16_t n = 0;
+    if (size < sizeof(Header) + 2) return;
+    std::memcpy(&n, data + sizeof(Header), 2);
+    if (size < sizeof(Header) + 2 + n * 2u) return;
+    NearList& l = g_near[from];
+    const bool first = l.heard == 0;
+    l.handles.resize(n);
+    if (n) std::memcpy(l.handles.data(), data + sizeof(Header) + 2, n * 2u);
+    std::sort(l.handles.begin(), l.handles.end());
+    l.heard = now();
+    if (first) {
+        LOG_INFO("[coop] Scaling by vicinity: %s's game runs %d enemies (its first list)", steam::persona(from).c_str(),
+                 static_cast<int>(n));
+    }
+}
+
 void send_sign() {
     SignMsg m{};
     fill_header(&m, kSign);
@@ -4344,6 +4434,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                                         more3.scaling[3], more3.scaling[4], more3.scaling[5]};
                 world::set_host_scaling(scaling);
                 g_host_scaling = true;
+            }
+            StateMore6 more6{};
+            const bool vicinity = as(&more6) && more6.vicinity != 0;
+            if (vicinity != g_host_vicinity) {
+                g_host_vicinity = vicinity;
+                LOG_INFO("[coop] The host's enemy scaling: %s", vicinity ? "by vicinity (VicinityScaling)"
+                                                                          : "for the whole session");
             }
             StateMore5 more5{};
             const int bloody = as(&more5) ? std::min<int>(more5.bloody, kMaxBloody) : 0;
@@ -4885,12 +4982,17 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             on_sign(from, m);
             break;
         }
+        case kNear: {
+            if (from == steam::self() || peer_is_invader(from)) return;
+            on_near(from, data, size);
+            break;
+        }
         case kKnellPrice: {
             KnellPriceMsg m;
             if (!as(&m) || g_role != Role::Host || peer_is_invader(from)) return;
             const PeerInfo* p = peer(from);
             const std::string who = p && !p->char_name.empty() ? utf8(p->char_name) : steam::persona(from);
-            bloody_add(who.c_str(), m.sign ? "rang the Death Knell to a summon sign" : "rang the Death Knell");
+            bloody_add(who.c_str(), m.sign ? "rang the Death Knell to a summon sign" : "rang the Death Knell", true);
             break;
         }
         case kLeft: {
@@ -6054,6 +6156,7 @@ void tick() {
     }
     reconcile_ceremonies();
     signs_tick();
+    near_tick();
     remote_characters_upkeep();
     knell_anims_tick();
     player_net_watch();
@@ -6068,6 +6171,10 @@ void tick() {
         int coop = 1;
         if (g_role == Role::Host || (g_role == Role::Guest && g_step == Step::InWorld)) coop = g_host_coop_players;
         world::set_players(coop);
+        bool vicinity = false;
+        if (g_role == Role::Host) vicinity = host_vicinity();
+        if (g_role == Role::Guest && g_step == Step::InWorld) vicinity = g_host_vicinity;
+        world::set_vicinity(vicinity);
         // The other co-op players, five times a second (the list asks the game for each member's character).
         static double team_at = 0;
         if (now() - team_at >= 0.2) {
@@ -6484,7 +6591,7 @@ const char* place_summon_sign() {
 
 KnellMary knell_bloody_mary(bool sign) {
     const char* what = sign ? "rang the Death Knell to a summon sign" : "rang the Death Knell";
-    if (g_role == Role::Host) return bloody_add("we", what) ? KnellMary::Added : KnellMary::None;
+    if (g_role == Role::Host) return bloody_add("we", what, true) ? KnellMary::Added : KnellMary::None;
     if (g_role == Role::Guest && !g_invade && g_host) {
         KnellPriceMsg m{};
         fill_header(&m, kKnellPrice);
@@ -6496,6 +6603,22 @@ KnellMary knell_bloody_mary(bool sign) {
         return KnellMary::Asked;
     }
     return KnellMary::None;
+}
+
+int near_count(uint32_t handle) {
+    if (handle > 0xFFFF || g_near.empty()) return 0;
+    const uint16_t h = static_cast<uint16_t>(handle);
+    const double t = now();
+    int n = 0;
+    for (const auto& [id, l] : g_near) {
+        if (t - l.heard > kNearLapse) continue;
+        bool coop = false;
+        for (const auto& p : g_peers) {
+            if (p.id == id) coop = !p.invader && t - p.last_seen <= 10.0;
+        }
+        if (coop && std::binary_search(l.handles.begin(), l.handles.end(), h)) ++n;
+    }
+    return n;
 }
 
 int knell_bloody_mary_answer() {

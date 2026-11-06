@@ -15,8 +15,8 @@ namespace coop::world {
 
 struct Config {
     bool death_debuffs = false;
-    int enemy_health = 45, enemy_damage = 0, enemy_posture = 30;
-    int boss_health = 125, boss_damage = 0, boss_posture = 40;
+    int enemy_health = 50, enemy_damage = 0, enemy_posture = 35;
+    int boss_health = 150, boss_damage = 0, boss_posture = 40;
 };
 
 bool install();
@@ -48,6 +48,13 @@ void defeat_rebase();
 // Session state the rules depend on.
 void set_session(bool active, bool invader, bool invader_present);
 void set_players(int coop_players);       // players sharing the host's world, invaders not counted
+// VicinityScaling (1.5.0, the host's decides): each enemy is scaled for the co-op players whose games run it (the
+// others' lists, session::near_count, and ours), not for everyone in the session.
+void set_vicinity(bool on);
+// Our list for the others' vicinity scaling: the net handles of the living enemies our game ran in the last 10 s, or,
+// while we spectate (spectate::viewing), the ones it ran when the view began. Sorted. Empty while we load, invade, or
+// play outside a session.
+void near_handles(std::vector<uint16_t>* out);
 void set_everyone_dead(bool all_dead);    // every other player is dead too
 // A local rest at a bonfire: `before` runs before the game's own rest (items), `fn` after it (tell the others).
 void set_rest_handler(void (*fn)());
@@ -62,8 +69,8 @@ void set_blossom_wither(void (*fn)());
 // Adds one Crimson Blossom (up to five; coop.cpp): true when one was added. A death that keeps the world costs one,
 // when its respawn warp goes (keep_dead_on_reload).
 void set_blossom_give(bool (*fn)());
-// The Death Knell's price (1.5.0): one Crimson Blossom more, as a death gives one (with DeathDebuffs; not for an
-// invader). True when one was added.
+// The Death Knell's price (1.5.0): one Crimson Blossom more, as a death gives one (with DeathDebuffs off too; not for
+// an invader). True when one was added.
 bool give_knell_blossom();
 // A bonfire rest: take off every death-debuff effect immediately. The inventory clear is separate.
 void clear_death_debuff();

@@ -48,6 +48,9 @@ void someone_rested();
 void trip_release();
 // Our death waits (we spectate).
 bool holding();
+// The camera is on a teammate, or is to be: our death waits, or the Death Knell's view is open. WorldChrMan's pass then
+// takes their character for ours (SpectateStreaming), so what runs here is around them, not around our body.
+bool viewing();
 // The death event can be held. Without it, world.cpp holds the respawn warp instead (the old limbo).
 bool installed();
 // The other co-op players as set_teammates last gave them.

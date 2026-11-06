@@ -52,6 +52,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.max_players = std::atoi(val.c_str());
         } else if (key == "dynamicsmoothing") {
             c.dynamic_smoothing = settings_parse_bool(val);
+        } else if (key == "vicinityscaling") {
+            c.vicinity_scaling = settings_parse_bool(val);
         } else if (key == "enemyhealthscaling") {
             c.enemy_health = std::atoi(val.c_str());
         } else if (key == "enemydamagescaling") {

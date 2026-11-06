@@ -59,11 +59,14 @@ struct CoopConfig {
     // Players in a session, the host and every guest and invader together (2 to 8, 8 by default since 1.4.0). The
     // game holds 4; above that the co-op makes room for more (players.cpp). NPC summons do not count.
     int max_players = 8;
+    // 1.5.0: each enemy is scaled for the co-op players whose games run it (those near it), not for everyone in the
+    // session. The host's setting decides for its world.
+    bool vicinity_scaling = true;
     // Enemy and boss scaling per extra player, in percent.
-    int enemy_health = 45;
+    int enemy_health = 50;
     int enemy_damage = 0;
-    int enemy_posture = 30;
-    int boss_health = 125;
+    int enemy_posture = 35;
+    int boss_health = 150;
     int boss_damage = 0;
     int boss_posture = 40;
     // Co-op characters live in their own save file (DRAKS0005.<extension>) so vanilla saves stay apart.

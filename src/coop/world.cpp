@@ -113,6 +113,30 @@ std::map<uint32_t, Regrow> g_regrow;
 // ---------------------------------------------------------------- state
 bool g_active = false, g_invader = false, g_invader_present = false;
 int g_players = 1;
+
+// ---------------------------------------------------------------- scaling by vicinity (1.5.0)
+// With the host's VicinityScaling an enemy is scaled for the co-op players whose games run it, not for everyone in the
+// session: two players in the Undead Burg and two in the Catacombs each fight enemies scaled for two, where the whole
+// world was scaled for four. "Runs it" is the test a kill's souls use (rules.cpp kill_reward_here): its update rate
+// (chr+0xF4) is not -1, the rate WorldChrMan's pass gives a character whose map entity is not active. So an enemy
+// around a player counts for that player, and one far away in a map their game still has loaded does not. Every game
+// must give an enemy the same max HP (its health goes between the games as a number, and a share of a different max
+// would part), so each co-op player's game sends every other game the list of the enemies it runs (session.cpp
+// kNear, net handles: the same enemy in every game) and each game counts the same lists. The enemy's level (extra
+// players) is the number of co-op players running it, ours included, less one, never above the session's. An
+// invader's game counts the co-op players' lists and is never counted. A level change is made in place, as a player
+// joining or leaving makes it (retarget, keep_share): the enemy keeps its share of health.
+// An enemy we stop running stays on our list for kNearKeep, so one at the edge of what our game runs does not change
+// its scaling as we step back and forth. While we spectate (our death's view, the Death Knell's) WorldChrMan's pass
+// takes the teammate's character for ours, and what runs here is around them: our list stays as the view found it,
+// where our body is.
+constexpr double kNearKeep = 10.0;
+bool g_vicinity = false;
+std::map<uint16_t, double> g_ran;  // net handle -> when our game last ran that living enemy
+bool g_ran_frozen = false;         // we spectate: g_ran stays as the view found it
+
+bool net_handle(uint32_t chr, uint16_t* out);
+int enemy_level(uint32_t chr);
 bool g_everyone_dead = false;
 bool g_was_alive = true;
 void (*g_rest_fn)() = nullptr;
@@ -560,7 +584,7 @@ void wither_blossoms(const char* why, bool tell) {
     const int held = g_blossom_count_fn ? g_blossom_count_fn() : 0;
     if (held > 0) {
         LOG_INFO("[coop] %d Crimson Blossom(s) wither: %s", held, why);
-        if (g_cfg.death_debuffs && hp(me) > 0) {
+        if (hp(me) > 0) {
             g_refill.blossoms = std::min(5, held);
             g_refill.hp = hp(me);
             g_refill.max = max_hp(me);
@@ -1090,9 +1114,10 @@ void give_death_blossom() {
 
 }  // namespace
 
-// The Death Knell's price (knell.cpp, 1.5.0): a Crimson Blossom, as a death gives one (DeathDebuffs).
+// The Death Knell's price (knell.cpp, 1.5.0): a Crimson Blossom, as a death gives one, with DeathDebuffs off too (the
+// setting is about deaths; the knell's price is its own).
 bool give_knell_blossom() {
-    if (!g_cfg.death_debuffs || g_invader || !g_blossom_give_fn) return false;
+    if (g_invader || !g_blossom_give_fn) return false;
     if (!g_blossom_give_fn()) return false;
     const int n = g_blossom_count_fn ? g_blossom_count_fn() : 1;
     LOG_INFO("[coop] A Crimson Blossom for the Death Knell (%d held)", n);
@@ -1170,6 +1195,37 @@ void each_enemy(F&& fn) {
             if (vt == kEnemyVtable) fn(chr);
         }
     }
+}
+
+// An enemy's net handle (chr+0x78: block << 11 | place, the same in every game), as the kNear lists carry it.
+bool net_handle(uint32_t chr, uint16_t* out) {
+    uint32_t h = 0;
+    if (!read32(chr + 0x78, &h) || static_cast<int>(h) < 0 || h > 0xFFFF) return false;
+    *out = static_cast<uint16_t>(h);
+    return true;
+}
+
+// Our game runs it (the kill souls' test): WorldChrMan's pass gives it an update rate, not -1.
+bool runs_here(uint32_t chr) {
+    uint32_t rate = 0;
+    return read32(chr + 0xF4, &rate) && rate != 0xFFFFFFFF;
+}
+
+bool on_our_list(uint16_t handle) {
+    const auto it = g_ran.find(handle);
+    return it != g_ran.end() && (g_ran_frozen || now() - it->second <= kNearKeep);
+}
+
+// The scaling level of this enemy (extra co-op players for it): the session's, or with VicinityScaling the co-op
+// players whose games run it less one (see the scaling by vicinity above).
+int enemy_level(uint32_t chr) {
+    if (!g_active) return 0;
+    const int session_level = std::max(0, std::min(kMaxLevel, g_players - 1));
+    uint16_t handle = 0;
+    if (!g_vicinity || !session_level || !net_handle(chr, &handle)) return session_level;
+    int n = session::near_count(handle);
+    if (!g_invader && on_our_list(handle)) ++n;
+    return std::max(0, std::min(session_level, n - 1));
 }
 
 // Diagnostic for the 2026-10-13 report (an enemy the guest hit died with health left on the guest's bar): every
@@ -1693,11 +1749,23 @@ void scale_tick() {
     int level = g_active ? g_players - 1 : 0;
     level = std::max(0, std::min(kMaxLevel, level));
     if (level != g_logged_level) {
-        LOG_INFO("[coop] Enemy scaling level %d (%d co-op player(s)): health x%.2f, bosses x%.2f", level, level + 1,
+        LOG_INFO("[coop] Enemy scaling level %d (%d co-op player(s)): health x%.2f, bosses x%.2f%s", level, level + 1,
                  level * (g_cfg.enemy_health / 100.0f) + 1.0f + g_bloody * (g_cfg.enemy_health / 100.0f) / 3,
-                 level * (g_cfg.boss_health / 100.0f) + 1.0f + g_bloody * (g_cfg.boss_health / 100.0f) / 8);
+                 level * (g_cfg.boss_health / 100.0f) + 1.0f + g_bloody * (g_cfg.boss_health / 100.0f) / 8,
+                 g_vicinity && level ? " at most: by vicinity, each enemy for the co-op players whose games run it" : "");
         g_logged_level = level;
     }
+    const bool frozen = spectate::viewing();
+    if (frozen != g_ran_frozen) {
+        g_ran_frozen = frozen;
+        if (g_vicinity) {
+            LOG_INFO("[coop] Scaling by vicinity: our list of the enemies we run %s (%d enemies)",
+                     frozen ? "is kept as it is while we spectate" : "follows our game again",
+                     static_cast<int>(g_ran.size()));
+        }
+    }
+    std::set<uint16_t> handles_seen;
+    int levels[kMaxLevel + 1] = {};
     std::set<uint32_t> seen;
     std::vector<uint32_t> gauge_bosses;
     rules::gauge_boss_chrs(&gauge_bosses);
@@ -1707,16 +1775,29 @@ void scale_tick() {
         read32(chr + 0x74, &team);
         const bool boss = static_cast<int>(team) == kBossTeam ||
                           std::find(gauge_bosses.begin(), gauge_bosses.end(), chr) != gauge_bosses.end();
-        // In a session with no other co-op player, the rows of no extra player (health x1 until a Bloody Mary comes):
-        // a Mary then only points the enemy at another count's row, as with more players.
-        const int want = !level      ? (g_active ? (boss ? kScaleBoss0 : kScaleEnemy0) : 0)
-                         : level <= 5 ? (boss ? kScaleBoss : kScaleEnemy) + level - 1
-                                      : (boss ? kScaleBoss2 : kScaleEnemy2) + level - 6;
-        auto it = g_scaled.find(chr);
-        const int have = it == g_scaled.end() ? 0 : it->second;
         // A corpse keeps what it has: no scaling change comes to it, so its health stays as its death left it (a copy at
         // 0 that another game moves comes back only by that game's or the host's word).
         const bool down = hp(chr) <= 0 || dying(chr);
+        // Our list for the vicinity scaling: the living enemies our game runs (not while we spectate).
+        uint16_t handle = 0;
+        if (net_handle(chr, &handle)) {
+            handles_seen.insert(handle);
+            if (down) {
+                g_ran.erase(handle);
+            } else if (!g_ran_frozen && runs_here(chr)) {
+                g_ran[handle] = now();
+            }
+        }
+        // This enemy's level: the session's, or the co-op players whose games run it (VicinityScaling). In a session
+        // with no other co-op player for it, the rows of no extra player (health x1 until a Bloody Mary comes): a Mary
+        // then only points the enemy at another count's row, as with more players.
+        const int lv = enemy_level(chr);
+        const int want = !lv      ? (g_active ? (boss ? kScaleBoss0 : kScaleEnemy0) : 0)
+                         : lv <= 5 ? (boss ? kScaleBoss : kScaleEnemy) + lv - 1
+                                   : (boss ? kScaleBoss2 : kScaleEnemy2) + lv - 6;
+        if (!down) ++levels[lv];
+        auto it = g_scaled.find(chr);
+        const int have = it == g_scaled.end() ? 0 : it->second;
         const auto fill = g_fill_hp.find(chr);
         if (fill != g_fill_hp.end() && (down || keep_share(chr, fill->second))) g_fill_hp.erase(fill);
         if (down) {
@@ -1771,11 +1852,38 @@ void scale_tick() {
     }
     if (g_retargeted) {
         static int lines = 0;
-        if (++lines <= 40) {
-            LOG_INFO("[coop] Enemy scaling level %d: %d living enemies' scaling changed in place (their share of health "
-                     "kept; the dead keep theirs)", level, g_retargeted);
+        if (++lines <= (g_vicinity ? 120 : 40)) {
+            LOG_INFO("[coop] Enemy scaling: %d living enemies' scaling changed in place (their share of health kept; the "
+                     "dead keep theirs)%s", g_retargeted, g_vicinity ? " (by vicinity)" : "");
         }
         g_retargeted = 0;
+    }
+    // Our list: an enemy no longer here, or not run for kNearKeep, leaves it (not while we spectate).
+    if (!g_ran_frozen) {
+        for (auto it = g_ran.begin(); it != g_ran.end();) {
+            it = handles_seen.count(it->first) && now() - it->second <= kNearKeep ? std::next(it) : g_ran.erase(it);
+        }
+    }
+    // With VicinityScaling, what the living enemies here are scaled for, at most every 30 s and only when it changed.
+    if (g_vicinity && g_active) {
+        static double said_at = 0;
+        static std::string said;
+        static int lines = 0;
+        std::string now_line;
+        for (int i = 0; i <= kMaxLevel; ++i) {
+            if (!levels[i]) continue;
+            char one[32];
+            std::snprintf(one, sizeof(one), "%s%d for %d", now_line.empty() ? "" : ", ", levels[i], i + 1);
+            now_line += one;
+        }
+        if (now_line != said && now() - said_at >= 30.0 && lines < 80) {
+            ++lines;
+            said = now_line;
+            said_at = now();
+            LOG_INFO("[coop] Scaling by vicinity: the living enemies here are scaled for: %s player(s); our list %d "
+                     "enemies%s", now_line.empty() ? "none" : now_line.c_str(), static_cast<int>(g_ran.size()),
+                     g_ran_frozen ? " (kept while we spectate)" : "");
+        }
     }
     for (auto it = g_scaled.begin(); it != g_scaled.end();) {
         it = seen.count(it->first) ? std::next(it) : g_scaled.erase(it);
@@ -2011,13 +2119,13 @@ void bonfire_tick() {
     }
 }
 
-// The death debuff: the row for the number of Crimson Blossoms the player carries. With DeathDebuffs off,
-// Blossoms still held from a session with it on do nothing (and an applied debuff comes off).
+// The death debuff: the row for the number of Crimson Blossoms the player carries, whatever DeathDebuffs says: with it
+// off a death gives none, but the Death Knell's price does (give_knell_blossom), and they wither as any others do.
 void debuff_tick(uint32_t me) {
     static double last = 0;
     if (now() - last < 0.5) return;
     last = now();
-    const int blossoms = g_cfg.death_debuffs && g_blossom_count_fn ? std::min(5, g_blossom_count_fn()) : 0;
+    const int blossoms = g_blossom_count_fn ? std::min(5, g_blossom_count_fn()) : 0;
     const int want = blossoms > 0 ? kDebuff + blossoms - 1 : 0;
     if (want == g_debuff_applied && (!want || find_effect(me, want, nullptr))) return;
     if (g_debuff_applied) remove(me, g_debuff_applied);
@@ -2581,7 +2689,9 @@ void tick() {
         if (now() - loaded_at >= 2.0) scale_tick();
     } else {
         loaded_at = 0;
-        // A load frees every enemy, and the next ones may get the same addresses: what we knew goes with them.
+        // A load frees every enemy, and the next ones may get the same addresses: what we knew goes with them. Our list
+        // for the vicinity scaling too: our player is somewhere else after it.
+        g_ran.clear();
         g_scaled.clear();
         g_fill_hp.clear();
         g_base_max.clear();
@@ -2706,6 +2816,21 @@ void set_session(bool active, bool invader, bool invader_present) {
 }
 
 void set_players(int coop_players) { g_players = std::max(1, coop_players); }
+
+void set_vicinity(bool on) {
+    if (on == g_vicinity) return;
+    g_vicinity = on;
+    LOG_INFO("[coop] Enemy scaling by vicinity %s", on ? "on (the host's VicinityScaling): each enemy for the co-op "
+             "players whose games run it" : "off: every enemy for the session's co-op players");
+}
+
+void near_handles(std::vector<uint16_t>* out) {
+    out->clear();
+    if (!g_active || g_invader || game::loading()) return;
+    for (const auto& [handle, at] : g_ran) {
+        if (g_ran_frozen || now() - at <= kNearKeep) out->push_back(handle);
+    }
+}
 void set_everyone_dead(bool all_dead) { g_everyone_dead = all_dead; }
 void set_rest_handler(void (*fn)()) { g_rest_fn = fn; }
 bool set_homeward_state_handler(bool (*fn)()) {
@@ -2757,9 +2882,7 @@ void remote_rest() {
 }
 
 bool scale_ready(uint32_t chr) {
-    int level = g_active ? g_players - 1 : 0;
-    level = std::max(0, std::min(5, level));
-    if (!level) return true;
+    if (!enemy_level(chr)) return true;
     const auto it = g_scaled.find(chr);
     if (it == g_scaled.end() || g_fill_hp.count(chr)) return false;
     const auto b = g_base_max.find(chr);

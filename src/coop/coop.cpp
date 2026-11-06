@@ -495,6 +495,7 @@ void coop_install(const CoopConfig& config) {
     cfg.seal_boss_fogs = g_cfg.seal_boss_fogs;
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.bloody_mary = g_cfg.bloody_mary;
+    cfg.vicinity_scaling = g_cfg.vicinity_scaling;
     cfg.overhead_display = g_cfg.overhead_display;
     cfg.net_rate = g_cfg.net_rate;
     cfg.share_items = g_cfg.share_items;

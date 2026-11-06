@@ -1131,6 +1131,8 @@ void trip_release() {
 
 bool holding() { return g_hold; }
 
+bool viewing() { return g_hold || g_knell_chr != 0; }
+
 bool installed() { return g_installed; }
 
 const std::vector<Teammate>& teammates() { return g_team; }

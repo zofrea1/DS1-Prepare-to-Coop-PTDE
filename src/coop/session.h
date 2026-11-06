@@ -25,6 +25,7 @@ struct Config {
     int scaling[6] = {40, 0, 25, 115, 0, 40};
     bool death_debuffs = false;  // each death in a session adds a Crimson Blossom (up to five)
     bool bloody_mary = true;     // 1.5.0: each co-op death gives everyone a Bloody Mary (the host's setting decides)
+    bool vicinity_scaling = true;  // 1.5.0: each enemy scaled for the co-op players whose games run it (the host's)
     // A companion's floating health bar: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul
     // level, ping and the smoothing their character is drawn with.
     int overhead_display = 5;
@@ -134,12 +135,15 @@ const char* place_summon_sign();
 const char* sign_refusal();
 // The Death Knell took us somewhere: a Bloody Mary for the session (the host counts it; a guest's game tells the
 // host's). `sign`: to a summon sign. Added: our count went up (host); Asked: the host's game was told, and decides
-// (knell_bloody_mary_answer); None: nothing (BloodyMary off, five already, no session).
+// (knell_bloody_mary_answer); None: nothing (five already, no session). Counted with BloodyMary off too: the setting
+// is about deaths, and a host of 1.5.0 counts a guest's knell either way.
 enum class KnellMary { None, Added, Asked };
 KnellMary knell_bloody_mary(bool sign);
 // After Asked: 1 once the host's count went up, -1 when it did not within a few seconds (or nothing was asked), 0 still
 // waiting.
 int knell_bloody_mary_answer();
+// VicinityScaling: how many other co-op players' games run the enemy with this net handle (their kNear lists).
+int near_count(uint32_t handle);
 // We stand in the host's world as a co-op guest: arrived, not invading, not on the way home.
 bool coop_guest_in_world();
 bool active();       // any role, including searching and joining

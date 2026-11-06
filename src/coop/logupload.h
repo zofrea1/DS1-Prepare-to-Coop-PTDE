@@ -3,8 +3,9 @@
 #pragma once
 
 // The log upload (UploadLogs, off by default): when the game closes, this game's log (PTDE-FPS-Unlock.log, next to
-// the DLL) is sent to the folder UploadLogsTo names, as <UploadLogsName or the PC's name>/<the log's start>.log, so
-// the people testing the mod together need not pass logs around. A log a crash or a kill left behind goes at the next
+// the DLL) is sent to the developer's upload folder UploadLogsTo names (its user and password are the developer's
+// upload account), as <UploadLogsName or the PC's name>/<the log's start>.log, so the developer gets the logs of the
+// players who help with the mod without asking for files. A log a crash or a kill left behind goes at the next
 // start instead (the FPS Unlock keeps it as PTDE-FPS-Unlock.log.prev). Nothing is sent unless both keys are set.
 // The log holds the Steam names and ids of the players met, their characters' names and the PC's name.
 

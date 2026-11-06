@@ -792,8 +792,9 @@ void arrive() {
 // A summon sign one of them left (Vigil Soapstone) is the co-operative way: the debuffs only. With
 // DeathKnellSoulLevel, going to a teammate takes a soul level instead of the souls and humanity (the first price).
 // The price's line names only what was taken (Grok dcb9359e): the souls and humanity (going to a teammate), the
-// Crimson Blossom when one was given (not with DeathDebuffs off, while invading, or with five held), and the hardier
-// enemies when the session's Bloody Marys went up (not with BloodyMary off, or five already). Empty when nothing was.
+// Crimson Blossom when one was given (not while invading, or with five held), and the hardier enemies when the
+// session's Bloody Marys went up (not with five already). Both are the price with DeathDebuffs or BloodyMary off too:
+// those settings are about deaths. Empty when nothing was.
 std::wstring price_line(bool souls, bool blossom, bool mary) {
     std::wstring what;
     if (souls) what = L"your souls, your humanity";
@@ -858,10 +859,10 @@ void pay_price() {
     LOG_INFO("[coop] Death Knell: the price for %s (stagger %d%s, riposte sound c%d%s, Crimson Blossom %s, Bloody Mary "
              "%s)", sign ? "a summon sign" : g_soul_level ? "a teammate, a soul level" : "a teammate",
              kStagger, staggered ? "" : " FAILED", kRiposteSound, sound ? "" : " FAILED",
-             blossom ? "given" : "not given (DeathDebuffs off, invading, or five held)",
+             blossom ? "given" : "not given (invading, or five held)",
              mary == session::KnellMary::Added   ? "counted"
              : mary == session::KnellMary::Asked ? "asked of the host's game"
-                                                 : "not counted (BloodyMary off, or five already)");
+                                                 : "not counted (five already)");
 }
 
 // Until the arrival lets the player act again: its animation leaves ChrCtrl+0x350, or its length passes.

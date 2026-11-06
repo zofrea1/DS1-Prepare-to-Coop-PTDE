@@ -29,8 +29,11 @@ namespace coop::motion {
 
 enum Gait : int8_t { kUnknown = -1, kStand = 0, kWalk = 1, kRun = 2, kSprint = 3 };
 
+// kHold / kRelease (1.5.0): the Death Knell's crouch, the sender's character held where its animation is (anim 0).
+enum AnimKind : uint8_t { kStart = 0, kStop = 1, kHold = 2, kRelease = 3 };
+
 struct Anim {
-    uint8_t kind;  // 0 an event animation starts, 1 the event animation is stopped
+    uint8_t kind;  // 0 an event animation starts, 1 the event animation is stopped, 2/3 the Knell's hold
     int32_t anim;
     uint8_t loop;
 };
@@ -64,12 +67,19 @@ int remote_open_anim(uint32_t chr);
 int held_event_anim(uint32_t chr);
 // True for the animations that are passed on (Remastered Seamless Co-op's list).
 bool synced_anim(int anim);
-// The Death Knell's arrival (knell.cpp): our next start of `anim` (one of the summon arrivals 6950-6952, the price's
-// stagger, the ring's crouch 6066 and the rise out of it 6067) is passed on to the others too, looped as it is started,
-// who play it on our character (1.5.0). Those animations are not passed on otherwise.
+// The Death Knell's arrival (knell.cpp): our next start of `anim` (one of the summon arrivals 6950-6952, or the price's
+// stagger) is passed on to the others too, looped as it is started, who play it on our character (1.5.0). Those
+// animations are not passed on otherwise.
 void send_knell_arrival(int anim);
-// The others stop the event animation our character holds there (the Knell's crouch, let go without a choice).
-void send_knell_stop();
+// The Death Knell's crouch (1.5.0): the others hold our character's animations where they are (on) or let them go.
+void send_knell_hold(bool on);
+// A character's animations held where they are (its animation set's speed at 0), or let go again at the speed they
+// had. False when the character has no animation set to hold.
+bool hold_anims(uint32_t chr, bool on);
+// Its animations are held (by hold_anims, or by anything else that set that speed to 0).
+bool anims_held(uint32_t chr);
+// After a load: the characters held before it are gone.
+void forget_held();
 // One of those arrivals (a start of it from another player is shown).
 bool knell_arrival_anim(int anim);
 // How long one of them plays, to where its player can act again (the arrivals' TAE windows; the price's stagger).

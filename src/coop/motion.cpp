@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 namespace coop::motion {
@@ -146,9 +147,7 @@ std::vector<Anim> g_pending;
 bool g_enabled = true;      // [SeamlessCoop] BonfireAnimations
 // The Death Knell's arrivals (knell.cpp): the living player's rise (6950), the summoned phantom's (6951) and the
 // Warrior of Sunlight's (6952, "Praise the Sun"). Passed on only when the Knell starts one (send_knell_arrival).
-// Also the ring's crouch held while the Knell's view is open (6066, looped) and the rise out of it with the use's
-// effect when the player chooses (6067): the game's own pair for an item with a dialog (the Red Eye Orb's yes/no).
-constexpr int kKnellAnims[] = {6950, 6951, 6952, 2010, 6066, 6067};  // and the price's stagger
+constexpr int kKnellAnims[] = {6950, 6951, 6952, 2010};  // and the price's stagger
 int g_knell_send = 0;
 ULONGLONG g_knell_send_at = 0;
 
@@ -419,8 +418,6 @@ double knell_anim_seconds(int anim) {
         case 6951: return 4.55;
         case 6952: return 5.4;
         case 6950: return 2.15;
-        case 6066: return 125.0;  // the crouch, held while the view is open (two minutes at most)
-        case 6067: return 3.2;
         default: return 1.5;  // 2010, the price's stagger
     }
 }
@@ -430,7 +427,57 @@ void send_knell_arrival(int anim) {
     g_knell_send_at = GetTickCount64();
 }
 
-void send_knell_stop() { queue(Anim{1, 0, 0}); }
+void send_knell_hold(bool on) { queue(Anim{static_cast<uint8_t>(on ? kHold : kRelease), 0, 0}); }
+
+// The speed a character's animation set (ChrCtrl+0x14) runs at: its update (0xD98A50, from the ChrCtrl update
+// 0xE368C0) multiplies the frame's time by +0x64 when that is not 1, else by +0x48 (both 1 when it is made,
+// 0xD98FC0), before it moves each animation's time on (the 0x60-byte records from +4, their time at +0x14; the TAE
+// events and the Havok controls follow that time). With +0x64 at 0 the pose, the TAE and the action they drive stand
+// still; the character is otherwise as it was (hits land, its physics runs). The value before is put back.
+constexpr uint32_t kChrCtrl = 0x28, kCtrlAnimSet = 0x14, kSetSpeedOverride = 0x64;
+struct Held {
+    uint32_t chr;
+    float was;
+};
+std::vector<Held> g_held;
+
+bool write_float(uint32_t addr, float v) {
+    __try {
+        *ptr<float>(addr) = v;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool hold_anims(uint32_t chr, bool on) {
+    uint32_t ctrl = 0, set = 0, bits = 0;
+    if (!chr || !read32(chr + kChrCtrl, &ctrl) || ctrl < 0x10000 || !read32(ctrl + kCtrlAnimSet, &set) ||
+        set < 0x10000 || !read32(set + kSetSpeedOverride, &bits)) {
+        return false;
+    }
+    float speed = 0.0f;
+    std::memcpy(&speed, &bits, 4);
+    size_t at = g_held.size();
+    for (size_t i = 0; i < g_held.size(); ++i) {
+        if (g_held[i].chr == chr) at = i;
+    }
+    if (on) {
+        if (at == g_held.size()) g_held.push_back(Held{chr, speed > 0.0f ? speed : 1.0f});
+        return write_float(set + kSetSpeedOverride, 0.0f);
+    }
+    const float was = at < g_held.size() ? g_held[at].was : 1.0f;
+    if (at < g_held.size()) g_held.erase(g_held.begin() + static_cast<std::ptrdiff_t>(at));
+    return write_float(set + kSetSpeedOverride, was);
+}
+
+bool anims_held(uint32_t chr) {
+    uint32_t ctrl = 0, set = 0, speed = 0;
+    return chr && read32(chr + kChrCtrl, &ctrl) && ctrl >= 0x10000 && read32(ctrl + kCtrlAnimSet, &set) &&
+           set >= 0x10000 && read32(set + kSetSpeedOverride, &speed) && speed == 0;
+}
+
+void forget_held() { g_held.clear(); }
 
 void set_bonfire_animations(bool on) { g_enabled = on; }
 

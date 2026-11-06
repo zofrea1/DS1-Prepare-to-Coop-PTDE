@@ -4010,9 +4010,8 @@ void on_sign(uint64_t from, const SignMsg& m) {
 // was made there and the character then jumped to them without it ("the animation will play but not the effect").
 // An arrival on a character that was here already waits for it to jump (kKnellJump from where it stood when the
 // message came), at most kKnellJumpWait; a joining player's is made where they arrive.
-// The ring's crouch (6066) is held, looped, while the player's view is open, and ends with their stop or with the rise
-// out of it (6067) when they choose; neither waits for a jump. A crouch whose player's report says they no longer hold
-// it is not started (a stop that came before their character here was ready).
+// A looped one whose player's report says they no longer hold it is not started (a stop that came before their
+// character here was ready).
 struct KnellAnimWait {
     int anim = 0;
     double came = 0;          // the message
@@ -4041,6 +4040,49 @@ struct KnellLate {
 std::map<uint64_t, KnellLate> g_knell_late;
 constexpr double kKnellLateAfter = 0.25;
 constexpr int kStaggerAnim = 2010;  // the knell's price: never late enough to matter, and it ends by itself
+// The Death Knell's crouch (motion kHold / kRelease, 1.5.0): while its player's view is open their character here is
+// held where its animation is, as theirs is (motion::hold_anims), so the others see them down in the ring's crouch. Let
+// go by their release, or kKnellHoldLimit after the hold (their view's own limit is two minutes), or when their
+// character here is another (made again).
+struct KnellHeld {
+    uint32_t chr = 0;
+    double at = 0;
+};
+std::map<uint64_t, KnellHeld> g_knell_held;
+constexpr double kKnellHoldLimit = 130.0;
+
+void knell_held_tick() {
+    static int lines = 0;
+    for (auto it = g_knell_held.begin(); it != g_knell_held.end();) {
+        const uint32_t chr = chr_of_peer(it->first);
+        // Not in this world this frame: keep the record. Their character is often missing for a frame, and writing
+        // the old one after it was freed is not safe. A new character is another object, and was never held.
+        if (!chr) {
+            if (now() - it->second.at > kKnellHoldLimit) it = g_knell_held.erase(it);
+            else ++it;
+            continue;
+        }
+        if (chr != it->second.chr) {
+            it = g_knell_held.erase(it);
+            continue;
+        }
+        if (now() - it->second.at > kKnellHoldLimit) {
+            motion::hold_anims(chr, false);
+            if (++lines <= 30) LOG_INFO("[coop] Knell hold on %08X let go: no release came in %.0f s", chr, kKnellHoldLimit);
+            it = g_knell_held.erase(it);
+            continue;
+        }
+        // The sender's own game holds the speed again whenever the game sets it back (knell.cpp hold_tick). One
+        // write here does not last when the same thing happens to their character in this game.
+        if (!motion::anims_held(chr)) {
+            motion::hold_anims(chr, true);
+            if (++lines <= 30) {
+                LOG_INFO("[coop] Knell hold on %08X: the game set the speed back; held again", chr);
+            }
+        }
+        ++it;
+    }
+}
 
 void knell_late_tick() {
     static int lines = 0;
@@ -4073,8 +4115,18 @@ void knell_anims_tick() {
     if (g_role == Role::None || game::loading()) {
         g_knell_waits.clear();
         g_knell_late.clear();
+        // A load frees the characters. The session ending does not: let a character that is still here walk again.
+        if (!game::loading()) {
+            for (const auto& kv : g_knell_held) {
+                const uint32_t chr = chr_of_peer(kv.first);
+                if (chr && chr == kv.second.chr) motion::hold_anims(chr, false);
+            }
+        }
+        g_knell_held.clear();
+        if (game::loading()) motion::forget_held();
         return;
     }
+    if (!g_knell_held.empty()) knell_held_tick();
     if (!g_knell_late.empty()) knell_late_tick();
     if (g_knell_waits.empty()) return;
     static int lines = 0;
@@ -4856,6 +4908,22 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (!as(&m) || g_role == Role::None || game::loading()) return;
             PeerInfo* p = peer(from);
             p->anim_at = now();
+            if (m.kind == motion::kHold || m.kind == motion::kRelease) {
+                const uint32_t chr = chr_of_peer(from);
+                const bool on = m.kind == motion::kHold;
+                const bool done = chr && motion::hold_anims(chr, on);
+                if (on && done) {
+                    g_knell_held[from] = KnellHeld{chr, now()};
+                } else {
+                    g_knell_held.erase(from);
+                }
+                static int lines = 0;
+                if (++lines <= 120) {
+                    LOG_INFO("[coop] %s: knell crouch %s%s", p->name.c_str(), on ? "held" : "let go",
+                             done ? " on their character" : chr ? " (FAILED on their character)" : " (their character is not here)");
+                }
+                break;
+            }
             if (m.kind == 0) {
                 if (!motion::synced_anim(m.anim) && !motion::knell_arrival_anim(m.anim)) return;
                 p->ceremony = m.loop && motion::synced_anim(m.anim) ? m.anim : 0;
@@ -5945,9 +6013,13 @@ void tick() {
                 broadcast(m);
                 static int lines = 0;
                 if (++lines <= 200) {
-                    LOG_INFO("[coop] Our %s animation %s %d%s: told the others",
-                             a.kind == 0 && !motion::synced_anim(a.anim) ? "knell" : "bonfire",
-                             a.kind == 0 ? "start" : "stop", a.anim, a.loop ? " (loop)" : "");
+                    if (a.kind == motion::kHold || a.kind == motion::kRelease) {
+                        LOG_INFO("[coop] Our knell crouch %s: told the others", a.kind == motion::kHold ? "held" : "let go");
+                    } else {
+                        LOG_INFO("[coop] Our %s animation %s %d%s: told the others",
+                                 a.kind == 0 && !motion::synced_anim(a.anim) ? "knell" : "bonfire",
+                                 a.kind == 0 ? "start" : "stop", a.anim, a.loop ? " (loop)" : "");
+                    }
                 }
             }
         }

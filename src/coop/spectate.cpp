@@ -122,9 +122,10 @@ constexpr uint32_t kCollisionDecide = 0x00DD2EE0;
 // The hero light: the point light the game keeps around the local player (ChrLanternSlot, its light from the floor's
 // lantern id, the part's +0xC, 0xDF9960) is attached in each update of the local player only (0xE79770: vt+0xA4 is "is
 // the local player", then 0xE05760 with eax = chr+0x2B4, its attach slots, and two variant flags), and a slot nobody
-// asks for in a frame goes (0xDF9960 clears its live bit). Another player's character never had one, so the teammate
-// we follow stood in the dark far from us (2026-11-05). While we follow a teammate their character is given it every
-// frame, as the game gives ours (the plain light: both variants off); it goes by itself when the view ends.
+// asks for in a frame goes (the ask, 0x476460 from 0xE05760, sets the slot's 0x8000 bit at +6). Another player's
+// character never had one, so the teammate we follow stood in the dark far from us (2026-11-05). While we follow a
+// teammate their character is given it every frame, as the game gives ours (the plain light: both variants off); it
+// goes by itself when the view ends.
 constexpr uint32_t kAttachLantern = 0x00E05760;  // eax = chr+0x2B4, stdcall(variant 8, variant 0x10) ret 8
 constexpr uint32_t kChrAttach = 0x2B4;
 constexpr uint32_t kActivationCallSite = 0x00DE81F0;  // call 0xE3E870: stdcall(WorldChrMan) -> al, every entity ready
@@ -186,6 +187,7 @@ uint32_t g_gave_chr = 0;
 uint32_t g_gave_hit = 0;
 double g_gave_at = 0;
 double g_seam_until = 0;
+uint32_t g_seam_chr = 0;     // the character the seam hold is for (it holds no other, and ends with the follow)
 uint32_t g_gave_logged = 0;  // the floor the last "given" line was about
 constexpr double kTakenBackWithin = 0.5;
 constexpr double kSeamHold = 2.0;
@@ -725,6 +727,8 @@ void view_extras() {
         g_view_block = kNoBlock;
         g_collision_block = kNoBlock;
         g_collision_floor = 0;
+        g_seam_until = 0;
+        g_seam_chr = 0;
         fix_own_rate(false);
         g_drawn_for = 0;
         return;
@@ -743,15 +747,17 @@ void view_extras() {
         const bool other_map = have && read8(have + 0xF, &have_block) && read8(reported + 0xF, &their_block) &&
                                have_block != their_block;
         if (g_gave_chr == chr && g_gave_hit && have && have != g_gave_hit && now() - g_gave_at < kTakenBackWithin) {
-            if (now() >= g_seam_until) {
+            if (g_seam_chr != chr || now() >= g_seam_until) {
                 LOG_INFO("[coop] Spectating: the followed teammate's character took its own floor back (its physics "
                          "touches it here): left to it for %.0f s", kSeamHold);
             }
             g_seam_until = now() + kSeamHold;
+            g_seam_chr = chr;
             g_gave_hit = 0;
         }
         const bool stale = other_map || !rules::floor_ready(have) || rules::view_only_floor(chr);
-        if (have != reported && (why || (stale && now() >= g_seam_until))) {
+        const bool seam_held = g_seam_chr == chr && now() < g_seam_until;
+        if (have != reported && (why || (stale && !seam_held))) {
             bool changed = false;
             const char* give_why = rules::give_floor(chr, reported, &changed);
             if (changed) {

@@ -3926,13 +3926,14 @@ std::map<uint64_t, NearList> g_near;  // the other co-op players' lists
 std::vector<uint16_t> g_near_sent;    // ours, as last sent
 double g_near_sent_at = 0;
 
-// Host: VicinityScaling for our session. On while every co-op guest's game sends and counts the lists (1.5.0 or
-// later): an older guest's game scales every enemy for the whole session, and the games would part on the enemies'
-// health. An invader of an older version counts none of it and is not counted, so it does not turn it off.
+// Host: VicinityScaling for our session. On while every other player's game counts the lists (1.5.0 or later): an
+// older game scales every enemy for the whole session, and the games would part on the enemies' health. An invader's
+// too (Grok review 064550aa): it is never counted, but an older one still scales every enemy for all the co-op
+// players, and its copies, hit by the same numbers, outlive the others' where the host's HP report does not reach.
 bool host_vicinity() {
     if (!g_cfg.vicinity_scaling) return false;
     for (const auto& p : g_peers) {
-        if (p.invader || !admitted(p.id) || now() - p.last_seen > 10.0) continue;
+        if (!admitted(p.id) || now() - p.last_seen > 10.0) continue;
         if (compare_versions(p.mod, "1.5.0") < 0) return false;
     }
     return true;

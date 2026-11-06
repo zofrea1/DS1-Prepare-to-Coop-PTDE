@@ -274,15 +274,33 @@ std::vector<std::wstring> unsent_logs() {
     return out;
 }
 
+// The name the last run's log waits under: its start, with -2, -3 ... after it when a log of the same second waits
+// already (the start is kept to the second, and that one is not to be replaced). It is also its name on the server.
+std::wstring unsent_path(const std::wstring& stamp) {
+    std::wstring to = g_dir + kUnsentPrefix + stamp + L".log";
+    for (int n = 2; n < 100 && GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES; ++n) {
+        to = g_dir + kUnsentPrefix + stamp + L"-" + std::to_wstring(n) + L".log";
+    }
+    return to;
+}
+
 // At the start, before any send: the last run's log, if it was not sent when it closed, is moved where the next
-// start's log_init does not replace it. Only the newest kUnsentKept wait.
+// start's log_init does not replace it; copied there when it cannot be moved (another program holding it open, as a
+// virus scanner can), since left as the .prev it would be gone at the next start (Grok review 064550aa). Only the
+// newest kUnsentKept wait.
 void keep_unsent() {
     const std::wstring prev = g_dir + kPrevName;
     const std::wstring stamp = stamp_of(prev);
     if (!stamp.empty() && stamp != sent_stamp()) {
-        const std::wstring to = g_dir + kUnsentPrefix + stamp + L".log";
-        if (!MoveFileExW(prev.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-            LOG_INFO("[coop] Log upload: the last run's log could not be kept aside (%lu)", GetLastError());
+        const std::wstring to = unsent_path(stamp);
+        if (!MoveFileExW(prev.c_str(), to.c_str(), 0)) {
+            const DWORD moved = GetLastError();
+            if (CopyFileW(prev.c_str(), to.c_str(), TRUE)) {
+                LOG_INFO("[coop] Log upload: the last run's log could not be moved aside (%lu): copied", moved);
+            } else {
+                LOG_INFO("[coop] Log upload: the last run's log could not be kept aside (move %lu, copy %lu): it is not "
+                         "sent", moved, GetLastError());
+            }
         }
     }
     std::vector<std::wstring> waiting = unsent_logs();
@@ -293,8 +311,9 @@ DWORD WINAPI start_thread(void*) {
     const size_t prefix = std::wcslen(kUnsentPrefix);
     for (const std::wstring& name : unsent_logs()) {
         const std::wstring path = g_dir + name;
-        std::wstring stamp = stamp_of(path);
-        if (stamp.empty()) stamp = name.substr(prefix, name.size() - prefix - 4);  // its name without the ".log"
+        // Its name without the prefix and the ".log": its start, and the -2 ... of a second log of that second.
+        std::wstring stamp = name.substr(prefix, name.size() - prefix - 4);
+        if (stamp.empty()) stamp = stamp_of(path);
         // No answer (no network, the server down): this one and the rest wait for the next start. One the server
         // answered and refused would be refused again, and is not kept.
         if (send_logged(path, stamp, "an earlier run's log (not sent when it closed)") == 0) {

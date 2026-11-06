@@ -1575,11 +1575,14 @@ int scaled_max(int base, int id) {
 }
 
 // `m` is the max HP one of our scaling rows other than `except` gives an enemy of max HP `base` (0: any of them): the
-// max the game worked out for it at another player count. Enemy and boss rows alike (an enemy can become a boss).
+// max the game worked out for it at another player count. Enemy and boss rows alike (an enemy can become a boss), and
+// the rows of no extra player too: with a Bloody Mary held they give more than the enemy's own max (x1.17 with one at
+// the default EnemyHealthScaling), and with VicinityScaling an enemy one player runs alone has them. Left out, an
+// enemy that player walked away from kept that max in their game when a teammate came to it (Grok review 064550aa).
 bool other_level_max(int base, int m, int except) {
-    static const int kFirst[4] = {kScaleEnemy, kScaleBoss, kScaleEnemy2, kScaleBoss2};
-    static const int kCount[4] = {5, 5, 2, 2};
-    for (int k = 0; k < 4; ++k) {
+    static const int kFirst[6] = {kScaleEnemy, kScaleBoss, kScaleEnemy2, kScaleBoss2, kScaleEnemy0, kScaleBoss0};
+    static const int kCount[6] = {5, 5, 2, 2, 1, 1};
+    for (int k = 0; k < 6; ++k) {
         for (int n = 0; n < kCount[k]; ++n) {
             const int id = kFirst[k] + n;
             if (id != except && std::abs(scaled_max(base, id) - m) <= 1) return true;

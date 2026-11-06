@@ -867,9 +867,10 @@ players' lists and is never counted. A level change is made as a player joining 
 enemy our game stops running stays on our list for 10 s, so one at the edge of what we run does not change its
 scaling as we step back and forth. While we spectate (our death's view or the Death Knell's, `spectate::viewing`)
 WorldChrMan's pass takes the teammate's character for ours, and what runs here is around them: our list stays as the
-view found it, where our body is. The host turns it on for its session only while every co-op guest is on 1.5.0 or
-later (their hello's version): an older guest's game scales every enemy for the whole session, and the games would
-part on the enemies' health. The log says each change of mode, each player's first list, and every 30 s (when it
+view found it, where our body is. The host turns it on for its session only while every other player is on 1.5.0 or
+later (their hello's version), the invaders too: an older game scales every enemy for the whole session, and the
+games would part on the enemies' health (an older invader is not counted, but its copies, hit by the same numbers as
+the others', outlived them where the host's HP report does not reach). The log says each change of mode, each player's first list, and every 30 s (when it
 changed) how many of the living enemies here are scaled for how many players.
 
 ### Log upload
@@ -886,7 +887,9 @@ its own and holds the close 12 s at most. A run that ended any other way (a cras
 as `PTDE-FPS-Unlock.log.prev` (the FPS Unlock keeps the last run's log), and the next start sends that one, unless it
 was sent already: `PTDE-Coop-Log-Sent.txt` beside the DLL holds the start of the last log sent at a close. Before it
 sends anything, the start moves that log aside as `PTDE-Coop-Unsent-<its start>.log` (the FPS Unlock replaces the
-`.prev` at every start, so a run that died while its start was still sending lost the log before it), sends those
+`.prev` at every start, so a run that died while its start was still sending lost the log before it; copied there
+when another program holds it and it cannot be moved; `-2`, `-3` ... after the start when a log of the same second
+waits already, a name the server keeps too), sends those
 oldest first and deletes each once the server has answered (one it refused would be refused again); one with no answer waits for the next start with the rest, and
 only the newest five are kept. Logs above 31 MiB send their end. The server side used in testing is a copyparty volume its uploaders can only write to (no listing, no
 reading), with a pre-upload hook that takes only `<name>/<YYYY-MM-DD_HH-MM-SS>.log`, size and rate limits, and no

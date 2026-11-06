@@ -19,10 +19,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace coop::world {
@@ -1343,6 +1345,98 @@ void watch_low_hp(uint32_t chr, int h, int m, bool was_up) {
 // had covered the one before, so it stood until it came) and the longest gap. The players' copies stalled once or twice
 // a second on a good link until their smoothing covered the late tail (netrate.cpp, 2026-11-01); this says whether the
 // enemies' do too. Bosses are left to their own lines (rules.cpp, boss_copy_tick reads their counts).
+// What an enemy near us does in the moments after it changes hands (2026-11-05: enemies "landing flat on their face
+// or back" after the AI changed hands, as if airborne for a frame or two, then getting up). At the change the game swaps
+// the enemy's controller (0xE5A940: its own AI chr+0x410 when this game moves it, else the network's chr+0x414) and
+// starts the new one from the enemy's physics position; the game that lets it go then follows the new mover's updates,
+// which show it where that game had it. Each frame, for the enemies within kHandOffNear of us: when one changes hands,
+// its animations (ChrCtrl+0x350) and its height are kept for kHandOffWatch, and one line says what they did: the
+// animations in order with their time, how far it rose or sank from where it was, and its biggest move up or down in a
+// single frame. The next test's log names the animation of such a fall and the game it happens in.
+constexpr float kHandOffNear = 30.0f;
+constexpr double kHandOffWatch = 2.5;
+struct HandOff {
+    int mover = 0;
+    double at = 0;
+    game::Vec3 from{};
+    float py = 0, lo = 0, hi = 0, step = 0;
+    double step_at = 0;
+    int anim = -2;
+    std::string anims;
+};
+std::map<uint32_t, int> g_near_mover;  // the mover of each enemy near us, last frame
+std::map<uint32_t, HandOff> g_handoffs;
+int g_handoff_lines = 0;
+
+void handoff_tick() {
+    if (!g_active || game::loading() || g_handoff_lines >= 40) return;
+    game::Vec3 me{};
+    if (!game::position(&me, nullptr)) return;
+    const double t = now();
+    if (g_near_mover.size() > 2048) g_near_mover.clear();
+    each_enemy([&](uint32_t chr) {
+        game::Vec3 at{};
+        if (hp(chr) <= 0 || !game::chr_position(chr, &at)) return;
+        const float dx = at.x - me.x, dy = at.y - me.y, dz = at.z - me.z;
+        if (dx * dx + dy * dy + dz * dz > kHandOffNear * kHandOffNear) {
+            g_near_mover.erase(chr);
+            return;
+        }
+        uint32_t current = 0, own_ai = 0, net_ai = 0, ctrl = 0, anim = 0xFFFFFFFF;
+        read32(chr + 0x2C, &current);
+        read32(chr + 0x410, &own_ai);
+        read32(chr + 0x414, &net_ai);
+        if (read32(chr + 0x28, &ctrl) && ctrl) read32(ctrl + 0x350, &anim);
+        const int mover = current && current == own_ai ? 1 : current && current == net_ai ? 2 : 0;
+        auto it = g_near_mover.find(chr);
+        if (it != g_near_mover.end() && it->second != mover && mover != 0 && it->second != 0) {
+            HandOff h;
+            h.mover = mover;
+            h.at = t;
+            h.from = at;
+            h.py = at.y;
+            g_handoffs[chr] = h;
+        }
+        g_near_mover[chr] = mover;
+        auto w = g_handoffs.find(chr);
+        if (w == g_handoffs.end()) return;
+        HandOff& h = w->second;
+        const float rel = at.y - h.from.y;
+        h.lo = std::min(h.lo, rel);
+        h.hi = std::max(h.hi, rel);
+        const float step = at.y - h.py;
+        if (std::fabs(step) > std::fabs(h.step)) {
+            h.step = step;
+            h.step_at = t - h.at;
+        }
+        h.py = at.y;
+        if (static_cast<int>(anim) != h.anim) {
+            h.anim = static_cast<int>(anim);
+            char one[32];
+            std::snprintf(one, sizeof(one), "%s%d@%.2f", h.anims.empty() ? "" : " ", h.anim, t - h.at);
+            if (h.anims.size() < 200) h.anims += one;
+        }
+    });
+    for (auto it = g_handoffs.begin(); it != g_handoffs.end();) {
+        HandOff& h = it->second;
+        if (t - h.at < kHandOffWatch) {
+            ++it;
+            continue;
+        }
+        uint32_t entity = 0;
+        read32(it->first + 0x208, &entity);
+        if (++g_handoff_lines <= 40) {
+            const float dx = h.from.x - me.x, dz = h.from.z - me.z;
+            LOG_INFO("[coop] Enemy %08X (entity %d) came to %s %.0f m from us; in %.1f s after: animations %s; height "
+                     "%+.2f to %+.2f m from where it was, biggest one-frame move %+.2f m at %.2f s",
+                     it->first, static_cast<int>(entity), h.mover == 1 ? "this game" : "another game",
+                     std::sqrt(dx * dx + dz * dz), kHandOffWatch, h.anims.empty() ? "none" : h.anims.c_str(), h.lo,
+                     h.hi, h.step, h.step_at);
+        }
+        it = g_handoffs.erase(it);
+    }
+}
+
 void enemy_stall_tick() {
     static double last = 0;
     static int lines = 0;
@@ -2403,6 +2497,7 @@ void tick() {
     }
     bonfire_tick();
     pos_drain_tick();
+    handoff_tick();
     const uint32_t me = game::player();
     const bool alive = me && hp(me) > 0;
     if (me && g_was_alive && !alive) {

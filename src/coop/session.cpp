@@ -4005,12 +4005,21 @@ void on_sign(uint64_t from, const SignMsg& m) {
 // and the animation started. A character that was here already takes it at once. One started late ends when its
 // player's does (their report, sent the moment it changes), and one not started before theirs would be over is let
 // go: a late arrival would hold their character in place while they walk away.
+// The Death Knell's arrival comes the moment its player warped, before their next position does (2026-11-05: started
+// on a character still 230 m back where they rang it): the arrival's effect (the white glow, the Praise the Sun light)
+// was made there and the character then jumped to them without it ("the animation will play but not the effect").
+// An arrival on a character that was here already waits for it to jump (kKnellJump from where it stood when the
+// message came), at most kKnellJumpWait; a joining player's is made where they arrive.
 struct KnellAnimWait {
     int anim = 0;
     double came = 0;          // the message
     uint32_t chr = 0;         // the character we first saw for them while waiting
     double chr_seen_at = 0;   // when (the upkeep's own first sight is only four times a second)
+    bool from_set = false;    // where that character stood when the message came (it was here already)
+    game::Vec3 from{};
 };
+constexpr double kKnellJump = 2.0;       // m: a warp, not a step
+constexpr double kKnellJumpWait = 0.4;   // s: a warp too short to tell
 std::map<uint64_t, KnellAnimWait> g_knell_waits;
 // A character is built a moment after it is first seen (its entity active, its physics there): 0.1 s more before an
 // event animation goes on it (1.5.0 first gave it 0.5 s, which showed as lag on a join).
@@ -4100,6 +4109,19 @@ void knell_anims_tick() {
             *ptr<uint8_t>(chr + 0x1FD) = static_cast<uint8_t>(c.f1fd | 1);
             *ptr<int32_t>(chr + 0xF4) = 0;
         }
+        // A Death Knell arrival on a character that was here when it came: once it has jumped to where they arrived.
+        bool jumped = true;
+        if (w.from_set && w.anim != kStaggerAnim && age < kKnellJumpWait) {
+            game::Vec3 at{};
+            jumped = game::chr_position(chr, &at) && (at.x - w.from.x) * (at.x - w.from.x) +
+                                                             (at.y - w.from.y) * (at.y - w.from.y) +
+                                                             (at.z - w.from.z) * (at.z - w.from.z) >
+                                                         kKnellJump * kKnellJump;
+        }
+        if (!jumped) {
+            ++it;
+            continue;
+        }
         if (!motion::play_remote_anim(chr, motion::Anim{0, w.anim, 0})) {
             ++it;
             continue;
@@ -4110,7 +4132,11 @@ void knell_anims_tick() {
         }
         if (++lines <= 60) {
             LOG_INFO("[coop] %s: knell animation %d shown on their character %08X (%.2f s after it came%s)", name,
-                     w.anim, chr, age, fixed ? "" : "; the character was just made");
+                     w.anim, chr, age,
+                     !fixed       ? "; the character was just made"
+                     : w.from_set ? (age < kKnellJumpWait ? "; once it jumped to where they arrived"
+                                                          : "; it did not jump: a short warp, or none")
+                                  : "");
         }
         it = g_knell_waits.erase(it);
     }
@@ -4118,7 +4144,11 @@ void knell_anims_tick() {
 
 void knell_anim_came(uint64_t from, int anim) {
     g_knell_late.erase(from);  // a new one of theirs replaces a late one still playing
-    g_knell_waits[from] = KnellAnimWait{anim, now()};
+    KnellAnimWait w{anim, now()};
+    // Their character here already (a Death Knell's arrival, or the price): where it stands now.
+    const uint32_t chr = chr_of_peer(from);
+    if (chr && anim != kStaggerAnim && game::chr_position(chr, &w.from)) w.from_set = true;
+    g_knell_waits[from] = w;
     knell_anims_tick();
 }
 

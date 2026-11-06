@@ -79,6 +79,12 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.hotkeys = settings_parse_bool(val);
         } else if (key == "checkforupdates") {
             c.check_updates = settings_parse_bool(val);
+        } else if (key == "uploadlogs") {
+            c.upload_logs = settings_parse_bool(val);
+        } else if (key == "uploadlogsto") {
+            std::strncpy(c.upload_logs_to, val.c_str(), sizeof(c.upload_logs_to) - 1);
+        } else if (key == "uploadlogsname") {
+            std::strncpy(c.upload_logs_name, val.c_str(), sizeof(c.upload_logs_name) - 1);
         } else if (key == "testprotocol") {
             c.test_protocol = std::atoi(val.c_str());
         } else if (key == "testversion") {

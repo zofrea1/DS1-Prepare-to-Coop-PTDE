@@ -848,6 +848,21 @@ left at a walk (2026-10-25 test: worse at sixty than at thirty, on a fast, low-l
 own rate the time in the test is at least the game's own gap (stubs at `0xE1F370` and `0xE2162B`), so a copy jumps
 only when it is as far off as it would have to be at the game's own rate (players 3.3 m, most enemies 4.8 m).
 
+### Log upload
+
+For testing together (`UploadLogs`, off by default; 1.5.0): when the game closes, `coop/logupload.cpp` sends this
+game's log (the FPS Unlock's `PTDE-FPS-Unlock.log`, beside the DLL) with an HTTP PUT to `UploadLogsTo`
+(`https://user:password@host/folder/`, WinHTTP, basic authentication, 5 s connect and 10 s send timeouts) as
+`<UploadLogsName, else the PC's name>/<the log's first line's time>.log`. The game's close is its `KERNEL32` imports
+`ExitProcess` and `TerminateProcess` (of its own process), hooked in its import table; the upload runs on a thread of
+its own and holds the close 12 s at most. A run that ended any other way (a crash, a kill from outside) leaves its log
+as `PTDE-FPS-Unlock.log.prev` (the FPS Unlock keeps the last run's log), and the next start sends that one, unless it
+was sent already: `PTDE-Coop-Log-Sent.txt` beside the DLL holds the start of the last log sent. Logs above 31 MiB send
+their end. The server side used in testing is a copyparty volume its uploaders can only write to (no listing, no
+reading), with a pre-upload hook that takes only `<name>/<YYYY-MM-DD_HH-MM-SS>.log`, size and rate limits, and no
+thumbnails or tag scanning. The log holds the Steam names and ids of the players met, their characters' names and
+the PC's name, so it is sent only when the player turns it on.
+
 ### Update check
 
 Releases keep the co-op protocol as long as they can, so players of different versions still play together and a

@@ -72,6 +72,11 @@ struct CoopConfig {
     bool hotkeys = true;
     // At each start, ask GitHub for the latest release and say on the title screen when a newer one is out.
     bool check_updates = true;
+    // 1.5.0: when the game closes, send its log to UploadLogsTo (https://user:password@host/folder/), into a folder
+    // named UploadLogsName or after the PC (coop/logupload.h). Off by default, and nothing is sent without an address.
+    bool upload_logs = false;
+    char upload_logs_to[256] = {};
+    char upload_logs_name[48] = {};
     // Hidden test keys (not in the shipped INI): TestProtocol / TestVersion make this game speak another co-op
     // protocol and report another version. TestProtocol shows the version mismatch notices between two copies of
     // one build; versions alone are not compared for now (session.cpp, kRequireSameVersion). The update check

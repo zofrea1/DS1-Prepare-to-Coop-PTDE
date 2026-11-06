@@ -130,6 +130,7 @@ In the `[PrepareToCoop]` section of `PTDE-Coop-FPS-Unlock.ini` (the FPS Unlock's
 | `SaveFileExtension` | `co2` | The save file while the co-op is on (vanilla: `sl2`). |
 | `CoopHotkeys` | `true` | The Ctrl+F1..F4 shortcuts. |
 | `CheckForUpdates` | `true` | At each start, look on the GitHub Releases page for a newer Prepare to Co-op, and say so on the title screen when there is one (until a character is loaded). One small request to api.github.com; `false` turns it off. |
+| `UploadLogs`, `UploadLogsTo`, `UploadLogsName` | `false`, empty, empty | For people testing the mod together: when the game closes, send its log (`PTDE-FPS-Unlock.log`) to the folder `UploadLogsTo` names (`https://user:password@host/folder/`, an upload-only copyparty folder), into a folder named after this PC or `UploadLogsName`; a log a crash left behind goes at the next start. Off by default, and nothing is sent without both `UploadLogs = true` and an address. The log holds your Steam name and id and those of the players you met, your characters' names and the PC's name. |
 
 ## Notes and known limits
 

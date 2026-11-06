@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "coop/coop.h"
+#include "coop/logupload.h"
 #include "coop/overlay.h"
 #include "title.h"
 #include "version.h"
@@ -34,6 +35,9 @@ void start(HMODULE dll) {
     load(dll);
     coop_install(g_config);
     title_install(g_config.enabled);
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(dll, path, MAX_PATH);
+    coop::logupload::install(path, g_config.upload_logs, g_config.upload_logs_to, g_config.upload_logs_name);
 }
 
 bool wants_device() { return g_config.enabled; }

@@ -56,8 +56,10 @@ constexpr uint32_t kChrHp = 0x2D4, kChrMaxHp = 0x2D8;
 constexpr uint32_t kMenuManVar = 0x013786D0;
 constexpr uint32_t kHudIds = 0xFA0, kHudTimers = 0xFB8, kHudWrite = 0xFD4;
 constexpr int kHudSlots = 6;
-// ChrIns event animation (motion.cpp): esi = character, edi = animation, stdcall(loop).
+// ChrIns event animation (motion.cpp): esi = character, edi = animation, stdcall(loop); stopped by 0xE69470 (edi =
+// character).
 constexpr uint32_t kEventAnimStart = 0x00E69590;
+constexpr uint32_t kEventAnimStop = 0x00E69470;
 // "Warp Character and Copy Floor" (2004[42], 0xBC3482): 0xD71A90 warps the character with its vtable +0x30C
 // (thiscall(pos x y z 1, rotation 0 angle 0 0, 1)) and sets +0x1FD bit 1, then 0xD61950 stands it on the other
 // character's floor: 0xE6E580 (ecx = character, stdcall(the other's +0x29C)).
@@ -122,8 +124,20 @@ constexpr const char* kStatName[8] = {"Vitality", "Attunement", "Endurance", "St
                                       "Dexterity", "Resistance", "Intelligence", "Faith"};
 constexpr char kStatLetter[8] = {'V', 'A', 'E', 'S', 'D', 'R', 'I', 'F'};
 
-constexpr double kOpenDelay = 1.2;   // the bell's animation and effect play before the view opens
-constexpr double kGoDelay = 1.2;     // and again before the player goes
+constexpr double kOpenDelay = 1.2;   // the ring's crouch settles before the view opens
+constexpr double kGoDelay = 1.2;     // before the player goes, when the rise below could not play
+// The ring's crouch, held while the view is open (1.5.0, the user's design): the others saw nothing of a player choosing
+// in the view, only someone standing there. The Knell's use is the eye orb's (goodsUseAnim 6: 6060, down into a crouch,
+// the use at 1.2 s, up again); an item with a dialog plays the game's own three of it instead (the Red Eye Orb's yes/no,
+// the Parchment's: 6065 down, 6066 held for as long as the dialog is open, 6067 up with the use's effect). From the ring,
+// at the bottom of 6060's crouch, the player holds 6066 (looped), which the others play on their character too; B or Esc,
+// a hit or any other close lets it go (the event animation stopped, here and there), and the choice plays 6067 with its
+// effect, the warp once it has played out. An event animation held takes no other animation (motion.h): the crouch
+// cannot roll, and is let go on every way out.
+constexpr int kHoldAnim = 6066;
+constexpr int kRiseAnim = 6067;
+constexpr double kRiseWarp = 2.0;    // 6067 is up at 1.63 s (its TAE's window to act again), its first light out at 2.03
+constexpr double kHoldGrace = 0.3;   // the start takes this long to show as held
 constexpr double kViewLimit = 120.0;
 constexpr double kPosFresh = 4.0;    // a teammate's reported position is used up to this old
 constexpr uint16_t kPadB = 0x2000;   // XINPUT_GAMEPAD_B
@@ -151,12 +165,12 @@ Destination g_dest;
 double g_load_since = 0;
 bool g_load_seen = false;
 double g_stand_since = 0;
-// The ring's own animation (the item's use, ChrCtrl+0x350 as the ring lands) and how far into it the ring lands: the
-// confirmation plays it again, and the warp waits as long.
-int g_use_anim = -1;
-double g_use_point = 0;
-int g_seen_anim = -1;       // the animation playing, followed every frame
-double g_seen_since = 0;
+// The ring's crouch (kHoldAnim): due on the frame after the ring (the ring is a TAE event of the use's own animation),
+// held, since when, and why the view closed (for the log of its end).
+bool g_hold_due = false;
+bool g_hold_on = false;
+double g_hold_at = 0;
+const char* g_hold_end = "";
 // The arrival playing: its animation, since when, and whether the price follows (a join's arrival has none).
 int g_arrival_anim = 0;
 double g_arrival_at = 0;
@@ -621,7 +635,7 @@ void hud_warning(uint32_t text_id) {
     *ptr<uint32_t>(mm + kHudWrite) = (at + 1) % kHudSlots;
 }
 
-bool start_event_anim(uint32_t me, int anim) {
+bool start_event_anim(uint32_t me, int anim, uint32_t looped = 0) {
     const uint32_t start = kEventAnimStart;
     __try {
         __asm {
@@ -629,11 +643,26 @@ bool start_event_anim(uint32_t me, int anim) {
             push edi
             mov esi, me
             mov edi, anim
-            push 0
+            push looped
             mov eax, start
             call eax
             pop edi
             pop esi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool stop_event_anim(uint32_t me) {
+    __try {
+        __asm {
+            push edi
+            mov edi, me
+            mov eax, kEventAnimStop
+            call eax
+            pop edi
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -720,6 +749,64 @@ int play_arrival(const char* why) {
     }
     LOG_INFO("[coop] Summon arrival %d (%s)", anim, why);
     return anim;
+}
+
+// ---------------------------------------------------------------- the ring's crouch
+void start_hold() {
+    const uint32_t me = game::player();
+    if (!me || world::local_dead() || game::loading()) return;
+    motion::send_knell_arrival(kHoldAnim);
+    g_hold_on = start_event_anim(me, kHoldAnim, 1);
+    g_hold_at = now();
+    LOG_INFO("[coop] Death Knell: the crouch (%d) %s", kHoldAnim, g_hold_on ? "held while the view is open" : "FAILED");
+}
+
+// Let go without a choice: stopped on our character (its animations come back) and on the others' copies of it.
+void release_hold(const char* why) {
+    g_hold_on = false;
+    const uint32_t me = game::player();
+    const bool held = me && !game::loading() && motion::held_event_anim(me) == kHoldAnim;
+    const bool stopped = held && stop_event_anim(me);
+    motion::send_knell_stop();
+    LOG_INFO("[coop] Death Knell: the crouch let go (%s)%s", why,
+             held ? (stopped ? "" : "; the stop FAILED") : "; our character no longer held it");
+}
+
+// The choice: the rise out of the crouch with the use's effect, which the others see too. False when it did not play.
+// The loop is stopped first, here and on the others' copies, as the game's scripts stop the bonfire's sitting loop
+// before its standing up (motion.h: a loop never stopped kept its slot for good).
+bool start_rise() {
+    if (!g_hold_on) return false;
+    g_hold_on = false;
+    const uint32_t me = game::player();
+    if (!me || game::loading()) return false;
+    if (motion::held_event_anim(me) == kHoldAnim) stop_event_anim(me);
+    motion::send_knell_stop();
+    motion::send_knell_arrival(kRiseAnim);
+    if (start_event_anim(me, kRiseAnim, 0)) return true;
+    LOG_INFO("[coop] Death Knell: the rise (%d) could not be started", kRiseAnim);
+    return false;
+}
+
+// While the crouch is held: let go once the view is closed (by any way out but the choice), or noted when our
+// character let go of it by itself.
+void hold_tick() {
+    if (!g_hold_on) return;
+    if (g_state != State::Opening && g_state != State::View) {
+        release_hold(g_hold_end);
+        return;
+    }
+    const uint32_t me = game::player();
+    if (!me || game::loading()) {
+        g_hold_on = false;
+        return;
+    }
+    const int held = motion::held_event_anim(me);
+    if (now() - g_hold_at > kHoldGrace && held != kHoldAnim) {
+        g_hold_on = false;
+        motion::send_knell_stop();
+        LOG_INFO("[coop] Death Knell: our character let go of the crouch by itself (it holds %d); the view stays", held);
+    }
 }
 
 void arrive() {
@@ -1044,6 +1131,7 @@ void show_target(const Choice& c, bool first) {
 
 void close_view(const char* why) {
     if (g_state == State::View) LOG_INFO("[coop] Death Knell: view closed (%s)", why);
+    g_hold_end = why;
     if (g_prompt_up) {
         g_prompt_up = false;
         clear_action_prompt("the Death Knell's view closed");
@@ -1058,6 +1146,7 @@ void open_view() {
     if (const char* why = refusal()) {
         say(text::widen(why));
         LOG_INFO("[coop] Death Knell: the view does not open (%s)", why);
+        g_hold_end = "the view did not open";
         g_state = State::Idle;
         return;
     }
@@ -1158,11 +1247,10 @@ void confirm() {
         g_dest.angle = c->at.angle;
         InterlockedExchange(&g_mask_dpad, 0);
         g_state = State::Going;
-        const uint32_t me = game::player();
-        const bool again = g_use_anim > 0 && me && start_event_anim(me, g_use_anim);
-        g_at = now() + (again ? std::max(0.6, std::min(2.5, g_use_point)) + 0.3 : kGoDelay);
-        LOG_INFO("[coop] Death Knell: going to %s's summon sign (the ring's animation %d %s, the warp in %.1f s)",
-                 narrow(c->name).c_str(), g_use_anim, again ? "again" : "not played", g_at - now());
+        const bool rise = start_rise();
+        g_at = now() + (rise ? kRiseWarp : kGoDelay);
+        LOG_INFO("[coop] Death Knell: going to %s's summon sign (the rise %d %s, the warp in %.1f s)",
+                 narrow(c->name).c_str(), kRiseAnim, rise ? "plays" : "not played", g_at - now());
         return;
     }
     const spectate::Teammate* t = c->mate;
@@ -1187,12 +1275,11 @@ void confirm() {
     std::copy(std::begin(t->pos), std::end(t->pos), g_dest.pos);
     InterlockedExchange(&g_mask_dpad, 0);
     g_state = State::Going;
-    // The bell rings again: the ring's own animation and effect, and the warp as far into it as the ring landed.
-    const uint32_t me = game::player();
-    const bool again = g_use_anim > 0 && me && start_event_anim(me, g_use_anim);
-    g_at = now() + (again ? std::max(0.6, std::min(2.5, g_use_point)) + 0.3 : kGoDelay);
-    LOG_INFO("[coop] Death Knell: going to %s (the ring's animation %d %s, the warp in %.1f s)",
-             narrow(t->name).c_str(), g_use_anim, again ? "again" : "not played", g_at - now());
+    // The rise out of the crouch with the use's effect, and the warp once it has played out.
+    const bool rise = start_rise();
+    g_at = now() + (rise ? kRiseWarp : kGoDelay);
+    LOG_INFO("[coop] Death Knell: going to %s (the rise %d %s, the warp in %.1f s)", narrow(t->name).c_str(), kRiseAnim,
+             rise ? "plays" : "not played", g_at - now());
 }
 
 bool do_warp(uint32_t me, uint32_t fn, const float* pp, const float* pr, uint32_t floor) {
@@ -1572,12 +1659,10 @@ void use() {
             }
             g_state = State::Opening;
             g_at = now() + kOpenDelay;
-            // The ring's animation, for the confirmation: the one playing as the ring lands, and how far into it.
-            const uint32_t me = game::player();
-            g_use_anim = playing_anim(me);
-            g_use_point = g_use_anim == g_seen_anim && g_seen_since > 0 ? now() - g_seen_since : 0.0;
-            LOG_INFO("[coop] Death Knell: rung (animation %d, %.2f s in; the view opens after its effect)", g_use_anim,
-                     g_use_point);
+            g_hold_due = true;  // the crouch, from the next frame
+            g_view_hp = chr_int(game::player(), kChrHp);
+            g_cancel_down = true;
+            LOG_INFO("[coop] Death Knell: rung (the crouch is held; the view opens in %.1f s)", kOpenDelay);
             return;
         }
         default:
@@ -1593,11 +1678,6 @@ void tick() {
     const bool loading = game::loading() || !game::player();
     if (was_loading && !loading) clear_action_prompt("after a load");
     was_loading = loading;
-    const int anim = loading ? -1 : playing_anim(game::player());
-    if (anim != g_seen_anim) {
-        g_seen_anim = anim;
-        g_seen_since = now();
-    }
     pending_price_tick();
     // A join's arrival: the moment the game starts its own rise at the host's bonfire (6950, 0.2 to 0.8 s after the
     // load in the 2026-11-04 test), it is replaced by the arrival, or after kJoinRiseWait standing if no rise comes.
@@ -1627,8 +1707,17 @@ void tick() {
             track_levels();
             break;
         case State::Opening:
+            if (g_hold_due) {
+                g_hold_due = false;
+                start_hold();
+            }
             if (world::local_dead() || game::loading() || !game::player()) {
                 close_view("interrupted");
+            } else if (chr_int(game::player(), kChrHp) < g_view_hp) {
+                close_view("we were hit");
+                say(L"The Death Knell falls silent");
+            } else if (cancel_pressed()) {
+                close_view("B or Esc");
             } else if (now() >= g_at) {
                 open_view();
             }
@@ -1646,6 +1735,7 @@ void tick() {
             arriving_tick();
             break;
     }
+    hold_tick();
 }
 
 bool viewing() { return g_state == State::View; }
@@ -1665,7 +1755,7 @@ const wchar_t* text(uint32_t id) {
 
 bool swallow_use(int32_t goods) {
     if (g_state != State::Going) return false;
-    LOG_INFO("[coop] Death Knell: item %d used by the ring's replayed animation: not used", goods);
+    LOG_INFO("[coop] Death Knell: item %d used by the rise out of the crouch: not used", goods);
     return true;
 }
 

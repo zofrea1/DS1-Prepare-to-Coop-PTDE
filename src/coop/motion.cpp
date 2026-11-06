@@ -146,7 +146,9 @@ std::vector<Anim> g_pending;
 bool g_enabled = true;      // [SeamlessCoop] BonfireAnimations
 // The Death Knell's arrivals (knell.cpp): the living player's rise (6950), the summoned phantom's (6951) and the
 // Warrior of Sunlight's (6952, "Praise the Sun"). Passed on only when the Knell starts one (send_knell_arrival).
-constexpr int kKnellAnims[] = {6950, 6951, 6952, 2010};  // and the price's stagger
+// Also the ring's crouch held while the Knell's view is open (6066, looped) and the rise out of it with the use's
+// effect when the player chooses (6067): the game's own pair for an item with a dialog (the Red Eye Orb's yes/no).
+constexpr int kKnellAnims[] = {6950, 6951, 6952, 2010, 6066, 6067};  // and the price's stagger
 int g_knell_send = 0;
 ULONGLONG g_knell_send_at = 0;
 
@@ -176,7 +178,7 @@ void __stdcall note_anim_start(uint32_t chr, int anim, uint32_t loop) {
     // BonfireAnimations says.
     if (anim == g_knell_send && knell_anim(anim) && GetTickCount64() - g_knell_send_at < 2000) {
         g_knell_send = 0;
-        queue(Anim{0, anim, 0});
+        queue(Anim{0, anim, static_cast<uint8_t>(looped ? 1 : 0)});
         return;
     }
     if (!g_enabled) return;
@@ -417,6 +419,8 @@ double knell_anim_seconds(int anim) {
         case 6951: return 4.55;
         case 6952: return 5.4;
         case 6950: return 2.15;
+        case 6066: return 125.0;  // the crouch, held while the view is open (two minutes at most)
+        case 6067: return 3.2;
         default: return 1.5;  // 2010, the price's stagger
     }
 }
@@ -425,6 +429,8 @@ void send_knell_arrival(int anim) {
     g_knell_send = anim;
     g_knell_send_at = GetTickCount64();
 }
+
+void send_knell_stop() { queue(Anim{1, 0, 0}); }
 
 void set_bonfire_animations(bool on) { g_enabled = on; }
 

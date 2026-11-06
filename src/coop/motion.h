@@ -64,9 +64,12 @@ int remote_open_anim(uint32_t chr);
 int held_event_anim(uint32_t chr);
 // True for the animations that are passed on (Remastered Seamless Co-op's list).
 bool synced_anim(int anim);
-// The Death Knell's arrival (knell.cpp): our next start of `anim` (one of the summon arrivals 6950-6952) is passed on
-// to the others too, who play it on our character (1.5.0). Those animations are not passed on otherwise.
+// The Death Knell's arrival (knell.cpp): our next start of `anim` (one of the summon arrivals 6950-6952, the price's
+// stagger, the ring's crouch 6066 and the rise out of it 6067) is passed on to the others too, looped as it is started,
+// who play it on our character (1.5.0). Those animations are not passed on otherwise.
 void send_knell_arrival(int anim);
+// The others stop the event animation our character holds there (the Knell's crouch, let go without a choice).
+void send_knell_stop();
 // One of those arrivals (a start of it from another player is shown).
 bool knell_arrival_anim(int anim);
 // How long one of them plays, to where its player can act again (the arrivals' TAE windows; the price's stagger).

@@ -4010,15 +4010,21 @@ void on_sign(uint64_t from, const SignMsg& m) {
 // was made there and the character then jumped to them without it ("the animation will play but not the effect").
 // An arrival on a character that was here already waits for it to jump (kKnellJump from where it stood when the
 // message came), at most kKnellJumpWait; a joining player's is made where they arrive.
+// The ring's crouch (6066) is held, looped, while the player's view is open, and ends with their stop or with the rise
+// out of it (6067) when they choose; neither waits for a jump. A crouch whose player's report says they no longer hold
+// it is not started (a stop that came before their character here was ready).
 struct KnellAnimWait {
     int anim = 0;
     double came = 0;          // the message
+    uint8_t loop = 0;
     uint32_t chr = 0;         // the character we first saw for them while waiting
     double chr_seen_at = 0;   // when (the upkeep's own first sight is only four times a second)
     bool from_set = false;    // where that character stood when the message came (it was here already)
     game::Vec3 from{};
 };
 constexpr double kKnellJump = 2.0;       // m: a warp, not a step
+// The knell animations that come with a warp (the arrivals), as against the price's stagger and the ring's crouch.
+bool knell_warp_anim(int anim) { return anim == 6950 || anim == 6951 || anim == 6952; }
 constexpr double kKnellJumpWait = 0.4;   // s: a warp too short to tell
 std::map<uint64_t, KnellAnimWait> g_knell_waits;
 // A character is built a moment after it is first seen (its entity active, its physics there): 0.1 s more before an
@@ -4080,6 +4086,14 @@ void knell_anims_tick() {
         }
         const char* name = p ? p->name.c_str() : "another player";
         const double age = now() - w.came;
+        if (w.loop && p && age > 2.0 && p->event_anim >= 0 && p->event_anim != w.anim) {
+            if (++lines <= 60) {
+                LOG_INFO("[coop] %s: knell animation %d not shown (they no longer hold it; their character here was not "
+                         "ready in %.1f s)", name, w.anim, age);
+            }
+            it = g_knell_waits.erase(it);
+            continue;
+        }
         if (!p || age > motion::knell_anim_seconds(w.anim) + 0.5) {
             if (++lines <= 60) {
                 LOG_INFO("[coop] %s: knell animation %d not shown (their character here was not ready in %.1f s)", name,
@@ -4111,7 +4125,7 @@ void knell_anims_tick() {
         }
         // A Death Knell arrival on a character that was here when it came: once it has jumped to where they arrived.
         bool jumped = true;
-        if (w.from_set && w.anim != kStaggerAnim && age < kKnellJumpWait) {
+        if (w.from_set && knell_warp_anim(w.anim) && age < kKnellJumpWait) {
             game::Vec3 at{};
             jumped = game::chr_position(chr, &at) && (at.x - w.from.x) * (at.x - w.from.x) +
                                                              (at.y - w.from.y) * (at.y - w.from.y) +
@@ -4122,7 +4136,7 @@ void knell_anims_tick() {
             ++it;
             continue;
         }
-        if (!motion::play_remote_anim(chr, motion::Anim{0, w.anim, 0})) {
+        if (!motion::play_remote_anim(chr, motion::Anim{0, w.anim, w.loop})) {
             ++it;
             continue;
         }
@@ -4142,12 +4156,12 @@ void knell_anims_tick() {
     }
 }
 
-void knell_anim_came(uint64_t from, int anim) {
+void knell_anim_came(uint64_t from, int anim, uint8_t loop) {
     g_knell_late.erase(from);  // a new one of theirs replaces a late one still playing
-    KnellAnimWait w{anim, now()};
-    // Their character here already (a Death Knell's arrival, or the price): where it stands now.
+    KnellAnimWait w{anim, now(), loop};
+    // Their character here already (a Death Knell's arrival): where it stands now.
     const uint32_t chr = chr_of_peer(from);
-    if (chr && anim != kStaggerAnim && game::chr_position(chr, &w.from)) w.from_set = true;
+    if (chr && knell_warp_anim(anim) && game::chr_position(chr, &w.from)) w.from_set = true;
     g_knell_waits[from] = w;
     knell_anims_tick();
 }
@@ -4857,7 +4871,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                          chr ? "" : knell ? " (waiting for their character here)" : " (their character is not here)");
             }
             if (knell) {
-                knell_anim_came(from, m.anim);  // once their character here can take it
+                knell_anim_came(from, m.anim, m.loop);  // once their character here can take it
                 break;
             }
             g_knell_waits.erase(from);  // a bonfire animation of theirs comes after it
@@ -5931,8 +5945,9 @@ void tick() {
                 broadcast(m);
                 static int lines = 0;
                 if (++lines <= 200) {
-                    LOG_INFO("[coop] Our bonfire animation %s %d%s: told the others", a.kind == 0 ? "start" : "stop",
-                             a.anim, a.loop ? " (loop)" : "");
+                    LOG_INFO("[coop] Our %s animation %s %d%s: told the others",
+                             a.kind == 0 && !motion::synced_anim(a.anim) ? "knell" : "bonfire",
+                             a.kind == 0 ? "start" : "stop", a.anim, a.loop ? " (loop)" : "");
                 }
             }
         }

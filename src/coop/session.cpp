@@ -4043,10 +4043,12 @@ constexpr int kStaggerAnim = 2010;  // the knell's price: never late enough to m
 // The Death Knell's crouch (motion kHold / kRelease, 1.5.0): while its player's view is open their character here is
 // held where its animation is, as theirs is (motion::hold_anims), so the others see them down in the ring's crouch. Let
 // go by their release, or kKnellHoldLimit after the hold (their view's own limit is two minutes), or when their
-// character here is another (made again).
+// character here is another (made again). A release that comes while their character is missing here for a moment
+// waits for it (`release`): dropping the record then left the character held for good once it was back.
 struct KnellHeld {
     uint32_t chr = 0;
     double at = 0;
+    bool release = false;
 };
 std::map<uint64_t, KnellHeld> g_knell_held;
 constexpr double kKnellHoldLimit = 130.0;
@@ -4063,6 +4065,15 @@ void knell_held_tick() {
             continue;
         }
         if (chr != it->second.chr) {
+            it = g_knell_held.erase(it);
+            continue;
+        }
+        if (it->second.release) {
+            const bool done = motion::hold_anims(chr, false);
+            if (++lines <= 30) {
+                LOG_INFO("[coop] Knell hold on %08X let go: their release came while the character was not here%s", chr,
+                         done ? "" : " (FAILED)");
+            }
             it = g_knell_held.erase(it);
             continue;
         }
@@ -4912,10 +4923,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 const uint32_t chr = chr_of_peer(from);
                 const bool on = m.kind == motion::kHold;
                 const bool done = chr && motion::hold_anims(chr, on);
+                const auto held = g_knell_held.find(from);
                 if (on && done) {
                     g_knell_held[from] = KnellHeld{chr, now()};
-                } else {
-                    g_knell_held.erase(from);
+                } else if (!on && !chr && held != g_knell_held.end()) {
+                    held->second.release = true;  // let go once their character is here again (knell_held_tick)
+                } else if (chr && held != g_knell_held.end()) {
+                    g_knell_held.erase(held);  // let go on their character, or a hold that failed on it
                 }
                 static int lines = 0;
                 if (++lines <= 120) {

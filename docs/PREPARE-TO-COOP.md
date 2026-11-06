@@ -857,8 +857,11 @@ game's log (the FPS Unlock's `PTDE-FPS-Unlock.log`, beside the DLL) with an HTTP
 `ExitProcess` and `TerminateProcess` (of its own process), hooked in its import table; the upload runs on a thread of
 its own and holds the close 12 s at most. A run that ended any other way (a crash, a kill from outside) leaves its log
 as `PTDE-FPS-Unlock.log.prev` (the FPS Unlock keeps the last run's log), and the next start sends that one, unless it
-was sent already: `PTDE-Coop-Log-Sent.txt` beside the DLL holds the start of the last log sent. Logs above 31 MiB send
-their end. The server side used in testing is a copyparty volume its uploaders can only write to (no listing, no
+was sent already: `PTDE-Coop-Log-Sent.txt` beside the DLL holds the start of the last log sent at a close. Before it
+sends anything, the start moves that log aside as `PTDE-Coop-Unsent-<its start>.log` (the FPS Unlock replaces the
+`.prev` at every start, so a run that died while its start was still sending lost the log before it), sends those
+oldest first and deletes each once the server has answered (one it refused would be refused again); one with no answer waits for the next start with the rest, and
+only the newest five are kept. Logs above 31 MiB send their end. The server side used in testing is a copyparty volume its uploaders can only write to (no listing, no
 reading), with a pre-upload hook that takes only `<name>/<YYYY-MM-DD_HH-MM-SS>.log`, size and rate limits, and no
 thumbnails or tag scanning. The log holds the Steam names and ids of the players met, their characters' names and
 the PC's name, so it is sent only when the player turns it on.

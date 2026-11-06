@@ -12,8 +12,10 @@
 
 #pragma comment(lib, "winhttp.lib")
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -23,8 +25,13 @@ namespace {
 
 constexpr wchar_t kLogName[] = L"PTDE-FPS-Unlock.log";
 constexpr wchar_t kPrevName[] = L"PTDE-FPS-Unlock.log.prev";  // the FPS Unlock's log_init keeps the last run's
-// The start of the last log sent (its first line's time), so that each log is sent once.
+// The start of the last log sent at a close (its first line's time), so that each log is sent once.
 constexpr wchar_t kSentName[] = L"PTDE-Coop-Log-Sent.txt";
+// A last run's log not sent when it closed is moved out of log_init's way at the start, before anything is sent, as
+// PTDE-Coop-Unsent-<stamp>.log, and deleted once it is sent: log_init replaces the .prev at every start, so a run that
+// died while its start was still sending the one before (a crash loop at startup) lost that log. The newest few kept.
+constexpr wchar_t kUnsentPrefix[] = L"PTDE-Coop-Unsent-";
+constexpr size_t kUnsentKept = 5;
 constexpr DWORD kMaxBytes = 31u << 20;  // the drop takes up to 32 MiB a file: of a longer log, its end
 constexpr DWORD kTimeoutMs = 5000;
 constexpr DWORD kExitWaitMs = 12000;    // the game's close waits this long for it at most
@@ -235,20 +242,67 @@ int send(const std::wstring& path, const std::wstring& stamp, std::string* why) 
     return status;
 }
 
-// Sends the log at `path` unless it was sent already; `what` says which, for our own log.
-void send_once(const std::wstring& path, const char* what) {
-    const std::wstring stamp = stamp_of(path);
-    if (stamp.empty() || stamp == sent_stamp()) return;
+// Sends the log at `path` as <stamp>.log; `what` says which, for our own log. The HTTP status (0: no answer).
+int send_logged(const std::wstring& path, const std::wstring& stamp, const char* what) {
     std::string why;
     const int status = send(path, stamp, &why);
     const bool sent = status == 201 || status == 200;
-    if (sent) record_sent(stamp);
     LOG_INFO("[coop] Log upload: %s %s as %s/%s.log (%d%s%s)", what, sent ? "sent" : "NOT sent", narrow(g_name).c_str(),
              narrow(stamp).c_str(), status, why.empty() ? "" : ", ", why.c_str());
+    return status;
+}
+
+// Sends the log at `path` unless it was sent already, and records it once sent.
+void send_once(const std::wstring& path, const char* what) {
+    const std::wstring stamp = stamp_of(path);
+    if (stamp.empty() || stamp == sent_stamp()) return;
+    const int status = send_logged(path, stamp, what);
+    if (status == 201 || status == 200) record_sent(stamp);
+}
+
+// The logs waiting to be sent (kUnsentPrefix), oldest first: their names hold their start, which sorts by time.
+std::vector<std::wstring> unsent_logs() {
+    std::vector<std::wstring> out;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((g_dir + kUnsentPrefix + L"*.log").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) out.push_back(fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// At the start, before any send: the last run's log, if it was not sent when it closed, is moved where the next
+// start's log_init does not replace it. Only the newest kUnsentKept wait.
+void keep_unsent() {
+    const std::wstring prev = g_dir + kPrevName;
+    const std::wstring stamp = stamp_of(prev);
+    if (!stamp.empty() && stamp != sent_stamp()) {
+        const std::wstring to = g_dir + kUnsentPrefix + stamp + L".log";
+        if (!MoveFileExW(prev.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            LOG_INFO("[coop] Log upload: the last run's log could not be kept aside (%lu)", GetLastError());
+        }
+    }
+    std::vector<std::wstring> waiting = unsent_logs();
+    for (size_t i = 0; i + kUnsentKept < waiting.size(); ++i) DeleteFileW((g_dir + waiting[i]).c_str());
 }
 
 DWORD WINAPI start_thread(void*) {
-    send_once(g_dir + kPrevName, "the last run's log (not sent when it closed)");
+    const size_t prefix = std::wcslen(kUnsentPrefix);
+    for (const std::wstring& name : unsent_logs()) {
+        const std::wstring path = g_dir + name;
+        std::wstring stamp = stamp_of(path);
+        if (stamp.empty()) stamp = name.substr(prefix, name.size() - prefix - 4);  // its name without the ".log"
+        // No answer (no network, the server down): this one and the rest wait for the next start. One the server
+        // answered and refused would be refused again, and is not kept.
+        if (send_logged(path, stamp, "an earlier run's log (not sent when it closed)") == 0) {
+            LOG_INFO("[coop] Log upload: the logs not sent yet wait for the next start");
+            break;
+        }
+        DeleteFileW(path.c_str());
+    }
     return 0;
 }
 
@@ -341,6 +395,7 @@ void install(const wchar_t* dll_path, bool on, const char* to, const char* name)
     LOG_INFO("[coop] Log upload: on: this log goes to %s://%s%s%s/ when the game closes (its exit %s)",
              t.https ? "https" : "http", narrow(t.host).c_str(), narrow(t.path).c_str(), narrow(g_name).c_str(),
              exit_hook ? "watched" : "NOT watched: it goes at the next start");
+    keep_unsent();
     if (HANDLE h = CreateThread(nullptr, 0, start_thread, nullptr, 0, nullptr)) CloseHandle(h);
 }
 

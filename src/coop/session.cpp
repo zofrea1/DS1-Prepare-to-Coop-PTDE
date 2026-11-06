@@ -44,10 +44,15 @@ namespace {
 
 // ---------------------------------------------------------------- wire format
 constexpr uint32_t kMagic = 0x31435350;  // "PSC1"
-// Players of the same protocol play together (see same_version). 1.0.0 and 1.1.0 both speak 8 and play together:
-// the messages are the same, 1.1.0's hello only adds its version at the end. Bump it when a release can no longer
-// play with the older ones; the version notices then tell the players why they cannot connect.
-constexpr uint32_t kProtocol = 8;
+// Players of the same protocol play together (see same_version). 1.0.0 to 1.4.0 all speak 8 and play together: the
+// messages are the same, 1.1.0's hello only adds its version at the end. Bump it when a release can no longer play
+// with the older ones; the version notices then tell the players why they cannot connect. 1.5.0 speaks 9: its
+// scaling by vicinity, the Bloody Mary and the Death Knell's price need every game of the session to have them, so
+// every player updates (the user's decision, 2026-11-06). 1.1.0 to 1.4.0 compare only the protocol (their
+// kRequireSameVersion is false too): an older invader that finds only 1.5.0 worlds is told "Can't invade: these
+// worlds have Prepare to Co-op 1.5.0" without knocking, an older guest is refused (kVersion) and told "Can't join",
+// and the host is told who tried. 1.0.0 knocks (it finds us by "ptdesc_ver") and only says "Failed to connect".
+constexpr uint32_t kProtocol = 9;
 // Whether players also need the same Prepare to Co-op version, not only the same protocol. Off for now, so 1.0.0
 // and 1.1.0 players meet; the version is still published and sent, for a later release to compare.
 constexpr bool kRequireSameVersion = false;
@@ -3930,6 +3935,7 @@ double g_near_sent_at = 0;
 // older game scales every enemy for the whole session, and the games would part on the enemies' health. An invader's
 // too (Grok review 064550aa): it is never counted, but an older one still scales every enemy for all the co-op
 // players, and its copies, hit by the same numbers, outlive the others' where the host's HP report does not reach.
+// Protocol 9 keeps every older version out of the session; this stays for a game that says otherwise (TestVersion).
 bool host_vicinity() {
     if (!g_cfg.vicinity_scaling) return false;
     for (const auto& p : g_peers) {

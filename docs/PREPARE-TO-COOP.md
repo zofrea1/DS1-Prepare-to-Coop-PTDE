@@ -172,9 +172,15 @@ the game itself uses channels 0 and 1).
 4. On arrival the game would turn the guest into a white phantom (`0xEA15B0`); the guest keeps their own
    chr type instead.
 
-Players need the same co-op protocol: 1.0.0 and 1.1.0 both speak 8. Lobbies and hellos also carry the Prepare
-to Co-op version, which a later release can compare; when the protocol changes, both sides are told who needs
-to update.
+Players need the same co-op protocol: 1.0.0 to 1.4.0 speak 8, 1.5.0 speaks 9 (its scaling by vicinity, the Bloody
+Mary and the Death Knell's price need every game of the session to have them). Lobbies and hellos also carry the
+Prepare to Co-op version, which a later release can compare; when the protocol differs, both sides are told who
+needs to update. An invader of 1.1.0 or later that finds only worlds of another protocol is told so without knocking
+("Can't invade: these worlds have Prepare to Co-op 1.5.0", then "You have 1.4.0. Please update to invade them"); one
+that finds a world of its own protocol goes there. A guest of 1.1.0 or later knocks, the host refuses it (welcome
+status kVersion), and both are told ("Can't join: the host has ..."; "A player with ... can't join"). A 1.0.0
+player finds every host by `ptdesc_ver` = 8, knocks, and says only "Failed to connect"; its host is told (an invader
+as "An evil spirit with Prepare to Co-op 1.0.0 can't invade", once a minute per player at most).
 
 The Steam lobby has room for 16 members, while a session keeps `MaxPlayers` players (8 by default since 1.4.0; the
 game's own 4 before; the host and the others, guests and invaders together), which the host enforces when it answers. Players of other games that use Spacewar, or
@@ -867,10 +873,11 @@ players' lists and is never counted. A level change is made as a player joining 
 enemy our game stops running stays on our list for 10 s, so one at the edge of what we run does not change its
 scaling as we step back and forth. While we spectate (our death's view or the Death Knell's, `spectate::viewing`)
 WorldChrMan's pass takes the teammate's character for ours, and what runs here is around them: our list stays as the
-view found it, where our body is. The host turns it on for its session only while every other player is on 1.5.0 or
-later (their hello's version), the invaders too: an older game scales every enemy for the whole session, and the
-games would part on the enemies' health (an older invader is not counted, but its copies, hit by the same numbers as
-the others', outlived them where the host's HP report does not reach). The log says each change of mode, each player's first list, and every 30 s (when it
+view found it, where our body is. Protocol 9 keeps every older version out of a 1.5.0 session; the host still turns
+it on only while every other player's hello says 1.5.0 or later, the invaders too (TestVersion can say otherwise): an
+older game scales every enemy for the whole session, and the games would part on the enemies' health (an older
+invader is not counted, but its copies, hit by the same numbers as the others', would outlive them where the host's
+HP report does not reach). The log says each change of mode, each player's first list, and every 30 s (when it
 changed) how many of the living enemies here are scaled for how many players.
 
 ### Log upload
@@ -898,8 +905,9 @@ the PC's name, so it is sent only when the player turns it on.
 
 ### Update check
 
-Releases keep the co-op protocol as long as they can, so players of different versions still play together and a
-session never tells anyone to update. Instead, at each start (`CheckForUpdates`, on by default) a thread of the mod
+Releases keep the co-op protocol as long as they can, so players of different versions still play together (1.0.0 to
+1.4.0 did; 1.5.0 changed it, and the version notices above tell the players who cannot meet). To tell everyone else,
+at each start (`CheckForUpdates`, on by default) a thread of the mod
 asks GitHub's API for the repository's latest release (`api.github.com/repos/zofrea1/DS1-Prepare-to-Coop-PTDE/
 releases/latest`, WinHTTP, 5 s timeouts, drafts and pre-releases left out) and compares its tag with this build's
 version. A newer one is announced in a box at the top of the title screen, drawn by the mod's Direct3D overlay (a

@@ -10,7 +10,8 @@
 // player goes there: at once when that teammate's character stands in our world, else through a load into their map,
 // placed where they stand. The player arrives as a summoned phantom does (one of the game's arrival animations, at
 // random); once it lets go, the poise breaks with a riposte's stab and the price is taken (knell.cpp). A guest's join
-// plays the same arrival.
+// plays the same arrival. An invader may ring it to watch the co-op players (never to go to them) and to go to their
+// summon signs, arriving as an evil spirit, for no price.
 
 #include <cstdint>
 

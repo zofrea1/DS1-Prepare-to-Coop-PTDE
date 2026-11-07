@@ -779,11 +779,16 @@ bool patch_chr_type_fx() {
     return patch(kChrTypeFxSite, expect, code, sizeof(code));
 }
 
-// One of the game's summon arrivals at random, which the others see too (1.5.0). Returns it, 0 when none started.
+// One of the game's summon arrivals at random, which the others see too (1.5.0). Returns it, 0 when none started. An
+// invader arrives as an evil spirit does (the user's design): the summoned phantom's arrival only (never Solaire's), whose
+// glow TAE event 120 picks by the character's type, the red one (130) for a black phantom, as an invader is in the
+// host's world (the game made them one on arrival; only a co-op guest keeps their own type, rules.cpp hk_arrival), in
+// their game and in the others'.
 int play_arrival(const char* why) {
     const uint32_t me = game::player();
     if (!me) return 0;
-    const int anim = kArrivals[std::uniform_int_distribution<int>(0, kArrivalCount - 1)(g_rng)];
+    const int anim = session::invader() ? kWhiteArrival
+                                        : kArrivals[std::uniform_int_distribution<int>(0, kArrivalCount - 1)(g_rng)];
     motion::send_knell_arrival(anim);
     if (!start_event_anim(me, anim)) {
         LOG_ERROR("[coop] Death Knell: the arrival animation could not be started");
@@ -915,12 +920,14 @@ void hold_tick() {
 }
 
 void arrive() {
-    g_arrival_anim = play_arrival("the Death Knell");
+    g_arrival_anim = play_arrival(session::invader() ? "the Death Knell, as an evil spirit" : "the Death Knell");
     g_arrival_at = now();
-    g_arrival_price = true;
+    // An invader pays nothing (the user's design): no stagger, no debuffs, no Bloody Mary, and nothing is said.
+    g_arrival_price = !session::invader();
     g_join_arrival = false;
     g_state = State::Arriving;
-    LOG_INFO("[coop] Death Knell: arrived by %s; the price once the arrival is over", narrow(g_dest.name).c_str());
+    LOG_INFO("[coop] Death Knell: arrived by %s; %s", narrow(g_dest.name).c_str(),
+             g_arrival_price ? "the price once the arrival is over" : "no price (we invade)");
 }
 
 // The poise breaks, the riposte's stab sounds, and the bell takes its price (1.5.0, the user's design): the mod's death
@@ -1072,9 +1079,15 @@ bool remote_character(uint32_t chr) {
     return false;
 }
 
+// The players the view shows: the co-op teammates, or, while we invade, the co-op players of the world, whom an
+// invader may watch but not go to (1.5.0, the user's design: "to spy on their targets").
+const std::vector<spectate::Teammate>& people() {
+    return session::invader() ? spectate::targets() : spectate::teammates();
+}
+
 std::vector<const spectate::Teammate*> candidates() {
     std::vector<const spectate::Teammate*> out;
-    for (const spectate::Teammate& t : spectate::teammates()) {
+    for (const spectate::Teammate& t : people()) {
         if (t.alive) out.push_back(&t);
     }
     std::sort(out.begin(), out.end(),
@@ -1083,7 +1096,7 @@ std::vector<const spectate::Teammate*> candidates() {
 }
 
 const spectate::Teammate* find(uint64_t id) {
-    for (const spectate::Teammate& t : spectate::teammates()) {
+    for (const spectate::Teammate& t : people()) {
         if (t.id == id && t.alive) return &t;
     }
     return nullptr;
@@ -1147,12 +1160,11 @@ std::wstring label(const Choice& c) {
 // Why the Death Knell cannot be rung now, or null.
 const char* refusal() {
     if (!session::in_session()) return "Only in a co-operative session";
-    if (session::invader()) return "Not while invading";
     if (!game::player() || game::loading()) return "Not while loading";
     if (world::local_dead() || spectate::holding() || world::in_limbo()) return "Not while fallen";
     if (session::trip_slot_busy()) return "Not while the party travels";
     if (world::boss_fight()) return "Not in a boss fight";
-    if (choices().empty()) return "No co-operator or summon sign to go to";
+    if (choices().empty()) return session::invader() ? "No one to watch" : "No co-operator or summon sign to go to";
     return nullptr;
 }
 
@@ -1192,13 +1204,20 @@ std::wstring where_line(const Choice& c) {
 }
 
 // The view's prompt (bottom centre): the choice, where it is, and the buttons.
+// While we invade, a co-op player is only watched (no A); their summon signs can be gone to.
 void show_box(const Choice& c, int at, int count) {
+    const bool watch_only = !c.sign && session::invader();
     std::vector<std::wstring> lines;
-    lines.push_back(L"Summon yourself to " + (c.sign ? c.name + L"'s summon sign" : c.name));
+    if (watch_only) {
+        lines.push_back(L"Watching " + c.name);
+    } else {
+        lines.push_back(L"Summon yourself to " + (c.sign ? c.name + L"'s summon sign" : c.name));
+    }
     lines.push_back(where_line(c));
     std::wstring keys;
     if (count > 1) keys = L"Left / Right: " + std::to_wstring(at + 1) + L" of " + std::to_wstring(count) + L"        ";
-    keys += L"A or Enter: go        B or Esc: back";
+    if (!watch_only) keys += L"A or Enter: go        ";
+    keys += L"B or Esc: back";
     lines.push_back(keys);
     overlay::set_prompt(lines);
     g_box_at = now();
@@ -1398,6 +1417,11 @@ void confirm() {
     const Choice* c = find_choice(can, g_target_id, g_target_sign);
     if (!c) {
         say(L"The Death Knell finds no one there");
+        return;
+    }
+    // An invader goes to no one, only to their summon signs (the prompt offers no A for a person).
+    if (!c->sign && session::invader()) {
+        LOG_INFO("[coop] Death Knell: we invade; %s is only watched", narrow(c->name).c_str());
         return;
     }
     if (c->sign) {

@@ -162,6 +162,7 @@ double g_hold_since = 0;
 double g_fight_off_since = 0;
 bool g_rested = false;
 std::vector<Teammate> g_team;
+std::vector<Teammate> g_targets;  // we invade: the co-op players (the Death Knell's view)
 // The view.
 uint32_t g_target = 0;        // the character the camera is to follow (checked again on every camera update)
 uint64_t g_target_id = 0;
@@ -850,6 +851,9 @@ void view_extras() {
         for (const Teammate& t : g_team) {
             if (t.chr == chr) mate = &t;
         }
+        for (const Teammate& t : g_targets) {
+            if (!mate && t.chr == chr) mate = &t;  // an invader's Death Knell watching a co-op player
+        }
         if (mate) map = mate->floor_map != -1 ? mate->floor_map : mate->map;
     }
     // The floor we gave a character goes again before the view lets its map go (the game unloads a block nobody wants
@@ -1229,6 +1233,8 @@ void set_streaming(bool on) {
 
 void set_teammates(const std::vector<Teammate>& teammates) { g_team = teammates; }
 
+void set_targets(const std::vector<Teammate>& targets) { g_targets = targets; }
+
 void tick() {
     if (!g_installed) return;
     view_extras();
@@ -1291,6 +1297,8 @@ bool viewing() { return g_hold || g_knell_chr != 0; }
 bool installed() { return g_installed; }
 
 const std::vector<Teammate>& teammates() { return g_team; }
+
+const std::vector<Teammate>& targets() { return g_targets; }
 
 void knell_view(uint32_t chr) {
     if (chr != g_knell_chr) g_drawn_for = 0;

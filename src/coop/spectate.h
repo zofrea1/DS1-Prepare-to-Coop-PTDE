@@ -40,6 +40,8 @@ bool install();
 void set_streaming(bool on);
 // Every frame on the game thread, before tick(): the other co-op players of the session (invaders not included).
 void set_teammates(const std::vector<Teammate>& teammates);
+// While we invade: the co-op players of the world, whom the Death Knell's view watches (1.5.0); empty otherwise.
+void set_targets(const std::vector<Teammate>& targets);
 void tick();
 // Another player rested at a bonfire: a death that waits goes ahead.
 void someone_rested();
@@ -55,6 +57,8 @@ bool viewing();
 bool installed();
 // The other co-op players as set_teammates last gave them.
 const std::vector<Teammate>& teammates();
+// The co-op players as set_targets last gave them (we invade).
+const std::vector<Teammate>& targets();
 // The Death Knell's view (knell.cpp): the camera follows `chr` (a teammate's character in our world) while we stand;
 // 0 gives the camera back. Ignored while our death waits (that view comes first).
 void knell_view(uint32_t chr);

@@ -154,7 +154,7 @@ int can_use(int32_t id) {
         case items::kBlossom:
         case items::kBloody:
             return 0;
-        case items::kKnell:  // a co-op player in a session, standing, out of a boss fight, with a teammate standing
+        case items::kKnell:  // in a session, standing, out of a boss fight, with a teammate (an invader: a target) standing
             return knell::can_use() ? 1 : 0;
         case items::kVigil:  // a co-op player in a session: our summon sign, for the others' Death Knells (1.5.0)
             return in_session && !invader && session::sign_refusal() == nullptr ? 1 : 0;

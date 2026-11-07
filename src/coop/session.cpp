@@ -3933,6 +3933,20 @@ bool coop_in_world() {
            (g_role == Role::Guest && !g_invade && g_step == Step::InWorld);
 }
 
+// We invade, standing in the host's world (1.5.0: the co-op players' summon signs are ours to see and to go to with the
+// Death Knell, the user's design).
+bool invader_in_world() { return g_role == Role::Guest && g_invade && g_step == Step::InWorld; }
+
+// To the invaders in our world (the host's game): the co-op players' summon signs.
+template <typename T>
+void send_to_invaders(T& msg, uint64_t except = 0) {
+    if (!g_lobby) return;
+    const uint64_t me = steam::self();
+    for (uint64_t m : steam::lobby_members(g_lobby)) {
+        if (m != me && m != except && !is_lost(m) && peer_is_invader(m)) steam::send(m, &msg, sizeof(msg), true);
+    }
+}
+
 // ---------------------------------------------------------------- enemy scaling by vicinity (1.5.0)
 // With the host's VicinityScaling each enemy is scaled for the co-op players whose games run it (world.cpp, the
 // scaling by vicinity). Every game must give an enemy the same max HP, so each co-op player's game tells every other
@@ -4025,6 +4039,7 @@ void send_sign() {
     x.tag = kSignFloorTag;
     if (g_role == Role::Host) {
         broadcast_coop(x);
+        send_to_invaders(x);
     } else if (g_host) {
         send_to(g_host, x);
     }
@@ -4042,7 +4057,7 @@ void sign_fx_tick() {
     if (now() - last < 0.5 && !game::loading() && !g_sign_fx_now) return;
     last = now();
     g_sign_fx_now = false;
-    const bool show = coop_in_world() && game::in_game() && !game::loading() && game::player();
+    const bool show = (coop_in_world() || invader_in_world()) && game::in_game() && !game::loading() && game::player();
     std::map<uint64_t, const SignInfo*> want;
     if (show) {
         if (g_my_sign.map != -1) want[steam::self()] = &g_my_sign;
@@ -4086,7 +4101,7 @@ void sign_fx_tick() {
 
 void signs_tick() {
     sign_fx_tick();
-    if (!coop_in_world()) {
+    if (!coop_in_world() && !invader_in_world()) {
         if (g_my_sign.map != -1 || !g_signs.empty()) {
             LOG_INFO("[coop] Summon signs: ours and %d of the others' gone (the session ended)",
                      static_cast<int>(g_signs.size()));
@@ -5045,7 +5060,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kSign: {
             SignFloorMsg x{};
-            if (!as(&x.m) || g_invade || g_role == Role::None) return;
+            if (!as(&x.m) || g_role == Role::None) return;
             const SignMsg& m = x.m;
             if (!as(&x) || x.tag != kSignFloorTag) {
                 x.floor_map = -1;
@@ -5055,6 +5070,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (g_role == Role::Host) {
                 if (peer_is_invader(from) || m.owner != from) return;
                 broadcast_coop(x, from);
+                send_to_invaders(x, from);  // an invader's Death Knell may go to it too (1.5.0)
             } else if (from != g_host) {
                 return;
             }
@@ -6206,8 +6222,13 @@ void tick() {
             m.gait = static_cast<int8_t>(gait);
             broadcast(m, false);
         }
-        if (g_role != Role::None && g_lobby && !g_invade) {
+        if (g_role != Role::None && g_lobby) {
             for (const motion::Anim& a : anims) {
+                // An invader's game sends the Death Knell's only (its crouch, the rings, the arrival), not the
+                // bonfire ceremonies (1.5.0).
+                const bool knell_anim = a.kind == motion::kHold || a.kind == motion::kRelease ||
+                                        (a.kind == 0 && !motion::synced_anim(a.anim) && motion::knell_arrival_anim(a.anim));
+                if (g_invade && !knell_anim) continue;
                 AnimMsg m{};
                 fill_header(&m, kAnim);
                 m.kind = a.kind;
@@ -6268,6 +6289,7 @@ void tick() {
         if (now() - team_at >= 0.2) {
             team_at = now();
             std::vector<spectate::Teammate> team;
+            std::vector<spectate::Teammate> targets;  // we invade: the co-op players, for the Death Knell's view
             bool all_dead = true;
             const PeerInfo* boss_mate = nullptr;  // a living teammate with a boss gauge up (rules: bonfires wait)
             if (g_invade && g_step == Step::InWorld && !game::loading()) {
@@ -6291,6 +6313,25 @@ void tick() {
                         t.floor_index = p.floor_index;
                     }
                     team.push_back(t);
+                }
+                for (const auto& p : g_peers) {
+                    if (!coop_member(p, members)) continue;
+                    spectate::Teammate t;
+                    t.id = p.id;
+                    t.name = shown_name(p);
+                    t.chr = chr_of_peer(p.id);
+                    t.alive = !p.dead;
+                    t.map = p.map;
+                    std::copy(std::begin(p.pos), std::end(p.pos), t.pos);
+                    t.pos_at = p.pos_at;
+                    t.boss_fight = p.boss_fight && now() - p.last_seen <= 5.0;
+                    t.cutscene = p.event_anim == kReportCutscene && now() - p.last_seen <= 5.0;
+                    t.loading = p.event_anim == kReportLoading && now() - p.last_seen <= 5.0;
+                    if (p.floor_at > 0 && now() - p.floor_at <= 3.0) {
+                        t.floor_map = p.floor_map;
+                        t.floor_index = p.floor_index;
+                    }
+                    targets.push_back(t);
                 }
                 all_dead = false;  // the co-op team's wipe rules are not ours
             } else if (g_role != Role::None && !g_invade && !game::loading()) {
@@ -6318,6 +6359,7 @@ void tick() {
                 }
             }
             spectate::set_teammates(team);
+            spectate::set_targets(targets);
             world::set_everyone_dead(!team.empty() && all_dead);
             // A team wipe takes every Bloody Mary away (the host's count; its guests follow).
             if (g_role == Role::Host && g_bloody > 0 && world::local_dead() && (team.empty() || all_dead)) {
@@ -6630,7 +6672,7 @@ bool hosting() { return g_role == Role::Host && g_step == Step::Hosting && g_lob
 
 std::vector<SummonSign> summon_signs() {
     std::vector<SummonSign> out;
-    if (!coop_in_world()) return out;
+    if (!coop_in_world() && !invader_in_world()) return out;
     for (const auto& [owner, sign] : g_signs) {
         const PeerInfo* p = nullptr;
         for (const auto& q : g_peers) p = q.id == owner ? &q : p;

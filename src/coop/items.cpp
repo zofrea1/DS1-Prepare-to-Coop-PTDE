@@ -118,7 +118,8 @@ const Def kDefs[kCount] = {
      L"The Death Knell tolls for those who have gone\nhollow. The faint ringing of this bell brings comfort\n"
      L"and closeness to those we most yearn for. The bell\nlongs to answer your wish, but not without a price.\n\n"
      L"Use in a co-operative session to summon yourself\nto one's position, or to the summon sign they left.\n"
-     L"But did it have to be this way?"},
+     L"But did it have to be this way?\n\n"
+     L"Yet its toll carries far, and not every ear that\nhears it belongs to a friend."},
     // 1.5.0: the Crimson Blossom's icon, a key item as it is.
     {0, 0, 2033, L"Bloody Mary", L"Strengthens the world's enemies",
      L"A blood-red flower that drinks from every death in the\nworld it grows in.\n\nOne blooms for everyone in the "
@@ -130,9 +131,9 @@ const Def kDefs[kCount] = {
     // (tools/paint_vigil_soapstone.py), painted in at run time as the bell is (knell.cpp).
     {-91, 80, 2160, L"Vigil Soapstone", L"Leave a sign for the Death Knell",
      L"Pale soapstone bound in the Death Knell's cord and\nhung with feathers of the bell's tail.\n\n"
-     L"The bell tolls for those gone hollow, yet it is\nthose who keep vigil that it finds.\n\n"
      L"Use in a co-operative session to leave a sign\nwhere you stand. An ally who rings the Death Knell\n"
-     L"may come to it, for less than to your side. One\nsign is kept; a new one replaces the last."},
+     L"may come to it, for less than to your side. One\nsign is kept; a new one replaces the last.\n\n"
+     L"Those who keep vigil are found by the bell, but a\nsign cannot choose who answers it."},
 };
 
 void put32(uint8_t* r, int off, int32_t v) { std::memcpy(r + off, &v, 4); }

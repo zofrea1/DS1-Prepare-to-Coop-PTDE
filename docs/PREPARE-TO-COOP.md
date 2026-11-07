@@ -25,7 +25,7 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
    | --- | --- | --- |
    | Blessed Eye Orb | Create a co-operative session. Players with your password can join at any time, wherever you are. | outside a session |
    | Crystal Eye Orb | Join the session of a player with your password. You arrive at the host's last bonfire. | outside a session |
-   | Chaos Eye Orb | Invade a co-operative session that allows invaders, as an evil spirit. A host (1.6.0) leads the whole party into another world together, and back (group invasions, below); again, it calls the search off. | outside a session; or hosting, with no invader in the world |
+   | Chaos Eye Orb | Invade a co-operative session that allows invaders, as an evil spirit. A host (1.6.0) leads the whole party into another world together, and back (group invasions, below); again, it calls the search off. | outside a session; or hosting, with no invader in the world (during its own search, with one too: it calls it off) |
    | Abyssal Eye Orb | A guest or an invader returns home; the host disbands the session. | in a session; the host and the guests not while an invader is present |
    | Ominous Tome | Host: change the world rules (none, allies hostile, allies in teams, free for all; each use moves on). | host |
    | Dried Fingers | Host: taunt invaders; an invader searching for a world is 65% more likely to pick yours, and `InvasionCooldown` is off until the session ends. | host |
@@ -535,10 +535,13 @@ take it. Older invaders know nothing of the key and are answered `kFull` at the 
 Ctrl+F4 (`coop.cpp` lets the orb be used while hosting; `session::invade` hands it to `group_invade`). Every co-op
 guest must be of 1.6.0 (their hello's version), have arrived (`kArrived`), stand, and not be in a load or a cutscene
 (their report's event animation 3 or 2); the host must stand in its own world, with no boss fight in the world, no
-trip of the party's pending. Then the search runs while the world stays open: co-op players can still come in, but
-invaders cannot find it (`ptdesc_invade` and `ptdesc_boss` read 0 and a knock is refused), so that no invader is in it
-when the group goes. Each second the same checks run again for the group's own players; a failed one calls the search
-off (a player who comes in during the search is not checked and stays out of the group). The orb again calls it off.
+trip of the party's pending. An invader in the world keeps the search from starting (it would be a way out of the
+invasion, as the Abyssal Eye Orb would). Then the search runs while the world stays open to co-op players and invaders
+alike, a host alone included (the user's design: a search is no shelter from invasion; its lobby keeps `ptdesc_invade`
+as it was, and the world answers knocks and other groups' asks as usual). Each second the same checks run again for the
+group's own players, an invader no longer among them; a failed one (a fall, a boss fight, a trip) calls the search
+off. A player who comes in during the search is not checked and stays out of the group. The orb again calls it off
+(usable during the search with an invader in the world too).
 
 The search lists the worlds an invader's search finds (`ptdesc` 1) and keeps those whose host is of 1.6.0 or later
 (the same protocol, and `ptdesc_mod` at least 1.6.0: an older host keeps no invader limit), that take invaders, are not
@@ -547,25 +550,33 @@ they were passed over, for the line shown when none is left. One is picked as an
 Fingers weigh 1.65), and asked: our game enters its lobby beside our own (Steam lets a user be in several lobbies; the
 game's own session is one more) and sends its host message 46, `kGroupAsk` (protocol, version, the least `MaxPlayers`
 among the group's games, the group's Steam ids, the host first). That host checks what it checks for an invader's knock
-(AllowInvaders, its own group's search, InvasionCooldown, a boss fight, a load or its player down) and whether the
-whole group fits its invader limit and room, and answers with message 47, `kGroupAnswer` (a `WelcomeStatus`; the
-places it had). A yes holds a place for each of the group's ids for 120 s (`kGroupHoldFor`): the limit and the room
+(AllowInvaders, InvasionCooldown, a boss fight, a load or its player down; a world whose own group is searching says
+yes as well, and sends the group home with its other invaders if its own group goes first) and whether the whole group
+fits its invader limit and room, and answers with message 47, `kGroupAnswer` (a `WelcomeStatus`; the places it had).
+A yes holds a place for each of the group's ids for 45 s (`kGroupHoldFor`, the user's choice): the limit and the room
 count it for anyone else who knocks meanwhile, and each of the group who knocks takes their own place whatever the limit
 says by then (a co-op guest of that world who left meanwhile does not undo the promise). A place is taken when its
-player is admitted; a hold none of whose players came within the 120 s is given up. No answer within 8 s, or a lobby
+player is admitted; one not taken within the 45 s is anyone's again, and its player, should they still come, knocks
+as any invader does (admitted if the world has room by then). No answer within 8 s, or a lobby
 that cannot be entered, counts as busy and the next world is asked, up to five. The host takes `kGroupAsk` and
 `kGroupAnswer` from players outside its session (the asker is only in its lobby); while in another world's lobby to
 ask, our host ignores the Bye of that world's players (it takes a Bye only from players it knows).
 
 Once a world says yes, the host checks its group once more (those the places are held for, who can still go), tells
-each of them, message 48, `kGroupGo` (the world's lobby and the group), and closes its world as the Abyssal Eye Orb
-does: the Bye goes after it on the same channel, and a guest who is already on its way home for the group ignores the
+each of them, message 48, `kGroupGo` (the world's lobby and the group), sends home any invader in its world, and closes
+its world as the Abyssal Eye Orb does. Only now does the world stop taking invaders: the close hides its lobby and
+answers no knock. An invader sent home this way gets no outcome and nobody a reward, as with the Darksign; one of 1.6.0
+is told first (message 29, `kSentHome`, whose value 1, `kSentHomeGroup`, says why: "The host's party left to invade
+another world"; also while fallen and spectating), an older one, whose game would take that message for the Darksign,
+goes with the close's Bye ("The host closed their world"). The Bye goes after `kGroupGo` on the same channel, and a
+guest who is already on its way home for the group ignores the
 Bye (its own line, "Your group invades another world. Going home first...", stays). The guests go home, as a join
 leaves from one's own world (`guest_on_welcome` needs it), and the host's close finds them gone. Each player knocks on
 the world as an evil spirit, the host 0.5 s after its world is closed, a guest 1.5 s after it stands at home: an
 ordinary invader's join of that lobby (no search), admitted on the place held for it. There they are invaders like any
 others, one team with an outcome for all (1.3.0). A knock of the host's that does not get it there (refused, the join
-fell through, the 120 s passed) sends message 49, `kGroupOff`: a guest not let in yet stops knocking (one already let in
+fell through, or not home and standing to knock within 120 s, `kGroupLeaveFor`; the same for a guest) sends message 49,
+`kGroupOff`: a guest not let in yet stops knocking (one already let in
 invades on), and the group gathers again as after an invasion.
 
 Back home after the invasion (every session's end leaves the group's state as it is), the host opens its world again

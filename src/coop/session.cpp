@@ -106,7 +106,8 @@ enum MsgType : uint8_t {
     kTravelAnswer = 26,  // 1.2.0, host -> that guest: the travel waits for the host's menu, or why it cannot go
     kNpcPhantoms = 27,   // 1.3.0, host -> guests and invaders: the NPC phantoms in the host's party (summons.cpp)
     kHurtList = 28,      // 1.3.0: my world's hurt enemies, to a fallen teammate (as kDeadList; deadlist.cpp)
-    kSentHome = 29,      // 1.3.0, host -> an invader: the host's Darksign sends you home (no outcome)
+    kSentHome = 29,      // 1.3.0, host -> an invader: the host's Darksign sends you home (no outcome); 1.6.0: a Simple
+                         // whose value says why (kSentHomeGroup: the host's party leaves to invade another world)
     kWorldGlobals = 30,  // 1.3.0, host -> a co-op guest: the host's world state below the map flags (flags 0-1999)
     kAnimDone = 31,      // 1.3.0, anyone -> all (through the host): an event's animation on a character I move ended
     kHomewardAsk = 32,   // 1.3.0, co-op guest -> host: my Homeward Bone, Darksign or Homeward miracle (Simple: its
@@ -615,6 +616,8 @@ constexpr const wchar_t* kMsgGroupWaiting = L"Waiting for {} to open their world
 constexpr const wchar_t* kMsgGroupReturning = L"Returning to {}'s world...";
 constexpr const wchar_t* kMsgGroupNotBack = L"{} did not open their world again";
 constexpr const wchar_t* kMsgGroupGathering = L"Your group is still on its way back";
+constexpr const wchar_t* kMsgGroupSendsInvaders = L"Your party leaves: the invaders are sent home";
+constexpr const wchar_t* kMsgGroupSentHome = L"The host's party left to invade another world. Returning to your world...";
 
 // ---------------------------------------------------------------- state
 enum class Role { None, Host, Guest };
@@ -922,19 +925,25 @@ struct Group {
 };
 Group g_group;
 // Host: the places held for a group that asked (kGroupAsk) until its players come in or kGroupHoldFor passes. The
-// invader limit and MaxPlayers count them, for anyone else who knocks meanwhile.
+// invader limit and MaxPlayers count them, for anyone else who knocks meanwhile. A place its player has not taken
+// by then is anyone's again (the user's design: 45 s); that player may still knock, as any invader does.
 struct GroupHold {
     uint64_t leader = 0;
     std::vector<uint64_t> ids;
     double until = 0;
 };
 std::vector<GroupHold> g_group_holds;
-constexpr double kGroupHoldFor = 120.0;
+constexpr double kGroupHoldFor = 45.0;
+// A player of the group who is not home and standing to knock this long after the group went gives up and gathers
+// again with the others. Longer than the hold: a slow load still knocks, and gets in if the world has room by then.
+constexpr double kGroupLeaveFor = 120.0;
 // The group's host waits this long for a world's lobby and its answer before asking the next.
 constexpr double kGroupAskWait = 8.0;
 // After the invasion: the host sends its lobby to the others this long, and a guest waits this long to hear it.
 constexpr double kGroupBackFor = 240.0;
 constexpr const char* kGroupVersion = "1.6.0";
+// kSentHome's value from 1.6.0: why the invader is sent home (0, as every earlier host sends it: the Darksign).
+constexpr uint32_t kSentHomeGroup = 1;  // the host's party leaves to invade another world
 
 double now() { return GetTickCount64() / 1000.0; }
 
@@ -2075,8 +2084,6 @@ void host_answer(const Pending& p) {
     const bool limited = w.status == kOk && p.invade && !holder && invaders + held + 1 > limit;
     if (limited) w.status = kFull;
     if (p.invade && !g_cfg.allow_invaders) w.status = kRefused;
-    // Our own group looks for a world to invade: our world takes no invader meanwhile (its lobby says so as well).
-    if (p.invade && g_group.lead && g_group.phase == GroupPhase::Searching) w.status = kRefused;
     // InvasionCooldown: no invader for a while after an invasion of our world ended. Checked before a boss fight: the
     // wait is the least the invader has to wait in any case.
     uint32_t wait = 0;
@@ -2471,29 +2478,21 @@ void host_lobby_watch() {
 // with AllowInvaders off). 1.0.0 to 1.2.0 invaders search on that key. From 1.3.0 "ptdesc_boss" reads "1" during the
 // fight of a world that takes invaders otherwise: a 1.3.0 invader's search finds every world and tells the invader
 // why none could take them (issue_search).
-// While our own group looks for a world to invade (1.6.0), both read "0": no invader finds our world meanwhile, so
-// that none is in it when the group goes.
+// A world whose own group looks for a world to invade (1.6.0) stays open to invaders all the while, as the user wants:
+// only the group's going closes it (group_go).
 void host_invasions_open() {
     static double last = 0;
     if (now() - last < 1.0) return;
     last = now();
     publish_invader_places();
     const bool fight = boss_fight_in_world();
-    const bool group = g_group.lead && g_group.phase == GroupPhase::Searching;
-    const bool open = g_cfg.allow_invaders && !fight && !group;
+    const bool open = g_cfg.allow_invaders && !fight;
     if (open == g_invade_open) return;
     g_invade_open = open;
     steam::set_lobby_data(g_lobby, "ptdesc_invade", open ? "1" : "0");
-    steam::set_lobby_data(g_lobby, "ptdesc_boss", g_cfg.allow_invaders && fight && !group ? "1" : "0");
-    if (group) {
-        LOG_INFO("[coop] Our group looks for a world to invade: invaders cannot find our world meanwhile");
-    } else if (!g_cfg.allow_invaders) {
-        LOG_INFO("[coop] Invaders cannot find our world (AllowInvaders)");
-    } else if (open) {
-        LOG_INFO("[coop] Invaders can find our world again (no boss fight, no search of our own)");
-    } else {
-        LOG_INFO("[coop] A boss fight is on: invaders cannot find our world");
-    }
+    steam::set_lobby_data(g_lobby, "ptdesc_boss", g_cfg.allow_invaders && fight ? "1" : "0");
+    LOG_INFO("[coop] A boss fight %s: invaders %s our world", open ? "is over" : "is on",
+             open ? "can find" : "cannot find");
 }
 
 // ---------------------------------------------------------------- bonfire travel and the host's world
@@ -4634,15 +4633,17 @@ void knell_anim_came(uint64_t from, int anim, uint8_t loop) {
 
 // ---------------------------------------------------------------- group invasions (1.6.0)
 // The user's design: a host with its world open, with co-op guests or alone, uses the Chaos Eye Orb (Ctrl+F4) and the
-// whole party invades another world together. The world stays open while the search runs: co-op players may still
-// come in (one of 1.6.0 who stands in the world by the time a world says yes goes along), and invaders cannot find it
-// (host_invasions_open), so that none is in it when the party goes.
+// whole party invades another world together. The world stays open while the search runs, to co-op players and
+// invaders alike (the user's design: a search is no shelter from invasion): a co-op player who comes in meanwhile
+// stays out of the group, and an invader who comes in is sent home once a world says yes. The search cannot start
+// while an invader is in the world (it would be a way out of the invasion).
 //
 // The search lists the worlds an invader's search finds and keeps those whose host is of 1.6.0 or later (it keeps the
 // invader limit; an older one takes any number) and has room for the whole group by its lobby's "ptdesc_inv_room".
 // Each is asked in turn: our game enters its lobby beside our own and asks its host (kGroupAsk), who checks what it
 // checks for a knock, with its invader limit and MaxPlayers for the whole group, and holds the group's places for
-// kGroupHoldFor or says why not (kGroupAnswer). Once one says yes our world closes: its guests are told first (kGroupGo:
+// kGroupHoldFor (45 s; a place not taken by then is anyone's again) or says why not (kGroupAnswer). Once one says yes
+// our world stops taking invaders and sends any in it home (kSentHome), and closes: its guests are told first (kGroupGo:
 // the world and the group) and go home, as a join leaves from one's own world, and the host's close then finds them
 // gone. Each knocks there as an evil spirit, the host as soon as its world is closed, a guest once it stands at home,
 // and takes the place held for it; there they invade as one team (an invasion has one outcome for all its invaders,
@@ -4708,15 +4709,20 @@ std::string group_names() {
 // search (no group yet) every co-op guest must be able to go: of 1.6.0, arrived, standing, not in a load. Once the
 // search runs only the group's own are checked: a co-op player who comes in meanwhile is no reason to stop it (they
 // stay out of the group and are sent home by the close as any guest is), and one of the group who left is let go.
+// An invader in our world keeps the search from starting (it would be a way out of an invasion, as the Abyssal Eye
+// Orb would); once it runs our world stays open to invaders (the user's design), and one who comes in meanwhile is
+// sent home when the group goes (group_go).
 std::wstring group_refusal(std::vector<uint64_t>* guests) {
     if (!hosting() || !game::in_game() || game::loading() || !game::own_world() || !game::player()) {
         return kMsgGroupNotNow;
     }
+    const bool everyone = g_group.phase == GroupPhase::None;
     if (world::local_dead()) return kMsgGroupFallen;
-    if (rules::state().invader_present || !g_invaders_in.empty() || invaders_here(0) > 0) return kMsgGroupInvader;
+    if (everyone && (rules::state().invader_present || !g_invaders_in.empty() || invaders_here(0) > 0)) {
+        return kMsgGroupInvader;
+    }
     if (boss_fight_in_world()) return kMsgGroupBoss;
     if (trip_slot_busy() || g_travel_bonfire >= 0) return kMsgGroupTravel;
-    const bool everyone = g_group.phase == GroupPhase::None;
     for (uint64_t id : g_admitted) {
         const PeerInfo* p = find_peer(id);
         if (!p || p->invader || now() - p->last_seen > 10.0) continue;
@@ -4794,7 +4800,7 @@ void group_list() {
             if (l == g_lobby || steam::lobby_owner(l) == me) continue;
             const bool takes = steam::lobby_data(l, "ptdesc_invade") == "1";
             if (!takes && steam::lobby_data(l, "ptdesc_boss") != "1") {
-                ++closed;  // takes no invaders at all (AllowInvaders off, or its own group is searching)
+                ++closed;  // takes no invaders at all (AllowInvaders off, or an older host's boss fight)
                 continue;
             }
             const PeerVersion v = lobby_version(l);
@@ -4899,13 +4905,6 @@ void group_invade() {
     g_group.members.push_back(steam::self());
     g_group.members.insert(g_group.members.end(), guests.begin(), guests.end());
     set_group_phase(GroupPhase::Searching, "the Chaos Eye Orb while hosting");
-    // Invaders cannot find our world from now on; host_invasions_open keeps it so while we search.
-    if (g_invade_open) {
-        g_invade_open = false;
-        steam::set_lobby_data(g_lobby, "ptdesc_invade", "0");
-        steam::set_lobby_data(g_lobby, "ptdesc_boss", "0");
-        LOG_INFO("[coop] Our group looks for a world to invade: invaders cannot find our world meanwhile");
-    }
     const int size = static_cast<int>(g_group.members.size());
     say(size > 1 ? fmt(kMsgGroupSearch, std::to_wstring(size)) : std::wstring(kMsgGroupSearchSolo));
     GroupSearchMsg m{};
@@ -4949,6 +4948,26 @@ void group_go() {
     LOG_INFO("[coop] Group invasion: %s's world holds our %zu place(s); our world closes and we go (%s)",
              steam::persona(target_host).c_str(), going.size(), group_names().c_str());
     say(going.size() > 1 ? kMsgGroupGoLeader : kMsgGroupGoSolo);
+    // Only now does our world stop taking invaders (the close below: the lobby hidden, no knock answered), and one in
+    // it is sent home, as the Darksign sends them: no outcome, no reward for anyone. One of 1.6.0 is told why first
+    // (kSentHome with kSentHomeGroup, also while fallen and spectating); an older one, whose game would take that for
+    // the Darksign, goes with the close's Bye ("The host closed their world").
+    int sent = 0;
+    for (uint64_t id : g_admitted) {
+        const PeerInfo* p = find_peer(id);
+        if (!p || !p->invader) continue;
+        ++sent;
+        const bool knows = compare_versions(p->mod, kGroupVersion) >= 0;
+        if (knows) {
+            Simple home{};
+            fill_header(&home, kSentHome);
+            home.value = kSentHomeGroup;
+            send_to(id, home);
+        }
+        LOG_INFO("[coop] Group invasion: %s, an invader of our world, is sent home (%s)", p->name.c_str(),
+                 knows ? "told why" : "an older version: the close's Bye");
+    }
+    if (sent) say(kMsgGroupSendsInvaders);
     set_group_phase(GroupPhase::Leaving, "a world holds our places");
     leave();  // our close: the Bye, then our game session ends once the guests are gone (host_close_tick)
 }
@@ -4985,9 +5004,10 @@ void group_on_ask(uint64_t from, const GroupAskMsg& m) {
     GroupAnswerMsg a{};
     fill_header(&a, kGroupAnswer);
     a.status = kOk;
+    // A world whose own group is searching takes invaders and groups too, until its group goes (and sends them home).
     if (!same_version(them) || compare_versions(them.mod, kGroupVersion) < 0) {
         a.status = kVersion;
-    } else if (!g_cfg.allow_invaders || (g_group.lead && g_group.phase == GroupPhase::Searching)) {
+    } else if (!g_cfg.allow_invaders) {
         a.status = kRefused;
     } else if (now() < g_invade_open_at) {
         a.status = kCooldown;
@@ -5141,10 +5161,10 @@ void group_tick() {
                 set_group_phase(GroupPhase::None, "we started something else");
                 break;
             }
-            if (in_phase > kGroupHoldFor) {
+            if (in_phase > kGroupLeaveFor) {
                 if (g_group.lead) group_send_off();
                 say(kMsgGroupOff);
-                set_group_phase(GroupPhase::Returning, "too late for the places held for us");
+                set_group_phase(GroupPhase::Returning, "we were not home and standing in time to knock");
                 break;
             }
             if (standing >= (g_group.lead ? 0.5 : 1.5)) group_knock();
@@ -6018,16 +6038,22 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kSentHome: {
             if (from != g_host || g_role != Role::Guest || !g_invade) return;
+            // 1.6.0: the value says why (kSentHomeGroup: the host's party leaves to invade another world); before it
+            // was always the Darksign, and the value 0.
+            Simple sent{};
+            const bool group = as(&sent) && sent.value == kSentHomeGroup;
+            const wchar_t* line = group ? kMsgGroupSentHome : kMsgDarksignInvader;
+            const char* why = group ? "the host's party leaves to invade another world" : "the host's Darksign";
             if (world::local_dead()) {
                 // Fallen and spectating another invader: the death goes ahead and takes us home, and the invasion has
                 // no outcome (no "failed", no Humanity for the co-op team).
                 g_invade_lost = true;
                 spectate::trip_release();
-                say(kMsgDarksignInvader);
-                LOG_INFO("[coop] The host's Darksign while we were down: our death goes ahead and takes us home");
+                say(line);
+                LOG_INFO("[coop] Sent home while we were down (%s): our death goes ahead and takes us home", why);
                 break;
             }
-            guest_go_home(kMsgDarksignInvader, "the host's Darksign sent us home");
+            guest_go_home(line, group ? "the host's party left to invade another world" : "the host's Darksign sent us home");
             break;
         }
         case kDropped: {
@@ -7610,7 +7636,10 @@ bool in_session() {
 
 bool hosting() { return g_role == Role::Host && g_step == Step::Hosting && g_lobby != 0; }
 
-bool group_invade_open() { return hosting() && !rules::state().invader_present; }
+bool group_invade_open() {
+    // During our own search an invader may come in (the world stays open to them): the orb still calls it off.
+    return hosting() && (!rules::state().invader_present || (g_group.lead && g_group.phase == GroupPhase::Searching));
+}
 
 std::vector<SummonSign> summon_signs() {
     std::vector<SummonSign> out;

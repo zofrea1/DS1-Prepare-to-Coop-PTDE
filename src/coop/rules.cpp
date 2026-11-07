@@ -67,6 +67,21 @@ bool patch_call(uint32_t at, const uint8_t* expect, size_t n, void* helper);
 
 bool seamless_rules() { return g_state.active && !g_state.leaving && !g_state.invader; }
 
+// An invader's Death Knell to a summon sign in a map not loaded here (1.5.0) goes by a load into the host's map, as a
+// co-op guest's does (world::warp_now). An invader's leaves are the game's own (seamless_rules), so that load's
+// WarpNextStageKick left the session and the invasion ended once the load was over (Grok review 8fcccb69). For that
+// one load (armed with the knell's placement, until it is over or kInvaderKnellLoadFor without one) the load's own
+// leaves are skipped and the load is marked as the host's world, as for a co-op guest; the invader's death, the host's
+// send-home and every other leave stay the game's own.
+bool g_invader_knell_load = false;
+ULONGLONG g_invader_knell_at = 0;
+constexpr ULONGLONG kInvaderKnellLoadFor = 30000;
+
+bool invader_knell_load() {
+    return g_invader_knell_load && g_state.active && g_state.invader && !g_state.leaving &&
+           GetTickCount64() - g_invader_knell_at < kInvaderKnellLoadFor;
+}
+
 // A co-op guest's leave_session looks to the host like the whole session ended. These callers then run the
 // title leave when only one member remains. Vanilla phantom leave does not title-kick the host; block these
 // only for the seamless host, in its own world, while the game session is still hosting.
@@ -98,6 +113,14 @@ const char* leave_name(uint32_t ret) {
 
 bool __stdcall allow_leave(uint32_t ret) {
     if (host_stays(ret)) return false;
+    if (invader_knell_load() && (ret == kRetWarpKick || ret == kRetStepEnd || ret == kRetMapChange ||
+                                 ret == kRetAfterLoad || ret == kRetWarpRestart)) {
+        if (++g_blocked_leaves <= 50) {
+            LOG_INFO("[coop] Kept the invasion through the Death Knell's load (leave from %08X skipped) %s", ret,
+                     leave_name(ret));
+        }
+        return false;
+    }
     if (!seamless_rules()) {
         // An invader's leaves (and a joiner's that we did not ask for) are the game's own: which one, for the joins that
         // fell through in the 2026-10-25 test.
@@ -133,6 +156,7 @@ bool __stdcall allow_leave(uint32_t ret) {
 }
 
 bool __stdcall allow_party_reset(uint32_t ret) {
+    if (invader_knell_load() && (ret == kRetWarpKickParty || ret == kRetMapChangeParty)) return false;
     if (!seamless_rules()) return true;
     return ret != kRetLuaLeaveParty && ret != kRetWarpKickParty && ret != kRetMapChangeParty;
 }
@@ -640,7 +664,12 @@ void __cdecl before_map_load() {
             if (const uint32_t gm = game::game_man()) *ptr<int>(gm + game::kGmLastBonfire) = bonfire;
         }
     }
-    if (seamless_rules() && g_state.guest && game::session_state() == 6 && game::join_step() == 4) {
+    if (invader_knell_load() && g_state.guest && game::session_state() == 6 && game::join_step() == 4) {
+        game::set_join_step(3);
+        g_marked = true;
+        g_place_warp = false;  // the knell's placement (place_choice) puts us at the sign
+        LOG_INFO("[coop] Map load stays in the host's world (the Death Knell, invading)");
+    } else if (seamless_rules() && g_state.guest && game::session_state() == 6 && game::join_step() == 4) {
         game::set_join_step(3);
         g_marked = true;
         if (g_place_bonfire) g_bonfire_spawn = true;
@@ -668,6 +697,7 @@ void __cdecl before_map_load() {
 void __cdecl after_map_load() {
     if (g_marked && game::join_step() == 3) game::set_join_step(4);
     g_marked = false;
+    g_invader_knell_load = false;  // that load is over
     g_bonfire_spawn = false;
     // The placement step is still ahead of this. It reads g_place_bonfire, which stays set.
     g_death_respawn = false;
@@ -813,6 +843,9 @@ void arm_knell_place(int map, float x, float y, float z, float angle) {
     g_knell_place[6] = 0.0f;
     g_knell_place[7] = 0.0f;
     g_knell_armed = true;
+    // An invader's: this load stays in the invasion (invader_knell_load).
+    g_invader_knell_load = g_state.active && g_state.invader && !g_state.leaving;
+    g_invader_knell_at = GetTickCount64();
 }
 
 __declspec(naked) void hk_movemap() {

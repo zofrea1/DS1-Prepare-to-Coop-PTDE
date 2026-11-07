@@ -204,6 +204,13 @@ struct RemotePlayer {
 };
 void set_remote_players(const std::vector<RemotePlayer>& players);
 
+// The Demon Ruins lift that the Centipede Demon's death starts (event 11410400) moves for one game at a time (rules.cpp,
+// "one game moves the Demon Ruins lift"); session.cpp picks it among the players standing in its map. `someone`: a
+// player is there; `ours`: it is this game; `chr`: that player's character here when it is another game's (0 none
+// yet); `who`: their name, for the log.
+uint32_t driven_lift_map();  // the lift's map (the map id's high 16 bits)
+void set_lift_driver(bool someone, bool ours, uint32_t chr, const std::string& who);
+
 // Where the other session players stand, as their own games last reported it (alive, heard from lately).
 struct PeerSpot {
     float pos[3] = {};

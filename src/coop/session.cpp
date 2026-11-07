@@ -5762,6 +5762,49 @@ void update_remote_players() {
     rules::set_remote_players(out);
 }
 
+// The Demon Ruins lift moves for one game at a time (rules::set_lift_driver): of the players standing in its map, the
+// host's, else a co-op guest's (the lowest Steam id), else an invader's. Every game ranks the same players from the
+// maps they report (kInfo, every second), so the games agree within a second of anyone coming or going. A player alone
+// in that map is the one, also a guest whose host is elsewhere.
+void lift_driver_tick() {
+    static double last = 0;
+    if (now() - last < 0.25) return;
+    last = now();
+    const uint32_t map = rules::driven_lift_map();
+    const uint64_t self = steam::self();
+    bool someone = false;
+    uint64_t best = 0;
+    int best_rank = 0;
+    auto consider = [&](uint64_t id, int rank) {
+        if (!someone || rank < best_rank || (rank == best_rank && id < best)) {
+            someone = true;
+            best_rank = rank;
+            best = id;
+        }
+    };
+    if (g_role != Role::None && (g_step == Step::Hosting || g_step == Step::InWorld) && !game::loading()) {
+        const int here = game::map_id();
+        if (here != -1 && (static_cast<uint32_t>(here) & 0xFFFF0000) == map) {
+            consider(self, g_role == Role::Host ? 0 : g_invade ? 2 : 1);
+        }
+        const std::vector<party::Remote> members = party::remotes();
+        for (const auto& p : g_peers) {
+            if (p.id == self || p.map == -1 || now() - p.last_seen > 5.0) continue;
+            if ((static_cast<uint32_t>(p.map) & 0xFFFF0000) != map) continue;
+            if (!coop_member(p, members) && !invader_teammate(p, members)) continue;
+            consider(p.id, g_role == Role::Guest && p.id == g_host ? 0 : p.invader ? 2 : 1);
+        }
+    }
+    const bool ours = someone && best == self;
+    std::string who;
+    if (someone && !ours) {
+        for (const auto& p : g_peers) {
+            if (p.id == best) who = p.name;
+        }
+    }
+    rules::set_lift_driver(someone, ours, someone && !ours ? chr_of_peer(best) : 0, who);
+}
+
 // Diagnostic for animation sync (bonfire rests not seen by the others): our animations and whether an override
 // manipulator drives us (the network recorder belongs to our own PadManipulator), and for each other player's
 // character the animations its NetworkManipulator last received (+0x1EC/+0x1F0) and what it plays. Logged when
@@ -6167,6 +6210,7 @@ void tick() {
         }
         rules::set_peer_spots(spots);
     }
+    lift_driver_tick();
     if (g_role != Role::None && g_anim_log) anim_sync_log();
     // Motion sync: our gait and event animations out; the others' gaits onto their characters here.
     {

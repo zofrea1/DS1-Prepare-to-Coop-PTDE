@@ -1027,10 +1027,21 @@ uint32_t g_cur_event = 0;
 // Map events whose run mirrored a flag into a co-op guest's own world (see after_set_flag, mirror_event_done).
 std::set<uint32_t> g_mirroring_events;
 
+// The Demon Ruins lift's look at where it stands, before each of its instructions (one game moves the lift, below).
+bool g_lift_someone = false;
+void __stdcall lift_step(uint32_t ev);
+
 __declspec(naked) void hk_event_step() {
     __asm {
         push dword ptr [g_cur_event]
         mov dword ptr [g_cur_event], eax
+        cmp byte ptr [g_lift_someone], 0
+        je step
+        pushad
+        push eax
+        call lift_step
+        popad
+    step:
         call dword ptr [g_event_step_orig]
         pop dword ptr [g_cur_event]
         ret
@@ -3034,9 +3045,11 @@ bool install_sign_filter() {
 }
 
 // A run of a map event that another player's game started reaches this game as an event sync (FrpgEmkEventIns
-// slot 4, 0xBC4000: thiscall(event, connection, type, data, size), ret 0x10). Types 1 and 2 move the event's
-// program counter (+0x20 points at it) past the condition that passed there, and set its player (+0x44 = 10001 +
-// that player's slot, so "the player" 10000 of the run is them) and +0x38. In the game's co-op only the host's
+// slot 4, 0xBC4000: thiscall(event, connection, type, data, size), ret 0x10). Types 1 and 2 write the condition
+// groups that passed there (the u16 that +0x20 points at, "line" in the lines below: AND n is bit n-1, OR n bit 7+n,
+// as 0xBC3EC0 reads it) and the wait they passed at (+0x38), and set its player (+0x44 = 10001 + that player's slot,
+// so "the player" 10000 of the run is them); type 1 only when the event waits where the sender's did (+0x34, the
+// index of the instruction it waits at). In the game's co-op only the host's
 // game runs most map events, so what arrives is the world's own state. In seamless co-op every game runs them,
 // also for maps its player is not in: the host standing at Firelink still ran the Undead Burg's Hellkite events,
 // judged their "every player outside the bridge" tests from there, and those runs reached the guest on the
@@ -3087,8 +3100,11 @@ int remote_player_map(int entity) {
     return -1;
 }
 
+void hold_lift_run(uint32_t e, uint32_t type, uint32_t data, uint32_t size);  // one game moves the lift (below)
+
 void __fastcall hk_event_sync(uint8_t* ev, void* edx, uint32_t conn, uint32_t type, uint32_t data, uint32_t size) {
     const uint32_t e = reinterpret_cast<uint32_t>(ev);
+    hold_lift_run(e, type, data, size);
     uint32_t pc = 0, who = 0, seq = 0;
     const bool saved = ev && read32(e + 0x20, &pc) && pc && read32(e + 0x44, &who) && read32(e + 0x38, &seq);
     const uint16_t at = saved ? *ptr<uint16_t>(pc) : 0;
@@ -3202,6 +3218,202 @@ __declspec(naked) void hk_random_flag() {
         jmp dword ptr [g_random_flag]
     skip:
         ret 8
+    }
+}
+
+// ---------------------------------------------------------------- one game moves the Demon Ruins lift
+// The lift that works once the Centipede Demon is dead (object 1411400 in m14_01, event 11410400; 11410410 sets flag
+// 11410410 at the demon's death) moves toward the player of the game that runs it: "IF In/Outside Area" of the player
+// (10000) in four areas, against flag 11410401 (on: it stands at the end of animation 3), in four AND groups. Groups 1
+// and 4 (flag on, the player on it or calling it from the other end) set the flag off and play animation 1, groups 2
+// and 3 the other way with animation 3; then it waits for every player to be off and restarts, and a restart with the
+// flag on puts it there at once (Reproduce Object Animation 0). Every game runs the event, the flag is shared, and the
+// runs of anyone in the map are taken (hk_event_sync). The lift went back and forth and jumped between the ends
+// (report after 1.5.0) in two ways:
+//  * two games passed the test at once for their own players (one on each landing) and sent opposite trips;
+//  * the flag's change came before the run (the mod's message and the game's packet race: 7 ms ahead at the New
+//    Londo lift on 2026-11-05), and line 18 (SKIP IF flag 11410401 on) of the game taking the run then read the flag
+//    the other game had already turned: the trip the other way, its flag sent back, and the next restart put the lift
+//    at that end in the first game.
+// So one game moves the lift while players stand in its map (session.cpp picks it: the host there, else a co-op guest
+// there, else an invader; a player alone in the map is it): its test passes for any player there it sees in the area,
+// and the other games' own tests never pass, so they only take its runs (they take a run: its player is in the map).
+// Before line 18, the flag is the one the run's groups start from (lift_step). A run that comes while a game's copy
+// is still finishing the last trip (its wait for every player to be off is behind the other game's by the network's
+// lag) is not taken by the game (0xBC4000 type 1 takes a run only at the same wait: event +0x34) and was lost; it is
+// held and handed to the copy once it waits for the next call.
+//
+// EcTestRegionSide (3[02]; vtable 0x11DE4F4, slot 1 = 0xBB1D30, thiscall(cond, dt, event), ret 8; made by 0xBB1DE0
+// for 0xBC1233 only): +0x18 mode (0, which nothing changes), +0x19 the state wanted (1 inside), +0x1C the entity,
+// +0x20 the area; result in bit 0 of +8. 0xD6DF10 (eax = [0x137D790], ecx = area, stdcall(entity), al = inside)
+// finds the character with 0xD6C360: 10000 ours, 10001 + chr+0x410 another player's.
+// A run's word (*[event+0x20], u16) holds the groups that passed: AND n is bit n-1, OR n bit 7+n (0xBC3EC0). The run
+// writes it, +0x44 (the player: 10001 + its slot) and +0x38 (the wait it passed); a restart clears it (0x528C50).
+constexpr uint32_t kRegionSideVtable = 0x011DE4F4;
+constexpr uint32_t kRegionSideTest = 0x00BB1D30;
+constexpr uint32_t kInRegion = 0x00D6DF10;
+constexpr uint32_t kRegionManVar = 0x0137D790;
+
+struct DrivenLift {
+    int event;
+    int flag;           // where it stands
+    uint16_t from_on;   // the groups whose trip starts with the flag on
+    uint16_t from_off;  // and with it off
+};
+constexpr DrivenLift kDrivenLifts[] = {{11410400, 11410401, 0x0009, 0x0006}};
+constexpr uint32_t kDrivenLiftMap = 0x0E010000;  // event_map of each of them
+
+bool g_lift_ours = false;        // our game moves it (g_lift_someone: some game does)
+uint32_t g_lift_driver_chr = 0;  // that game's player's character here, when it is another game's
+
+// A run our copy could not take yet (it was still finishing the last trip).
+struct HeldRun {
+    int event = 0;
+    uint32_t wait = 0;    // the wait that run passed (the sender's +0x34)
+    uint16_t groups = 0;  // its word
+    ULONGLONG at = 0;     // 0: none
+};
+HeldRun g_lift_held;
+constexpr ULONGLONG kHeldRunMs = 15000;
+
+// The lift rules hold in a session, for invaders too (they ride the same lift in the same world).
+bool lift_rules() { return g_state.active && !g_state.leaving && g_world_events; }
+
+const DrivenLift* driven_lift(int id) {
+    for (const DrivenLift& l : kDrivenLifts) {
+        if (l.event == id) return &l;
+    }
+    return nullptr;
+}
+
+bool chr_in_region(int entity, int area) {
+    uint32_t man = 0;
+    if (!read32(kRegionManVar, &man) || !man) return false;
+    uint8_t inside = 0;
+    __try {
+        __asm {
+            push entity
+            mov ecx, area
+            mov eax, man
+            mov edx, kInRegion
+            call edx
+            mov inside, al
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return inside != 0;
+}
+
+// A run of the lift (type 1: {the wait it passed, its word}) that our copy cannot take where it waits now: it is still
+// finishing the last trip, and the game would let the run go (0xBC4000 compares the waits). Held for it.
+void hold_lift_run(uint32_t e, uint32_t type, uint32_t data, uint32_t size) {
+    if (!g_lift_someone || g_lift_ours || !e || (type & 0xFFFF) != 1 || size < 8 || !data || !lift_rules()) return;
+    uint32_t id = 0, wait = 0, mine = 0, word = 0;
+    if (!read32(e + kEventId, &id) || !driven_lift(static_cast<int>(id)) || !read32(data, &wait) ||
+        !read32(data + 4, &word) || !read32(e + 0x34, &mine) || wait == mine) {
+        return;
+    }
+    g_lift_held.event = static_cast<int>(id);
+    g_lift_held.wait = wait;
+    g_lift_held.groups = static_cast<uint16_t>(word & 0xFFFF);
+    g_lift_held.at = GetTickCount64();
+    LOG_INFO("[coop] Event %d: a run (groups %04X, from wait %u) came while our copy is at wait %u: held until it is back",
+             static_cast<int>(id), g_lift_held.groups, wait, mine);
+}
+
+// The held run goes to our copy once it waits where that run was sent from: what the game's sync writes for it.
+void hand_held_run(uint32_t ev, int id) {
+    if (!g_lift_held.at || g_lift_held.event != id) return;
+    if (GetTickCount64() - g_lift_held.at > kHeldRunMs) {
+        LOG_INFO("[coop] Event %d: the held run (groups %04X) is dropped: our copy did not come back to its wait in %llu s",
+                 id, g_lift_held.groups, kHeldRunMs / 1000);
+        g_lift_held = {};
+        return;
+    }
+    uint32_t wait = 0, word = 0;
+    if (!read32(ev + 0x34, &wait) || wait != g_lift_held.wait || !read32(ev + 0x20, &word) || !word) return;
+    uint32_t slot = 0;
+    if (g_lift_driver_chr && read32(g_lift_driver_chr + 0x410, &slot) && slot < 64) {
+        *ptr<uint32_t>(ev + 0x44) = 10001 + slot;
+    }
+    *ptr<uint32_t>(ev + 0x38) = g_lift_held.wait;
+    *ptr<uint16_t>(word) = g_lift_held.groups;
+    LOG_INFO("[coop] Event %d: the held run (groups %04X, %llu ms old) handed to our copy, back at its wait %u", id,
+             g_lift_held.groups, GetTickCount64() - g_lift_held.at, wait);
+    g_lift_held = {};
+}
+
+void __fastcall hk_region_side_test(uint8_t* cond, void* edx, float dt, uint8_t* event) {
+    using TestFn = void(__fastcall*)(uint8_t*, void*, float, uint8_t*);
+    reinterpret_cast<TestFn>(kRegionSideTest)(cond, edx, dt, event);
+    if (!g_lift_someone || !cond || !event || !lift_rules()) return;
+    if (cond[0x18] != 0 || cond[0x19] != 1 || *reinterpret_cast<int32_t*>(cond + 0x1C) != 10000) return;
+    const uint32_t ev = reinterpret_cast<uint32_t>(event);
+    uint32_t id = 0;
+    if (!read32(ev + kEventId, &id)) return;
+    const DrivenLift* lift = driven_lift(static_cast<int>(id));
+    if (!lift) return;
+    if (!g_lift_ours) {
+        // Our player calls it through the game that moves it, which sees them in the area.
+        cond[8] &= 0xFE;
+        hand_held_run(ev, lift->event);
+        return;
+    }
+    if (cond[8] & 1) return;  // our own player is there
+    const int area = *reinterpret_cast<int32_t*>(cond + 0x20);
+    for (const RemotePlayer& r : g_remote) {
+        if (!r.known || !r.chr || r.map == -1 || (static_cast<uint32_t>(r.map) & 0xFFFF0000) != kDrivenLiftMap) continue;
+        uint32_t slot = 0, hp = 0;
+        if (!read32(r.chr + 0x410, &slot) || slot >= 64 || !read32(r.chr + 0x2D4, &hp) || static_cast<int>(hp) <= 0) {
+            continue;
+        }
+        if (!chr_in_region(10001 + static_cast<int>(slot), area)) continue;
+        cond[8] |= 1;
+        static int lines = 0;
+        static int last_area = 0;
+        if (area != last_area && ++lines <= 40) {
+            last_area = area;
+            LOG_INFO("[coop] Event %d: another player (character %08X) is in area %d: the lift answers them", lift->event,
+                     r.chr, area);
+        }
+        return;
+    }
+}
+
+// Before each instruction of the lift's event: its looks at the flag (SKIP IF Event Flag) read the flag the trip
+// starts from. Line 18, after the call, has the groups that passed in the word: they say where the lift stood when
+// the game that moved it sent the run, and the flag that game sent may have come first. The restart's look (line 0,
+// which puts the lift at the flag's end at once) has none; with a run held for our copy, the next trip starts where
+// ours ended, and the flag the other game sent for that trip (already here) would put the lift at its far end for a
+// moment, under a player standing on it.
+void __stdcall lift_step(uint32_t ev) {
+    if (!ev || !lift_rules()) return;
+    uint32_t id = 0;
+    if (!read32(ev + kEventId, &id)) return;
+    const DrivenLift* lift = driven_lift(static_cast<int>(id));
+    if (!lift) return;
+    uint32_t instr = 0, bank = 0, index = 0, word = 0;
+    if (!read32(ev + 0x78, &instr) || !instr || !read32(instr, &bank) || !read32(instr + 4, &index)) return;
+    if (bank != 1003 || index != 1) return;  // SKIP IF Event Flag
+    if (!read32(ev + 0x20, &word) || !word) return;
+    uint16_t groups = *ptr<uint16_t>(word);
+    const char* why = "the flag had changed before the run came";
+    if (!(groups & (lift->from_on | lift->from_off)) && !g_lift_ours && g_lift_held.at &&
+        g_lift_held.event == lift->event) {
+        groups = g_lift_held.groups;
+        why = "the held run starts there";
+    }
+    const bool from_on = (groups & lift->from_on) != 0, from_off = (groups & lift->from_off) != 0;
+    if (from_on == from_off) return;
+    if (game::flag(lift->flag) == from_on) return;
+    ++g_flag_quiet;
+    game::set_flag(lift->flag, from_on);
+    --g_flag_quiet;
+    static int lines = 0;
+    if (++lines <= 40) {
+        LOG_INFO("[coop] Event %d: flag %d %s again for this trip (groups %04X; %s)", lift->event, lift->flag,
+                 from_on ? "on" : "off", groups, why);
     }
 }
 
@@ -6740,6 +6952,9 @@ int install() {
     failed += install_one("map event runs from another map",
                           swap_pointer(kEmkEventVtable + 4 * 4, kEventSync, reinterpret_cast<void*>(&hk_event_sync),
                                        &g_event_sync_orig));
+    failed += install_one("one game moves the Demon Ruins lift",
+                          swap_pointer(kRegionSideVtable + 4, kRegionSideTest,
+                                       reinterpret_cast<void*>(&hk_region_side_test)));
     failed += install_one("random picks of another game's runs",
                           redirect_call(kRandomFlagSite, kRandomFlag, reinterpret_cast<void*>(&hk_random_flag)));
     for (uint32_t site : kAnimWaitSites) {
@@ -6942,6 +7157,27 @@ void track_own_chr_type() {
 }
 
 void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = players; }
+
+uint32_t driven_lift_map() { return kDrivenLiftMap; }
+
+void set_lift_driver(bool someone, bool ours, uint32_t chr, const std::string& who) {
+    if (!someone) ours = false;
+    static std::string last_who;
+    if (someone != g_lift_someone || ours != g_lift_ours || (someone && !ours && who != last_who)) {
+        if (!someone) {
+            LOG_INFO("[coop] The Demon Ruins lift: no player in its map");
+        } else if (ours) {
+            LOG_INFO("[coop] The Demon Ruins lift moves for our game now: it answers every player in its map");
+        } else {
+            LOG_INFO("[coop] The Demon Ruins lift moves for %s's game now: ours takes its runs", who.c_str());
+        }
+    }
+    last_who = someone && !ours ? who : std::string();
+    g_lift_someone = someone;
+    g_lift_ours = ours;
+    g_lift_driver_chr = someone && !ours ? chr : 0;
+    if (!someone || ours) g_lift_held = {};
+}
 void set_peer_spots(const std::vector<PeerSpot>& spots) { g_peer_spots = spots; }
 uint32_t bid_for(uint32_t chr) { return chr ? net_priority(chr) : 0; }
 bool enemy_ai_off(uint32_t chr) { return chr && ai_off_here(chr); }
@@ -6988,6 +7224,7 @@ void tick() {
     if (game::loading() && !g_host_killed.empty()) g_host_killed.clear();
     if (game::loading() && !g_gains.empty()) g_gains.clear();  // a load frees the characters
     if (game::loading() && !g_mirroring_events.empty()) g_mirroring_events.clear();
+    if (game::loading() && g_lift_held.at) g_lift_held = {};  // the lift's copy is made again after a load
     // The same for the events whose NPC step did not line up: a load frees them, and a later run at the same address
     // would be taken for one (its end not marked done at home; Grok d6d05cb9). Nor are they kept past the session.
     if ((game::loading() || !g_state.guest) && !g_unaligned_events.empty()) g_unaligned_events.clear();

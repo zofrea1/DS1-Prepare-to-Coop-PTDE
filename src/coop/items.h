@@ -69,8 +69,9 @@ int estus_charges();
 // bonfire's refill does. False when there is no flask or the game did not take it.
 bool set_estus_charges(int charges);
 void remove_all(int32_t goods_id);
-// Takes `n` of an item (not a key item) out of the inventory, as the game's own RemoveItem does. Returns how many
-// went (0 when none was held).
+// Takes `n` of an item (not a key item) out of the carried inventory: the stack's quantity goes down by n, as the
+// game's own use takes one, and the slot goes only with the last of them. Returns how many went (0 when none was
+// held).
 int take(int32_t goods_id, int n);
 // A spell's "usable in multiplayer" (MagicParam enable_multi, which the game's spell check 0xEAD7C0 reads). Lives in
 // the loaded params only: the game's own value comes back with the next start. False when the row is not found.

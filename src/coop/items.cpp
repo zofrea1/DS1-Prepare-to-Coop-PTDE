@@ -45,7 +45,15 @@ constexpr uint32_t kItemGetVar = 0x0137E174;
 constexpr uint32_t kItemGetPush = 0x00C22830;
 constexpr uint32_t kMenuManVar = 0x013786D0;
 constexpr uint32_t kNoEventAnim[2] = {0x012E0C64, 0x012E0C68};  // the "none" handle pair (PlayerIns+0xFC/+0x100)
-constexpr uint32_t kRemoveItem = 0x00D6D670;    // stdcall(category, id, count). count <= 0 removes one stack.
+// stdcall(category, id, count): erases whole inventory slots of the item, `count` of them (each through 0xC09770, after
+// the quick-bar cleanup 0xC0BE20 + 0x48F360 when the slot is on the quick bar); count <= 0 erases every slot of it.
+// A slot is a whole stack: count 1 took all 99 of a stack of Homeward Bones (report after 1.5.0). Only the carried
+// inventory (PlayerGameData+0x1B8) is searched, not the Bottomless Box.
+constexpr uint32_t kRemoveItem = 0x00D6D670;
+// The game's own use of one item (UseGoods's use-up 0xC0CEB0, at 0xC0CF7B): eax = slot, edi = inventory+0x108,
+// stdcall(delta, &capped byte); adds delta to the slot's quantity (+8), capped at the item's maxNum, and returns the
+// new quantity. ret 8. The use-up erases the slot only when that comes back 0 or less.
+constexpr uint32_t kSlotAdd = 0x00C09720;
 constexpr uint32_t kMagicGetter = 0x00D1D800;   // as the goods getter: edi = magic id, push out {id, row}; ret 4
 constexpr uint32_t kMagicFlags = 0x2B;          // MagicParam: bit 0 enable_multi, bit 1 enable_multi_only
 // An inventory slot's item replaced (the bonfire's refill turns an empty Estus Flask into the full one with it,
@@ -724,18 +732,80 @@ bool set_magic_multi(int32_t magic_id, bool on) {
     return true;
 }
 
+namespace {
+
+// The carried inventory's slot of a goods item (-1 none) and its quantity, as count() finds it.
+int goods_slot(int32_t goods_id, int* held) {
+    *held = 0;
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return -1;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t n = 0, keys = 0, last = 0, a = 0, b = 0;
+    if (!read32(inv + 0x110, &n) || !read32(inv + 0x118, &keys) || !read32(inv + 0x13C, &last) ||
+        !read32(inv + 0x120, &a) || !read32(inv + 0x124, &b)) {
+        return -1;
+    }
+    const uint32_t end = (last + 1 < n) ? last + 1 : n;
+    for (uint32_t i = 0; i < end && i < 4096; ++i) {
+        const uint32_t e = (i < keys ? a : b) + i * 0x1C;
+        uint32_t cat = 0, id = 0, num = 0;
+        if (!read32(e, &cat) || !read32(e + 4, &id) || !read32(e + 8, &num)) return -1;
+        if (cat == kGoodsCategory && static_cast<int32_t>(id) == goods_id) {
+            *held = static_cast<int>(num);
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+// Fewer than the slot holds: the quantity goes down by n, as the game's own use takes one (kSlotAdd).
+bool slot_subtract(int slot, int n) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd || slot < 0 || n <= 0) return false;
+    const uint32_t items = pgd + 0x1B8 + 0x108;
+    const int delta = -n;
+    uint8_t capped = 0;
+    __try {
+        __asm {
+            lea eax, capped
+            push eax
+            push delta
+            mov eax, slot
+            mov edi, items
+            mov ecx, kSlotAdd
+            call ecx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+// Used for the Homeward Bone only (session.cpp): one bone per player and trip, the rest of the stack kept. Not through
+// UseGoods, which would also put on the bone's own effect (the session's trip replaces it).
 int take(int32_t goods_id, int n) {
     if (!game::in_game() || n <= 0) return 0;
-    const int before = count(goods_id);
-    if (before <= 0) return 0;
-    __try {
-        using Fn = uint8_t(__stdcall*)(uint32_t, int32_t, int32_t);
-        reinterpret_cast<Fn>(kRemoveItem)(kGoodsCategory, goods_id, std::min(n, before));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_ERROR("[coop] Taking item %d failed", goods_id);
-        return 0;
+    int held = 0;
+    const int slot = goods_slot(goods_id, &held);
+    if (slot < 0 || held <= 0) return 0;
+    if (held > n) {
+        if (!slot_subtract(slot, n)) {
+            LOG_ERROR("[coop] Taking item %d failed", goods_id);
+            return 0;
+        }
+    } else {
+        // The last of them: the slot goes, with RemoveItem's quick-bar cleanup first (a bone on the quick bar).
+        __try {
+            using Fn = uint8_t(__stdcall*)(uint32_t, int32_t, int32_t);
+            reinterpret_cast<Fn>(kRemoveItem)(kGoodsCategory, goods_id, 1);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            LOG_ERROR("[coop] Taking item %d failed", goods_id);
+            return 0;
+        }
     }
-    return before - count(goods_id);
+    return held - count(goods_id);
 }
 
 void grant_missing() {

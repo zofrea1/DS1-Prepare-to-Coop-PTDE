@@ -151,8 +151,8 @@ std::vector<Anim> g_pending;
 bool g_enabled = true;      // [SeamlessCoop] BonfireAnimations
 // The Death Knell's arrivals (knell.cpp): the living player's rise (6950), the summoned phantom's (6951) and the
 // Warrior of Sunlight's (6952, "Praise the Sun"). Passed on only when the Knell starts one (send_knell_arrival). And
-// the price's stagger, and the ring's animation played again for the choice (6060, with its rings).
-constexpr int kKnellAnims[] = {6950, 6951, 6952, 2010, 6060};
+// the price's stagger.
+constexpr int kKnellAnims[] = {6950, 6951, 6952, 2010};
 int g_knell_send = 0;
 ULONGLONG g_knell_send_at = 0;
 
@@ -432,7 +432,9 @@ void send_knell_arrival(int anim) {
     g_knell_send_at = GetTickCount64();
 }
 
-void send_knell_hold(bool on) { queue(Anim{static_cast<uint8_t>(on ? kHold : kRelease), 0, 0}); }
+void send_knell_hold(bool on, bool rewind) {
+    queue(Anim{static_cast<uint8_t>(on ? kHold : kRelease), !on && rewind ? kReleaseRewind : 0, 0});
+}
 
 // The speed a character's animation set (ChrCtrl+0x14) runs at: its update (0xD98A50, from the ChrCtrl update
 // 0xE368C0) multiplies the frame's time by +0x64 when that is not 1, else by +0x48 (both 1 when it is made,
@@ -483,6 +485,24 @@ bool anims_held(uint32_t chr) {
 }
 
 void forget_held() { g_held.clear(); }
+
+// The animation set's records (0x60 bytes from [set+4], [set] of them): +0x34 its state (0 none), +0x14 its time, which
+// the pose, the TAE events and the action they drive follow (0xD98A50).
+int rewind_anims(uint32_t chr) {
+    uint32_t ctrl = 0, set = 0, count = 0, recs = 0;
+    if (!chr || !read32(chr + kChrCtrl, &ctrl) || ctrl < 0x10000 || !read32(ctrl + kCtrlAnimSet, &set) ||
+        set < 0x10000 || !read32(set, &count) || !read32(set + 4, &recs) || recs < 0x10000 || count > 16) {
+        return 0;
+    }
+    int n = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t rec = recs + i * 0x60;
+        uint32_t state = 0;
+        if (!read32(rec + 0x34, &state) || state == 0) continue;
+        if (write_float(rec + 0x14, 0.0f)) ++n;
+    }
+    return n;
+}
 
 void set_bonfire_animations(bool on) { g_enabled = on; }
 

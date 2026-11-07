@@ -29,7 +29,8 @@ namespace coop::motion {
 
 enum Gait : int8_t { kUnknown = -1, kStand = 0, kWalk = 1, kRun = 2, kSprint = 3 };
 
-// kHold / kRelease (1.5.0): the Death Knell's crouch, the sender's character held where its animation is (anim 0).
+// kHold / kRelease (1.5.0): the Death Knell's crouch, the sender's character held where its animation is (anim 0; a
+// release with anim kReleaseRewind is the choice: the held animation starts over from its beginning, then plays).
 enum AnimKind : uint8_t { kStart = 0, kStop = 1, kHold = 2, kRelease = 3 };
 
 struct Anim {
@@ -71,13 +72,18 @@ bool synced_anim(int anim);
 // stagger) is passed on to the others too, looped as it is started, who play it on our character (1.5.0). Those
 // animations are not passed on otherwise.
 void send_knell_arrival(int anim);
-// The Death Knell's crouch (1.5.0): the others hold our character's animations where they are (on) or let them go.
-void send_knell_hold(bool on);
+// The Death Knell's crouch (1.5.0): the others hold our character's animations where they are (on) or let them go;
+// `rewind`: they start them over from their beginning first (the choice: the ring's crouch again, with its rings).
+constexpr int32_t kReleaseRewind = 2;
+void send_knell_hold(bool on, bool rewind = false);
 // A character's animations held where they are (its animation set's speed at 0), or let go again at the speed they
 // had. False when the character has no animation set to hold.
 bool hold_anims(uint32_t chr, bool on);
 // Its animations are held (by hold_anims, or by anything else that set that speed to 0).
 bool anims_held(uint32_t chr);
+// The character's playing animations put back to their beginning (their time 0): held, they start over once let go.
+// The number put back.
+int rewind_anims(uint32_t chr);
 // After a load: the characters held before it are gone.
 void forget_held();
 // One of those arrivals (a start of it from another player is shown).

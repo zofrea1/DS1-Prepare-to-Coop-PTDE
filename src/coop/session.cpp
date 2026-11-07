@@ -4199,6 +4199,8 @@ struct KnellHeld {
     uint32_t chr = 0;
     double at = 0;
     bool release = false;
+    bool rewind = false;     // that release is the choice: the crouch starts over first (if it comes soon enough)
+    double release_at = 0;
 };
 std::map<uint64_t, KnellHeld> g_knell_held;
 constexpr double kKnellHoldLimit = 130.0;
@@ -4218,10 +4220,12 @@ void knell_held_tick() {
             continue;
         }
         if (it->second.release) {
+            // The choice's rewind only while the crouch it starts over is still theirs (their warp is 1.5 s on).
+            const int rewound = it->second.rewind && now() - it->second.release_at < 1.0 ? motion::rewind_anims(chr) : 0;
             const bool done = motion::hold_anims(chr, false);
             if (++lines <= 30) {
-                LOG_INFO("[coop] Knell hold on %08X let go: their release came while the character was not here%s", chr,
-                         done ? "" : " (FAILED)");
+                LOG_INFO("[coop] Knell hold on %08X let go: their release came while the character was not here%s%s",
+                         chr, done ? "" : " (FAILED)", rewound ? " (the crouch starts over)" : "");
             }
             it = g_knell_held.erase(it);
             continue;
@@ -5090,19 +5094,25 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (m.kind == motion::kHold || m.kind == motion::kRelease) {
                 const uint32_t chr = chr_of_peer(from);
                 const bool on = m.kind == motion::kHold;
+                // Their choice: the held crouch starts over from its beginning, with its rings, before it is let go.
+                const bool rewind = !on && m.anim == motion::kReleaseRewind;
+                const int rewound = rewind && chr ? motion::rewind_anims(chr) : 0;
                 const bool done = chr && motion::hold_anims(chr, on);
                 const auto held = g_knell_held.find(from);
                 if (on && done) {
                     g_knell_held[from] = KnellHeld{chr, now()};
                 } else if (!on && !chr && held != g_knell_held.end()) {
                     held->second.release = true;  // let go once their character is here again (knell_held_tick)
+                    held->second.rewind = rewind;
+                    held->second.release_at = now();
                 } else if (chr && held != g_knell_held.end()) {
                     g_knell_held.erase(held);  // let go on their character, or a hold that failed on it
                 }
                 static int lines = 0;
                 if (++lines <= 120) {
-                    LOG_INFO("[coop] %s: knell crouch %s%s", p->name.c_str(), on ? "held" : "let go",
-                             done ? " on their character" : chr ? " (FAILED on their character)" : " (their character is not here)");
+                    LOG_INFO("[coop] %s: knell crouch %s%s%s", p->name.c_str(), on ? "held" : "let go",
+                             done ? " on their character" : chr ? " (FAILED on their character)" : " (their character is not here)",
+                             rewind ? (rewound ? "; it starts over (their choice)" : "; their choice, but nothing to start over") : "");
                 }
                 break;
             }
@@ -6201,7 +6211,8 @@ void tick() {
                 static int lines = 0;
                 if (++lines <= 200) {
                     if (a.kind == motion::kHold || a.kind == motion::kRelease) {
-                        LOG_INFO("[coop] Our knell crouch %s: told the others", a.kind == motion::kHold ? "held" : "let go");
+                        LOG_INFO("[coop] Our knell crouch %s: told the others%s", a.kind == motion::kHold ? "held" : "let go",
+                                 a.kind == motion::kRelease && a.anim == motion::kReleaseRewind ? " (it starts over)" : "");
                     } else {
                         LOG_INFO("[coop] Our %s animation %s %d%s: told the others",
                                  a.kind == 0 && !motion::synced_anim(a.anim) ? "knell" : "bonfire",

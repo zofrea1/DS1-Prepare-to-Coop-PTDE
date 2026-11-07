@@ -490,6 +490,15 @@ bool key_array_holds(uint32_t array, uint32_t keys, int32_t goods_id) {
 // array (+0x11C, counter +0x130) and clears that, so keys gained there are not in the own array when the trip home
 // switches back. The key is added once more with the own array switched in for the moment, so the game's own switch
 // brings it home, also after a crash or a quit there.
+bool keys_are_visit() {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return false;
+    const uint32_t inv = pgd + 0x1B8;
+    uint32_t own = 0, visit = 0, active = 0;
+    if (!read32(inv + 0x114, &own) || !read32(inv + 0x11C, &visit) || !read32(inv + 0x120, &active)) return false;
+    return active >= 0x10000 && active == visit && active != own;
+}
+
 bool keep_key_for_home(int32_t goods_id) {
     const uint32_t pgd = game::player_game_data();
     if (!pgd) return false;

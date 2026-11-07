@@ -1458,7 +1458,19 @@ bool warp_here(uint32_t target) {
 // the invasion was gone for the rest of it (Grok review 44169466). The world's keys it holds when the load starts go
 // back once it stands; nothing of the host's is lent. The co-op key items (the Crimson Blossom, the Bloody Mary) have
 // their own counts.
+// The give-back follows the load itself, not the knell's arrival (invader_keys_tick, every frame): a load that took over
+// two minutes gave the arrival up after MoveMapStep had already emptied the array, and the keys were lost with it. And
+// it goes only into the visit array: the invasion can end, or the trip home win, before we have stood in that world,
+// and the next stand is then at home, where the array in use is the own world's; a key, an Ember or a Lord Soul held
+// only in the visit array would have been written into the own save (Grok review 212423ba).
 std::vector<int32_t> g_invader_keys;
+bool g_keys_load_seen = false;   // the load began after the snapshot: the visit array has been emptied
+double g_keys_stand_since = 0;   // standing (a player, no load) since, 0 not
+
+void drop_invader_keys(const char* why) {
+    LOG_INFO("[coop] Death Knell (invading): the key items held before the load are not given back (%s)", why);
+    g_invader_keys.clear();
+}
 
 void give_back_invader_keys() {
     if (g_invader_keys.empty()) return;
@@ -1476,10 +1488,34 @@ void give_back_invader_keys() {
     g_invader_keys.clear();
 }
 
+// Once the load has begun and we have stood 0.5 s after it, still invading and in that world.
+void invader_keys_tick() {
+    if (g_invader_keys.empty()) return;
+    if (game::loading() || !game::player()) {
+        g_keys_load_seen = true;
+        g_keys_stand_since = 0;
+        return;
+    }
+    if (!g_keys_load_seen) return;  // not begun yet (loading_tick drops the snapshot if it never does)
+    if (!items::keys_are_visit()) {
+        drop_invader_keys("we are home: the key items of that world stay there");
+        return;
+    }
+    if (!session::invader()) {
+        drop_invader_keys("the invasion is over");
+        return;
+    }
+    if (g_keys_stand_since == 0) g_keys_stand_since = now();
+    if (now() - g_keys_stand_since < 0.5) return;
+    give_back_invader_keys();
+}
+
 // A load into `map`, stood at `pos` facing `angle` (rules::place_next_load_at).
 void load_into(int map_id, const float* pos, float angle, const std::wstring& what) {
     const int map = static_cast<int>(static_cast<uint32_t>(map_id) & 0xFFFF0000u);
     g_invader_keys.clear();
+    g_keys_load_seen = false;
+    g_keys_stand_since = 0;
     if (session::invader()) {
         for (int32_t id : items::key_items()) {
             if (id < items::kFirst || id > items::kLast) g_invader_keys.push_back(id);
@@ -1630,8 +1666,8 @@ void loading_tick() {
         g_load_seen = true;
         g_stand_since = 0;
         if (now() - g_load_since > 120.0) {
+            // The arrival is given up; key items held before the load still come back once we stand (invader_keys_tick).
             LOG_INFO("[coop] Death Knell: the load took over two minutes; no arrival");
-            g_invader_keys.clear();
             g_state = State::Idle;
         }
         return;
@@ -1648,7 +1684,6 @@ void loading_tick() {
     // Standing in the new map: the arrival plays once the world is up.
     if (g_stand_since == 0) g_stand_since = now();
     if (now() - g_stand_since < 0.5) return;
-    give_back_invader_keys();
     if (world::local_dead()) {
         LOG_INFO("[coop] Death Knell: arrived fallen; no arrival");
         g_state = State::Idle;
@@ -1847,6 +1882,7 @@ void tick() {
     const bool loading = game::loading() || !game::player();
     if (was_loading && !loading) clear_action_prompt("after a load");
     was_loading = loading;
+    invader_keys_tick();
     pending_price_tick();
     // A join's arrival: the moment the game starts its own rise at the host's bonfire (6950, 0.2 to 0.8 s after the
     // load in the 2026-11-04 test), it is replaced by the arrival, or after kJoinRiseWait standing if no rise comes.

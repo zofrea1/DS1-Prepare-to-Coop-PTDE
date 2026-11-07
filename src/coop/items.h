@@ -43,6 +43,10 @@ std::vector<int32_t> key_items();
 // The key items in the own world's key array: the same as key_items() at home; in another player's world, the
 // keys of our own world, which the game keeps apart (see keep_key_for_home).
 std::vector<int32_t> own_key_items();
+// The key items in use are another world's: the inventory reads the visit key array (+0x11C), which MoveMapStep
+// switches in for a load in another player's world (0x51C520 with clear 1), not the own world's (+0x114). False at
+// home and without a player.
+bool keys_are_visit();
 // A key item a co-op guest may carry in the host's world when the host's world has it too: one that opens the way
 // and that no event takes back (the keys, the Master Key, the Peculiar Doll, the boxes, the Rite of Kindling).
 // Not the Embers, Lord Souls or the Lordvessel, which the world takes from the player who hands them over.

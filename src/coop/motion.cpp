@@ -27,14 +27,14 @@ namespace {
 // stick the character is given (0.5 walk, 1.0 run) and, for a sprint, the dash flag +0x1E4: the copy is driven as if
 // its player held the stick and the dash button. Invaders and the players they invade report theirs too (1.4.0; until
 // then invasions were left to the guess). With no gait reported (a player of an older version, or a report gone stale)
-// the game's own guess decides: its run from 3 m/s instead of the game's 2 (kRunSite), its sprint from Remastered's 4.5
+// the game's own guess decides: its run from 2.6 m/s instead of the game's 2 (kRunSite), its sprint from Remastered's 4.5
 // m/s instead of the game's 6. A player walks at up to 2.2 m/s, jogs at 4.0 and sprints at 5.15 (the 2026-11-02
 // evening test, where the speeds over 6 were rolls), so at 6 no sprint would ever show. (The afternoon's build tried
 // 6, from a jog thought to reach 5.3 that was the end of a sprint.)
 constexpr uint32_t kGaitSite = 0x00E1E935;    // movss xmm0, dword ptr [ecx+2C0h]       (8 bytes)
 constexpr uint32_t kSprintSite = 0x00E1E924;  // movss xmm2, dword ptr [011603ACh] (6.0) (8 bytes)
 // The guess's run line, 2 m/s (the shared 2.0 at 0x115F588, read here only for this): a walk goes up to 2.2 and showed
-// as a run; ours is 3, between a walk and a jog's 4.0, as for our own gait (kRunFrom).
+// as a run; ours is 2.6, between a walk and a heavy jog's 3.0, as for our own gait (kRunFrom).
 constexpr uint32_t kRunSite = 0x00E1E913;     // movss xmm2, dword ptr [0115F588h] (2.0) (8 bytes)
 constexpr uint32_t kNetworkManipulatorVtable = 0x0118DDEC;
 
@@ -47,7 +47,7 @@ constexpr int kGaitEntries = players::kMaxPlayers - 1;
 static_assert(kGaitEntries == 7, "gait_stub compares with 7");
 GaitEntry g_gaits[kGaitEntries] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}};
 alignas(4) float g_sprint_speed = 4.5f;  // Remastered's fallback threshold (PTDE 6.0)
-alignas(4) float g_run_speed = 3.0f;     // (PTDE 2.0)
+alignas(4) float g_run_speed = 2.6f;     // (PTDE 2.0)
 
 __declspec(naked) void gait_stub() {
     __asm {
@@ -84,11 +84,15 @@ __declspec(naked) void gait_stub() {
 // copy with the dash flag, played the sprint at a jog's speed until the button was let go (2026-11-02). The character
 // itself knows: its walk animation controller ([ChrCtrl+0x164], WalkAnim_Twist for a player) answers vtable +0x20
 // (0xE0DC40: the walk state is the dash state), which the stamina drain asks every frame (0xE80AA8) before it takes
-// a point off. The walk and run come from the speed: a walk goes up to 2.2 m/s and a jog runs at 4.0, so the line
-// between them is 3 m/s. It was 2.2, the top of a walk, and a full walk switched between walking and running on the
-// other screens several times a second (2026-11-02 evening).
+// a point off. The walk and run come from the speed: a walk goes up to 2.2 m/s and a jog runs at 4.0. The line was
+// 2.2, the top of a walk, and a full walk switched between walking and running on the other screens several times a
+// second (2026-11-02 evening); then 3 m/s, but a heavy player's jog (over half the equip load, the fat roll) runs at
+// 3.0 m/s, right on it, and went walk, run, walk every 0.2 to 0.7 s: on the other screens their character walked at
+// half the stick part of the time ("half slow-walking, half walking", 2026-11-06). It is 2.6 m/s now, with a margin
+// (a run stays a run down to 2.4), between a walk's 2.2 and a heavy jog's 3.0.
 constexpr uint32_t kWalkAnimTwistDash = 0x00E0DC40;
-constexpr double kRunFrom = 3.0;
+constexpr double kRunFrom = 2.6;
+constexpr double kRunUntil = 2.4;
 LARGE_INTEGER g_freq{};
 LARGE_INTEGER g_prev_t{};
 game::Vec3 g_prev_pos{};
@@ -341,7 +345,7 @@ Gait local_gait() {
         g = kStand;
     } else if (real == 1 ? g_speed > kRunFrom : real < 0 && dash && g_speed > 4.5) {
         g = kSprint;
-    } else if (g_speed > kRunFrom) {
+    } else if (g_speed > (g_local >= kRun ? kRunUntil : kRunFrom)) {
         g = kRun;
     }
     if (g != g_local) {

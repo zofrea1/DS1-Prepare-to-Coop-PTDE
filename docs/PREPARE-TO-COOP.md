@@ -560,7 +560,7 @@ A yes holds a place for each of the group's ids for 45 s (`kGroupHoldFor`, the u
 count it for anyone else who knocks meanwhile, and each of the group who knocks takes their own place whatever the limit
 says by then (a co-op guest of that world who left meanwhile does not undo the promise). A place is taken when its
 player is admitted; one not taken within the 45 s is anyone's again, and its player, should they still come, knocks
-as any invader does (admitted if the world has room by then). No answer within 8 s, or a lobby
+as any invader does (admitted if the world has room by then). No answer within 2 s, or a lobby
 that cannot be entered, counts as busy and the next world is asked, up to five. The host takes `kGroupAsk` and
 `kGroupAnswer` from players outside its session (the asker is only in its lobby); while in another world's lobby to
 ask, our host ignores the Bye of that world's players (it takes a Bye only from players it knows).
@@ -573,26 +573,25 @@ dropped). No invader is ever in the world as it closes, so none is sent home and
 after `kGroupGo` on the same channel, and a guest who is already on its way home for the group ignores the
 Bye (its own line, "Your group invades another world. Going home first...", stays). The guests go home, as a join
 leaves from one's own world (`guest_on_welcome` needs it), and the host's close finds them gone. Each player knocks on
-the world as an evil spirit, the host 0.5 s after its world is closed, a guest 1.5 s after it stands at home out of
-every event animation (a guest whose home bonfire was in the host's map was home in a second and knocked during its
-rise at the bonfire, 6950): an ordinary invader's join of that lobby (no search), admitted on the place held for it.
-The world takes their joins one at a time, as it takes everyone's from 1.6.0: a knock while another player's join is
-under way (welcomed, not arrived, for up to 25 s) is answered busy and the joiner knocks again 3 s later (up to 12 times
-with no other world to try). Both of a group's two invaders began the game's own join 2 s apart in the 2026-11-07 test;
-the first arrived and the second's join was ended a second later by the game's idle timer (`0xD2D0EC`) before its load.
-Such a join, ended while still at home with the game's leave still going (session state 7), now waits for the leave to
-end and knocks again once (`retry_join`), as one ended earlier already did. There they are invaders like any
+the world as an evil spirit, the host 0.15 s after its world is closed (which takes at most 1.5 s when its group leaves),
+a guest 0.4 s after it stands at home (the rise at its bonfire, 6950, is no reason to wait): an ordinary invader's join of
+that lobby (no search), admitted on the place held for it. Both of a group's two invaders began the game's own join 2 s
+apart in the 2026-11-07 test; the first arrived and the second's join was ended a second later by the game's idle timer
+(`0xD2D0EC`) before its load, while the game's leave was still going (session state 7), so `retry_join` (which needs
+state 0) was skipped and the player went home. Such a join now waits up to 2.5 s for the leave to end (it took 0.5 s)
+and knocks again once. Joins are not made to wait for one another (a one-at-a-time rule was tried and left out, the
+user's choice: the retry covers the case without holding anyone back). There they are invaders like any
 others, one team with an outcome for all (1.3.0). A knock of the host's that does not get it there (refused, the join
 fell through, or not home and standing to knock within 120 s, `kGroupLeaveFor`; the same for a guest) sends message 49,
 `kGroupOff`: a guest not let in yet stops knocking (one already let in
 invades on), and the group gathers again as after an invasion.
 
 Back home after the invasion (every session's end leaves the group's state as it is), the host opens its world again
-1 s after it stands at home ("Your world is open again: your group is coming back") and sends message 50, `kGroupBack`,
-with its new lobby straight to each of the group who is not in that lobby yet, every 3 s: no lobby joins them any more,
+0.25 s after it stands at home ("Your world is open again: your group is coming back") and sends message 50, `kGroupBack`,
+with its new lobby straight to each of the group who is not in that lobby yet, every 0.75 s: no lobby joins them any more,
 so each guest accepts the host's P2P session every 2 s while the group lasts (every session's end closes the channels
 to its players). A guest waits at home ("Waiting for ... to open their world again...") and joins that lobby as a co-op
-guest 1.5 s after it stands at home once it has the lobby, arriving at the host's last bonfire. One who gets home before
+guest 0.4 s after it stands at home once it has the lobby, arriving at the host's last bonfire. One who gets home before
 the host waits; one still invading when the host is home keeps the lobby for when it is.
 
 The players need not get home together (Grok review a55ef919): a guest whose knock failed is home at once while the

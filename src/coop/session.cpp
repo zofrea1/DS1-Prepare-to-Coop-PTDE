@@ -690,6 +690,18 @@ struct Refusals {
 Refusals g_refusals;
 // Guest: this world's join has had its one retry (retry_join).
 bool g_join_retried = false;
+// Join timings (1.6.0, the user's: every wait of the mod's own between a search or a knock and the arrival is about a
+// quarter of what it was, for guests and invaders alike). What the game's own join takes (its steps and its load) is
+// the game's. A busy host is asked four times as often, with as much patience in all when there is no other world.
+constexpr double kSearchRetryAfter = 2.0;  // a lobby list that has not come is asked for again (was 8 s)
+constexpr double kSearchGiveUp = 5.0;      // no lobby list at all (was 20 s)
+constexpr double kLobbyJoinGiveUp = 5.0;   // a world's lobby that does not let us in: the next world (was 20 s)
+constexpr double kHelloWait = 5.0;         // a knock with no answer is sent again (was 20 s)
+constexpr double kBusyRetry = 0.75;        // a host that answered busy is asked again (was 3 s)
+constexpr double kJoiningGiveUp = 12.0;    // the game's join that never gets under way (was 40 s)
+constexpr double kLoadingGrace = 1.5;      // the game's session gone this long into the load: the join ended (was 5 s)
+constexpr double kInvaderHomeWait = 2.5;   // the game's own trip home for a finished invader, before ours (was 10 s)
+constexpr double kPendingBusy = 5.0;       // host: a knock waiting for our game's session is answered busy (was 20 s)
 bool g_join_seen = false;  // the game's session left state 0 since our join was handed to it (Step::Joining)
 double g_join_leave_seen = 0;  // Step::Loading: since when the game has been leaving our join at home (0 not)
 std::vector<Pending> g_pending;
@@ -704,12 +716,6 @@ std::map<uint64_t, std::vector<summons::Phantom>> g_guest_npcs;
 // outlives the session: a host who closes the world and opens it again is still on cooldown.
 std::vector<uint64_t> g_invaders_in;
 double g_invade_open_at = 0;
-// Host: when we welcomed each player whose join has not arrived yet (kArrived). One join at a time (1.6.0): two
-// invaders of a group welcomed 2 s apart both began the game's own join, the first arrived, and the second's join was
-// ended by the game's idle timer (0xD2D0EC) a second later, before its load (2026-11-07 13:33:57). A knock while
-// another player's join is under way is answered busy, and the joiner knocks again 3 s later (kJoinOneAtATime at most).
-std::map<uint64_t, double> g_welcomed_at;
-constexpr double kJoinOneAtATime = 25.0;
 // A player whose connection went quiet is dropped (nothing heard for kLostQuiet s after Steam reported the link
 // lost, or for kLostSilent s in any case): the host tells the others and stops sending to them; a guest goes
 // home. Nothing is counted while this game itself was not running (a machine asleep, a long stall).
@@ -951,7 +957,13 @@ constexpr double kGroupHoldFor = 45.0;
 // again with the others. Longer than the hold: a slow load still knocks, and gets in if the world has room by then.
 constexpr double kGroupLeaveFor = 120.0;
 // The group's host waits this long for a world's lobby and its answer before asking the next.
-constexpr double kGroupAskWait = 8.0;
+constexpr double kGroupAskWait = 2.0;  // (a lobby join and its answer take a fraction of a second; was 8 s)
+// Home and standing this long before a group's player knocks or comes back (a quarter of what they were, 1.6.0).
+constexpr double kGroupLeadKnockAfter = 0.15;
+constexpr double kGroupKnockAfter = 0.4;
+constexpr double kGroupLeadReopenAfter = 0.25;
+constexpr double kGroupRejoinAfter = 0.4;
+constexpr double kGroupBackResend = 0.75;  // the host's lobby to a player of the group not back yet (was 3 s)
 // Gathering again after the invasion (Grok review a55ef919). The players of a group need not get home together: a
 // guest whose knock failed is home at once while the host invades on, and a host whose connection dropped is home
 // while the others fight on. So neither side waits for a fixed time from its own return. While out (joining, invading,
@@ -1771,7 +1783,6 @@ void finish(const std::wstring& why) {
     for (uint64_t id : invaders) invasion_over(id);
     g_invaders_in.clear();
     g_group_holds.clear();  // places held for a group that was to invade our world (1.6.0)
-    g_welcomed_at.clear();
     if (g_lobby) steam::leave_lobby(g_lobby);
     for (const auto& p : g_peers) steam::close(p.id);
     g_lobby = 0;
@@ -2125,17 +2136,6 @@ void host_answer(const Pending& p) {
     if (w.status == kOk && (!game::in_game() || game::loading() || !game::own_world() || world::local_dead())) {
         w.status = kBusy;
     }
-    // One join at a time (g_welcomed_at): another player's is still under way.
-    uint64_t joining = 0;
-    for (auto it = g_welcomed_at.begin(); it != g_welcomed_at.end();) {
-        if (!admitted(it->first) || now() - it->second > kJoinOneAtATime) {
-            it = g_welcomed_at.erase(it);
-            continue;
-        }
-        if (it->first != p.from) joining = it->first;
-        ++it;
-    }
-    if (w.status == kOk && joining) w.status = kBusy;
     std::vector<uint8_t> inv;
     if (w.status == kOk) {
         // join type: -1 white (co-op, own body kept by the guest's rules), -2 black (invader)
@@ -2182,7 +2182,6 @@ void host_answer(const Pending& p) {
         std::memcpy(w.invitation, inv.data(), inv.size());
     }
     set_admitted(p.from, w.status == kOk);
-    if (w.status == kOk) g_welcomed_at[p.from] = now();
     if (w.status == kOk && holder) {
         LOG_INFO("[coop] %s takes the place held for their group", steam::persona(p.from).c_str());
         prune_group_holds();
@@ -2217,14 +2216,7 @@ void host_answer(const Pending& p) {
                               "holds %d)", in_session, held, room, p.max_players);
             }
             break;
-        case kBusy:
-            if (joining) {
-                std::snprintf(why, sizeof(why), "busy: %s's join is still under way (one at a time)",
-                              steam::persona(joining).c_str());
-            } else {
-                std::snprintf(why, sizeof(why), "busy (a load, the title screen, or our player is down)");
-            }
-            break;
+        case kBusy: std::snprintf(why, sizeof(why), "busy (a load, the title screen, or our player is down)"); break;
         case kRefused: std::snprintf(why, sizeof(why), "refused"); break;
         case kBossFight: std::snprintf(why, sizeof(why), "a boss fight"); break;
         case kCooldown: std::snprintf(why, sizeof(why), "invasion cooldown, %u s left", wait); break;
@@ -2416,9 +2408,11 @@ void host_close_tick() {
         return;
     }
     const int members = game::member_count();
-    // Hosting (3): once alone, or when a guest has not left after six seconds. Still being created or failed
+    // Hosting (3): once alone, or when a guest has not left after six seconds (1.5 s when our group leaves to invade:
+    // its guests went home the moment they heard, and the knock waits on this close). Still being created or failed
     // (1, 2, 5): after a moment, the same leave clears it. Leaving (7) is the game's own leave in progress.
-    const bool hosting_done = state == 3 && (members <= 1 || waited > 6.0);
+    const bool group_going = g_group.lead && g_group.phase == GroupPhase::Leaving;
+    const bool hosting_done = state == 3 && (members <= 1 || waited > (group_going ? 1.5 : 6.0));
     const bool never_hosted = state != 3 && state != 7 && waited > 3.0;
     if (!g_close_left && (hosting_done || never_hosted)) {
         g_close_left = true;
@@ -2864,7 +2858,7 @@ void host_tick() {
         if (ready) {
             host_answer(g_pending[i]);
             g_pending.erase(g_pending.begin() + i);
-        } else if (now() - g_pending[i].since > 20.0) {
+        } else if (now() - g_pending[i].since > kPendingBusy) {
             Welcome w{};
             fill_header(&w, kWelcome);
             w.status = kBusy;
@@ -2976,10 +2970,10 @@ constexpr int kMaxWorldTries = 5;
 
 bool can_try_another() { return !g_mismatch.active && !g_worlds.empty() && g_world_tries < kMaxWorldTries; }
 
-// How often we knock on one world before trying another: a host answering "busy" (between maps, or another player's
-// join still under way: one at a time, 1.6.0) gets more tries than one that does not answer at all. With no other world
-// to try, 8 as before, 12 for "busy" (3 s apart: a slow joiner's load before ours, a group's second invader).
-int knock_limit(bool busy) { return !can_try_another() ? (busy ? 12 : 8) : busy ? 4 : 2; }
+// How often we knock on one world before trying another: a host answering "busy" (between maps, its player down) gets
+// more tries than one that does not answer at all. With no other world to try, 8, and 32 for "busy" (kBusyRetry apart,
+// 1.6.0: the 24 s of patience the 8 tries 3 s apart gave, asked four times as often).
+int knock_limit(bool busy) { return !can_try_another() ? (busy ? 32 : 8) : busy ? 4 : 2; }
 
 void join_world(uint64_t lobby);
 
@@ -3226,7 +3220,7 @@ void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
     if (w.status == kBusy && g_hello_tries < knock_limit(true)) {
         g_last_busy = true;
         set_step(Step::Hello);
-        g_step_since = now() - 17.0;  // retry in 3 s
+        g_step_since = now() - (kHelloWait - kBusyRetry);  // the next knock in kBusyRetry
         return;
     }
     if (w.status == kBossFight || w.status == kCooldown) {
@@ -3590,22 +3584,22 @@ void guest_tick() {
         case Step::Searching:
             // One lobby-list request hung after the previous session's P2P failure. Ask once more
             // without restarting the wait; an empty answer still finishes as "No sessions found".
-            if (g_search_waves < 2 && in_step > 8.0) {
+            if (g_search_waves < 2 && in_step > kSearchRetryAfter) {
                 LOG_INFO("[coop] Still searching; asking Steam again");
                 issue_search();
             }
-            if (in_step > 20.0) finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
+            if (in_step > kSearchGiveUp) finish(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
             break;
         case Step::LobbyJoin:
-            if (in_step > 20.0 && !try_next_world("its lobby could not be entered")) {
+            if (in_step > kLobbyJoinGiveUp && !try_next_world("its lobby could not be entered")) {
                 finish_search(g_invade ? kMsgBreakInTimeout : kMsgJoinTimeout);
             }
             break;
         case Step::Hello:
-            if (in_step > 20.0 && g_mismatch.active) {
+            if (in_step > kHelloWait && g_mismatch.active) {
                 finish(L"");
                 show_join_mismatch(g_mismatch.host);
-            } else if (in_step > 20.0) {
+            } else if (in_step > kHelloWait) {
                 if (g_hello_tries < knock_limit(g_last_busy)) {
                     guest_send_hello();
                 } else {
@@ -3630,7 +3624,7 @@ void guest_tick() {
                     undo_join_setup();
                     if (!try_next_world("the join fell through")) finish(kMsgConnectTimeout);
                 }
-            } else if (s == 5 || in_step > 40.0) {
+            } else if (s == 5 || in_step > kJoiningGiveUp) {
                 rules::state().leaving = true;
                 if (s != 0) game::leave_session();
                 undo_join_setup();
@@ -3639,10 +3633,11 @@ void guest_tick() {
             break;
         }
         case Step::Loading:
-            if (game::session_state() != 6 && in_step > 5.0) {
+            if (game::session_state() != 6 && in_step > kLoadingGrace) {
                 // The game's own leave of our join before its move (still at home: join step 2, the idle timer at
                 // 0xD2D0EC) is still going (state 7): the retry needs the session back at 0, so it waits for that
-                // (at most 10 s) instead of giving up at once (2026-11-07 13:33:57, a group's second invader).
+                // (at most 2.5 s; the leave took 0.5 s) instead of giving up at once (2026-11-07 13:33:57, a group's
+                // second invader, whose join began 2 s after the first invader's into the same world).
                 const bool home = game::in_game() && !game::loading() && game::own_world();
                 if (home && !g_join_retried && game::session_state() != 0) {
                     if (g_join_leave_seen == 0) {
@@ -3650,7 +3645,7 @@ void guest_tick() {
                         LOG_INFO("[coop] The game is leaving our join before its load (session state %d); once it is "
                                  "done we knock again", game::session_state());
                     }
-                    if (now() - g_join_leave_seen < 10.0) break;
+                    if (now() - g_join_leave_seen < 2.5) break;
                 }
                 g_join_leave_seen = 0;
                 if (!retry_join()) guest_go_home(kMsgConnectTimeout, "the game session ended while loading");
@@ -3735,7 +3730,7 @@ void guest_tick() {
             guest_travel_tick();
             break;
         case Step::GoingHome:
-            if (g_invade && in_step > 10.0 && game::in_game() && !game::own_world() && !game::loading()) {
+            if (g_invade && in_step > kInvaderHomeWait && game::in_game() && !game::own_world() && !game::loading()) {
                 g_invade = false;  // the game did not send us home: do it ourselves
                 guest_go_home(L"", "the invasion ended");
                 break;
@@ -5151,11 +5146,10 @@ void group_knock() {
 void group_tick() {
     if (g_group.phase == GroupPhase::None) return;
     const double in_phase = now() - g_group.since;
-    // Home and standing, out of every event animation: a guest whose home bonfire was in the same map as the host's was
-    // home 1 s after the group went and knocked while still in the rise at its bonfire (6950; 2026-11-07 13:33:49).
-    const uint32_t me = game::player();
-    const bool home = g_role == Role::None && game::in_game() && !game::loading() && game::own_world() && me &&
-                      !world::local_dead() && motion::held_event_anim(me) == 0;
+    // Home and standing. The rise at the bonfire after the trip home (6950) is no reason to wait: a join leaves from
+    // wherever we stand in our own world, and the load replaces the character.
+    const bool home = g_role == Role::None && game::in_game() && !game::loading() && game::own_world() &&
+                      game::player() && !world::local_dead();
     if (!home) {
         g_group.ready_since = 0;
     } else if (g_group.ready_since == 0) {
@@ -5203,7 +5197,7 @@ void group_tick() {
                     break;
                 }
             }
-            if (g_group.listing && now() - g_group.listed_at > 8.0) {
+            if (g_group.listing && now() - g_group.listed_at > kSearchRetryAfter) {
                 if (g_group.waves < 2) {
                     LOG_INFO("[coop] Group invasion: no lobby list yet; asking Steam again");
                     group_list();
@@ -5234,7 +5228,7 @@ void group_tick() {
                 set_group_phase(GroupPhase::Returning, "we were not home and standing in time to knock");
                 break;
             }
-            if (standing >= (g_group.lead ? 0.5 : 1.5)) group_knock();
+            if (standing >= (g_group.lead ? kGroupLeadKnockAfter : kGroupKnockAfter)) group_knock();
             break;
         case GroupPhase::Joining:
             if (g_role == Role::Guest && g_invade && g_step == Step::InWorld) {
@@ -5260,7 +5254,7 @@ void group_tick() {
                 break;
             }
             if (g_group.lead) {
-                if (standing < 1.0) break;
+                if (standing < kGroupLeadReopenAfter) break;
                 LOG_INFO("[coop] Group invasion: home again; our world opens for the group");
                 g_role = Role::Host;
                 set_group_phase(GroupPhase::Rejoining, "home again");
@@ -5271,7 +5265,7 @@ void group_tick() {
                 g_group.told = true;
                 if (!g_group.back) say(fmt(kMsgGroupWaiting, g_group.leader_name));
             }
-            if (g_group.back && standing >= 1.5) {
+            if (g_group.back && standing >= kGroupRejoinAfter) {
                 g_role = Role::Guest;
                 g_invade = false;
                 g_refusals = Refusals{};
@@ -5316,7 +5310,7 @@ void group_tick() {
                 // still invading after we came home waits on), and is let go after kGroupQuietFor without a word from
                 // them, counted from our world's opening at the earliest.
                 const std::vector<uint64_t> in_lobby = steam::lobby_members(g_lobby);
-                const bool resend = now() - g_group.back_sent >= 3.0;
+                const bool resend = now() - g_group.back_sent >= kGroupBackResend;
                 if (resend) g_group.back_sent = now();
                 int waiting = 0, lost = 0;
                 for (uint64_t id : g_group.members) {
@@ -5561,7 +5555,6 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 name_event(&m);
                 broadcast(m, true, from);  // tell the other guests
                 peer(from)->arrived_at = now();
-                g_welcomed_at.erase(from);  // their join is over: the next joiner's may begin
                 if (!m.invader) {
                     send_world_globals(from);
                     send_world_flags(from);

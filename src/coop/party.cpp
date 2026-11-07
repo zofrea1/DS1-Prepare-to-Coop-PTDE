@@ -228,7 +228,7 @@ double g_last_check = 0;
 // only for a member whose data is complete and who is not waiting already, so asking sooner asks nothing twice.
 constexpr double kAfterLoad = 0.5;
 constexpr double kCheckEvery = 0.25;
-constexpr double kRequestGap = 5.0;  // a slot's next request, when the last one brought no character
+constexpr double kRequestGap = 1.25;  // a slot's next request, when the last one brought no character (was 5 s)
 // The character we asked the game to remove from each player slot, and when (it lingers for a frame or two). The
 // slot's next character can be made at the same address: on 2026-10-28 the host's rebuilt copy on the guest took
 // the old one's, was taken for the old one on its way out, and so was never checked again. It lived through two

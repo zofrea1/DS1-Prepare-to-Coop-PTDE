@@ -8,30 +8,30 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 1.5.0 | DS1 PTDE FPS Unlock 1.9.0 |
 | Prepare to Co-op Edition 1.4.0 | DS1 PTDE FPS Unlock 1.9.0 |
 | Prepare to Co-op Edition 1.3.0 | DS1 PTDE FPS Unlock 1.9.0 |
 | Prepare to Co-op Edition 1.2.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
 
-## What's new in 1.4.0
+## What's new in 1.5.0
 
-- **Up to eight players** in a session, the host, guests and invaders together (`MaxPlayers`, 8 by default; above four, every player needs 1.4.0). See [docs/MORE-PLAYERS.md](docs/MORE-PLAYERS.md).
-- **Give each other items**: an item you drop lies on every co-op player's floor, and the first to pick it up has it (`ShareDroppedItems`).
-- **Guests can summon NPCs** (Solaire and the other signs), the NPC invaders come to guests too, and **NPC summons belong to the world**: they stay through deaths, rests, travel and their summoner leaving.
-- **Dynamic smoothing** (`DynamicSmoothing`): each player and enemy is smoothed by how evenly its own updates arrive, shown as "lerp" on the health bars, with a fresh ping to every player.
-- **The host's world is the host's**: a joining guest's progress can no longer play out in it, only what your own game did comes home, and an NPC's quest comes home only while it lines up.
-- **Bosses and one-time drops count for everyone in the world**: a boss's souls and items, a lizard's or Black Knight's drop, wherever you stood.
-- **Guests see the host's bonfires**, scripted set pieces (the Hellkite's flight) play for the player who set them off, the cross-map lifts ride for everyone, and free for all joins the Ominous Tome's rules.
-- **Fixes**: guests' missing NPC signs, trips that left a player behind, players paired with the wrong character, bosses in two places or turning in mid-swing, sliding enemies, and souls for far kills going to the host.
+- **The Death Knell**: ring it to watch the other co-op players and the summon signs they left, then go to one, anywhere in the world, for a price (a Crimson Blossom, a Bloody Mary for everyone, and the souls and humanity you carry). Invaders may ring it too, to watch their targets and to go to the co-op players' summon signs.
+- **The Vigil Soapstone**: leave your summon sign where you stand, a cheaper way for the others' Death Knells to reach you (and for an invader's).
+- **Enemies scaled for the players near them** (`VicinityScaling`): players who split up each fight enemies scaled for the players around them. **Harder enemies by default.**
+- **The Bloody Mary** (`BloodyMary`): every death in the session makes the world's enemies hardier for everyone, until anyone rests.
+- **A far teammate's area as they see it** when spectating (`SpectateStreaming`): their map loaded, the enemies around them, their area's light.
+- **Guests arrive as summoned phantoms do**, players reappear sooner after a death or a load, and **logs can be sent to the developer** when asked (`UploadLogs`, off by default).
+- **Everyone needs 1.5.0 to play together** (a new co-op protocol); players of older versions are told to update.
 
-The full list is in the [1.4.0 release notes](release-notes/v1.4.0.md). 1.3.0 brought NPC summons and voice lines for every player, shared one-time drops, guests' Homeward Bone and Darksign, and up to ten times the network updates ([1.3.0 release notes](release-notes/v1.3.0.md)); 1.2.0 made travel shared and brought your keys along ([1.2.0 release notes](release-notes/v1.2.0.md)); 1.1.0, a major update, made the session one shared world with teamwork rules: boss fights and invasions won or lost together, deaths that keep the world, Crimson Blossoms ([1.1.0 release notes](release-notes/v1.1.0.md)).
+The full list is in the [1.5.0 release notes](release-notes/v1.5.0.md). 1.4.0 brought up to eight players, item sharing, NPC summons for guests and dynamic smoothing ([1.4.0 release notes](release-notes/v1.4.0.md)); 1.3.0 brought NPC summons and voice lines for every player, shared one-time drops, guests' Homeward Bone and Darksign, and up to ten times the network updates ([1.3.0 release notes](release-notes/v1.3.0.md)); 1.2.0 made travel shared and brought your keys along ([1.2.0 release notes](release-notes/v1.2.0.md)); 1.1.0, a major update, made the session one shared world with teamwork rules: boss fights and invasions won or lost together, deaths that keep the world, Crimson Blossoms ([1.1.0 release notes](release-notes/v1.1.0.md)).
 
 ## Requirements
 
 - Dark Souls: Prepare to Die Edition, the current Steam build (the same check as the FPS Unlock's).
 - Steam running. While Prepare to Co-op is on, the game runs as Steam's Spacewar (app 480): Prepare to Die Edition's own Steam lobbies were switched off in 2022, and Spacewar is the long-standing community route for its multiplayer. Steam shows you as playing Spacewar.
-- Everyone in a session uses the same `Password`. Prepare to Co-op 1.0.0 to 1.4.0 play together, but the team rules (spectating, wipes, the rest lock, deaths that keep the world) need everyone on 1.1.0 or later, guest travel and carried keys need the host on 1.2.0 or later, what is new in 1.3.0 and 1.4.0 needs the players involved on that version, and more than four players needs everyone on 1.4.0. Update together.
+- Everyone in a session uses the same `Password`, and Prepare to Co-op 1.5.0 or later: 1.5.0 changed the co-op protocol, and players of 1.0.0 to 1.4.0 are told to update when they try to join or invade a 1.5.0 world. Update together.
 - Works with DSfix (set `unlockFPS 0` in `DSfix.ini` if the FPS unlock is on).
 
 ## Install
@@ -139,7 +139,7 @@ In the `[PrepareToCoop]` section of `PTDE-Coop-FPS-Unlock.ini` (the FPS Unlock's
 - **Online play: no guarantees, use at your own risk.** The mod changes the game in memory while it runs and runs the game under Spacewar. No responsibility is accepted for bans, lost progress or anything else that results from using it.
 - Some cutscenes that move a player into another map have only been checked for the common ones (the Undead Asylum's crow, the Painted World).
 - An enemy killed in the last moment of a fallen player's load can come back in that player's game.
-- Spectating a teammate far away: their character and their surroundings are drawn in full, but the world more than about 25 to 30 m from them can be missing.
+- Spectating a teammate far away with `SpectateStreaming` off: their character and their surroundings are drawn in full, but the world more than about 25 to 30 m from them can be missing.
 - While spectating, lock-on only reaches enemies near where you fell, not near the teammate you watch.
 - The first invasion of a world after an earlier invasion of it can fall through while connecting. The mod now knocks once more by itself ("The connection fell through. Trying again..."); in testing, a second try always got in.
 

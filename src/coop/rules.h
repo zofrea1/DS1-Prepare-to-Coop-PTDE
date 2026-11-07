@@ -216,6 +216,7 @@ struct PeerSpot {
     float pos[3] = {};
     int map = -1;
     bool dead = false;  // fallen (spectating, or on the way to their bonfire): their game still runs
+    bool invader = false;  // invades: no one an enemy fights, and their game moves no enemy a co-op game would
 };
 void set_peer_spots(const std::vector<PeerSpot>& spots);
 // What this game bids for an enemy now (the game's bid with the session's rules on it), for the log.

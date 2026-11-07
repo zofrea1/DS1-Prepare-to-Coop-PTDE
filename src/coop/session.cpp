@@ -6205,6 +6205,7 @@ void tick() {
                 std::memcpy(s.pos, p.pos, sizeof(s.pos));
                 s.map = p.map;
                 s.dead = p.dead;
+                s.invader = p.invader;
                 spots.push_back(s);
             }
         }

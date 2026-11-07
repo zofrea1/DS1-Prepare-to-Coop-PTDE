@@ -5071,10 +5071,20 @@ bool ai_off_here(uint32_t chr) {
 // When the copies sleep in both games, both bid the same, and the enemy went back and forth between them at every
 // hand-out: the Asylum Demon on its perch and the Stray Demon below changed hands every 1 to 5 s for the whole session
 // (2026-11-02, two players in the Asylum). The game that moves it keeps it on a tie.
-constexpr uint32_t kBidFar = 1;
-constexpr uint32_t kBidAiOff = 2;
-constexpr uint32_t kBidAiOffKeep = 3;
-constexpr uint32_t kBidFallen = 4;
+// Below them all, an invader's game (kBidInvader): in vanilla the world's enemies take no notice of an invader (its team,
+// 16, is hostile to players only), and the co-op players fight them in their own games. An invader's game kept the game's
+// own bid (invaders keep the game's rules, seamless_rules), whose engagement steps outweigh nearness, so it won enemies
+// far from the invader: the Deck invading on 2026-11-07 moved enemies 109 m away around Syfur, which the Death Knell's
+// view had woken in its game, they changed hands six times in 30 s, and on the invader's screen they attacked Syfur, who
+// stood idle at full health in their own game ("invincible"). Now any co-op player's game that bids for an enemy moves
+// it; the invader's moves only an enemy no co-op game bids for (one only it has awake), which then has someone. The
+// co-op games' rules count an invader as no player: not a nearer player (kBidFar), nor one near a sleeping copy
+// (kBidAiOff) or a fallen player's enemy (kBidFallen).
+constexpr uint32_t kBidInvader = 1;
+constexpr uint32_t kBidFar = 2;
+constexpr uint32_t kBidAiOff = 3;
+constexpr uint32_t kBidAiOffKeep = 4;
+constexpr uint32_t kBidFallen = 5;
 constexpr uint32_t kBidCap = 0x7FFF;  // the game's own cap (0xE6D250)
 
 // The character whose event animation is being watched (note_event_anim) and this game's last bid for it.
@@ -5137,6 +5147,14 @@ uint32_t change_hold(uint32_t chr, const game::Vec3& at, const game::Vec3& me) {
 uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
     const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
+    if (bid && g_state.active && g_state.invader && !g_state.leaving) {
+        static bool told = false;
+        if (!told) {
+            told = true;
+            LOG_INFO("[coop] Invading: our game bids the least for every enemy; the co-op players' games move them");
+        }
+        return kBidInvader;
+    }
     uint32_t handle = 0;
     if (seamless_rules() && read32(chr + 0x78, &handle)) {
         const int lead = lead_mode(handle);
@@ -5153,7 +5171,10 @@ uint32_t net_priority(uint32_t chr) {
     if (const uint32_t hold = change_hold(chr, at, me)) return hold;
     if (world::local_dead()) {
         for (const PeerSpot& p : g_peer_spots) {
-            if (p.dead || elsewhere(p) || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
+            if (p.dead || p.invader || elsewhere(p) ||
+                dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) {
+                continue;
+            }
             static std::set<uint32_t> logged;
             if (logged.size() < 30 && logged.insert(chr).second) {
                 LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): we fell; a low bid from here while a standing "
@@ -5164,7 +5185,7 @@ uint32_t net_priority(uint32_t chr) {
     }
     if (ai_off_here(chr)) {
         for (const PeerSpot& p : g_peer_spots) {
-            if (elsewhere(p) || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
+            if (p.invader || elsewhere(p) || dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at) > kBidReach) continue;
             static std::set<uint32_t> logged;
             if (logged.size() < 30 && logged.insert(chr).second) {
                 LOG_INFO("[coop] Enemy %08X at (%.1f, %.1f, %.1f): its AI is off in this game; the lowest bid from here "
@@ -5177,7 +5198,7 @@ uint32_t net_priority(uint32_t chr) {
     const float mine = dist3(me, at);
     if (mine <= kBidReach) return bid;
     for (const PeerSpot& p : g_peer_spots) {
-        if (p.dead || elsewhere(p)) continue;
+        if (p.dead || p.invader || elsewhere(p)) continue;
         const float theirs = dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at);
         if (theirs < mine) {
             static std::set<uint32_t> logged;

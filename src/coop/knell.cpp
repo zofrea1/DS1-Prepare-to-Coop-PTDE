@@ -6,6 +6,7 @@
 #include "hook.h"
 #include "log.h"
 #include "motion.h"
+#include "overlay.h"
 #include "rules.h"
 #include "session.h"
 #include "spectate.h"
@@ -94,15 +95,25 @@ constexpr int kRiposteSoundType = 1;  // 'c', the character's
 constexpr int kRiposteSound = 999999992;
 constexpr uint32_t kPlaySe = 0x00D6EA70;  // "Play SE" (2010[02], 0xBBFD6F): stdcall(Lua events, entity, type, id)
 constexpr uint32_t kLuaEventsVar = 0x0137D790;
-// The game's action prompt, the one "Rest at bonfire" uses: 0xD40310 registers a request with the action manager
-// [0x137D7CC] for this frame and answers 1 on the frame the action button is pressed on it ("IF Action Button",
-// EcTestActionButton 0xBBD8D1, calls it every frame the player is in range). ecx = the prompt's kind (0xD5D650 makes
-// 10 of an id like ours), eax = 0xFF (no check of the player's state, as the talk prompts pass), stdcall(manager, flag
-// that disables it or -1, text id, enabled, 0, 0, 0), ret 0x1C. Its text comes through the FMG hook (ids of ours).
-constexpr uint32_t kActionRequest = 0x00D40310;
-constexpr int kActionKind = 10;
-constexpr uint32_t kPromptText = 93129720;  // .. +7: a new id for each teammate shown, so the prompt reads the name anew
-constexpr int kPromptSlots = 8;
+// The view's prompt is ours (overlay::set_prompt, at the bottom centre): who and where the bell would take us, and the
+// buttons. Until the 2026-11-06 evening test it was the game's own action prompt, the one "Rest at bonfire" uses
+// (0xD40310, a request with the action manager [0x137D7CC] every frame, "Summon yourself to <name>"), which never
+// showed while the ring's crouch was held (the game shows no action prompt during an item's use) and whose button never
+// answered (every choice that evening was A on the pad): the player could not tell whose summon sign the view was on,
+// nor where it was. A on the pad or Enter chooses (Enter is hidden from the game meanwhile, as the arrows are).
+constexpr double kBoxEvery = 0.25;  // the prompt's distances are brought up to date this often
+// The ring's rings (1.5.0, the user's design: "the magic rings surrounding the player ... to play when the warp actually
+// takes them too"). The rings around the player as they go down into the ring's crouch are the first effect of 6060's
+// TAE: event 120 from 0.0 s (0xE61580, "by the character's type": effect 151, or 165 / 167 for a white / black phantom
+// and 160 for type 9, on dummy poly 200, in the character's effect slot 1 of chr+0x2B8), which event 110 empties at the
+// use (1.2 s). A slot lasts while something asks for it every frame (0x4762F0 marks it, as with the hero light). From
+// the choice to the warp the same event is asked for once a frame, through the game's own handler, in a slot of ours
+// (a new slot starts its effect, 0xDF89A0; 6060's slot 1 stays emptied while its event 120 runs on): the player rises
+// inside the rings and the warp takes them there. The others give our character the same (session.cpp, kRelease with
+// anim 1) until our arrival is shown on it.
+constexpr uint32_t kTaeChrTypeFx = 0x00E61580;  // eax = the TAE's executor (+8 the character), ecx = the event
+constexpr int32_t kRingSlot = 61;
+const int32_t kRingValues[6] = {151, 160, 165, 167, 200, kRingSlot};
 
 // The class's starting soul level and attributes (CharaInitParam 3000-3009: soulLv, baseVit, baseWil, baseEnd,
 // baseStr, baseDex, baseDurability, baseMag, baseFai), in the menu's order.
@@ -178,12 +189,8 @@ constexpr int kGameRise = 6950;         // the game's own rise at a bonfire, whi
 constexpr double kJoinRiseWait = 1.5;   // the arrival starts by itself once we stood this long without that rise
                                         // (the rise came 0.15 to 1.2 s after the load in the 2026-11-04 test)
 bool g_join_arrival = false;            // the arrival playing is a join's (the game's rise may still come over it)
-wchar_t g_prompt[kPromptSlots][96] = {};
-int g_prompt_slot = 0;
-// Our request, like a bonfire's, stays with the action manager until it is cancelled: closed without a warp (B, a hit,
-// a refusal, the time limit) the view left "Summon yourself to ..." on screen (close_view). Anything still in range
-// registers again on the next frame.
-bool g_prompt_up = false;  // our request was registered since the last clear
+double g_box_at = 0;                     // the view's prompt was last drawn (0: draw it now)
+bool g_rings_on = false;                 // the ring's rings are asked for on our character (the choice to the warp)
 std::mt19937 g_rng(static_cast<uint32_t>(GetTickCount64()));
 // DeathKnellSoulLevel (1.5.0, default off): going to a teammate takes a soul level (the bell's first price) instead of
 // their souls and humanity.
@@ -244,13 +251,15 @@ constexpr int kDiSlots = 2;  // the A and the W device vtables
 void** g_di_vtables[kDiSlots] = {};
 DevGetStateFn g_di_get_state[kDiSlots] = {};
 DevGetDataFn g_di_get_data[kDiSlots] = {};
-constexpr uint8_t kDikLeft = 0xCB, kDikRight = 0xCD;
+// Enter chooses (1.5.0): it is hidden from the game the same way, both Enter keys.
+constexpr uint8_t kDikLeft = 0xCB, kDikRight = 0xCD, kDikReturn = 0x1C, kDikPadEnter = 0x9C;
 
-bool arrow_vk(int vk) { return vk == VK_LEFT || vk == VK_RIGHT; }
+bool masked_vk(int vk) { return vk == VK_LEFT || vk == VK_RIGHT || vk == VK_RETURN; }
+bool masked_dik(DWORD dik) { return dik == kDikLeft || dik == kDikRight || dik == kDikReturn || dik == kDikPadEnter; }
 
 SHORT WINAPI hk_get_async_key_state(int vk) {
     const SHORT r = g_get_async(vk);
-    return g_mask_dpad && arrow_vk(vk) ? 0 : r;
+    return g_mask_dpad && masked_vk(vk) ? 0 : r;
 }
 
 BOOL WINAPI hk_get_keyboard_state(PBYTE keys) {
@@ -258,6 +267,7 @@ BOOL WINAPI hk_get_keyboard_state(PBYTE keys) {
     if (r && keys && g_mask_dpad) {
         keys[VK_LEFT] = 0;
         keys[VK_RIGHT] = 0;
+        keys[VK_RETURN] = 0;
     }
     return r;
 }
@@ -274,14 +284,13 @@ HRESULT WINAPI hk_di_get_state(void* dev, DWORD size, void* data) {
     const int i = di_slot(dev);
     const HRESULT r = g_di_get_state[i](dev, size, data);
     if (SUCCEEDED(r) && data && size == 256 && g_mask_dpad) {
-        static_cast<uint8_t*>(data)[kDikLeft] = 0;
-        static_cast<uint8_t*>(data)[kDikRight] = 0;
+        for (const uint8_t dik : {kDikLeft, kDikRight, kDikReturn, kDikPadEnter}) static_cast<uint8_t*>(data)[dik] = 0;
     }
     return r;
 }
 
 // DIDEVICEOBJECTDATA (dwOfs, dwData, dwTimeStamp, dwSequence, uAppData: 20 bytes in DirectInput 8): a keyboard's
-// events carry the DIK code in dwOfs; those of the two arrows are taken out.
+// events carry the DIK code in dwOfs; those of the two arrows and Enter are taken out.
 HRESULT WINAPI hk_di_get_data(void* dev, DWORD cb, void* data, DWORD* inout, DWORD flags) {
     const int i = di_slot(dev);
     const HRESULT r = g_di_get_data[i](dev, cb, data, inout, flags);
@@ -291,7 +300,7 @@ HRESULT WINAPI hk_di_get_data(void* dev, DWORD cb, void* data, DWORD* inout, DWO
         for (DWORD k = 0; k < *inout; ++k) {
             DWORD ofs = 0;
             std::memcpy(&ofs, p + k * cb, 4);
-            if (ofs == kDikLeft || ofs == kDikRight) continue;
+            if (masked_dik(ofs)) continue;
             if (kept != k) std::memmove(p + kept * cb, p + k * cb, cb);
             ++kept;
         }
@@ -733,6 +742,34 @@ int play_arrival(const char* why) {
     return anim;
 }
 
+// ---------------------------------------------------------------- the ring's rings
+// For this frame (kRingValues): TAE event 120 as the TAE executor hands it to its handler.
+void ask_rings(uint32_t chr) {
+    if (!chr) return;
+    struct Event {
+        uint32_t type;
+        const int32_t* values;
+        uint32_t unused[2];
+        uint8_t flag;  // +0x10: read only for a negative slot
+        uint8_t pad[15];
+    };
+    Event ev{120, kRingValues, {0, 0}, 0, {}};
+    uint32_t executor[4] = {0, 0, chr, 0};
+    void* e = &ev;
+    void* x = executor;
+    __try {
+        __asm {
+            mov eax, x
+            mov ecx, e
+            mov edx, kTaeChrTypeFx
+            call edx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        static int lines = 0;
+        if (++lines <= 5) LOG_ERROR("[coop] Death Knell: the ring's rings failed on %08X", chr);
+    }
+}
+
 // ---------------------------------------------------------------- the ring's crouch
 // At the ring (the item's use, the bottom of its crouch): held here and in the others' games.
 void start_hold() {
@@ -744,13 +781,17 @@ void start_hold() {
     LOG_INFO("[coop] Death Knell: the crouch %s", g_hold_on ? "held while the view is open" : "NOT held (no animation set)");
 }
 
-// Let go, here and there: the ring plays on and the player rises with its light.
-void release_hold(const char* why) {
-    if (!g_hold_on) return;
+// Let go, here and there: the ring plays on and the player rises with its light. For the choice (`rings`) the others
+// give our character the ring's rings until we arrive, held or not.
+void release_hold(const char* why, bool rings = false) {
+    if (!g_hold_on) {
+        if (rings) motion::send_knell_hold(false, true);
+        return;
+    }
     g_hold_on = false;
     const uint32_t me = game::player();
     const bool done = me && !game::loading() && motion::hold_anims(me, false);
-    motion::send_knell_hold(false);
+    motion::send_knell_hold(false, rings);
     LOG_INFO("[coop] Death Knell: the crouch let go (%s)%s", why, done ? "" : "; our character was not there");
 }
 
@@ -1021,34 +1062,55 @@ const char* refusal() {
 
 void say(const std::wstring& line) { text::show(line); }
 
-// The prompt "Summon yourself to <name>" for this frame. True on the frame the action button is pressed on it.
-bool request_action(uint32_t mgr, uint32_t text_id) {
-    uint8_t pressed = 0;
-    __try {
-        __asm {
-            push 0
-            push 0
-            push 0
-            push 1
-            push text_id
-            push -1
-            push mgr
-            mov ecx, kActionKind
-            mov eax, 0xFF
-            mov edx, kActionRequest
-            call edx
-            mov pressed, al
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+// " 14 m away" (and how far up or down when that is more than a storey), from our character to `q`.
+std::wstring distance_text(const game::Vec3& q) {
+    game::Vec3 me{};
+    if (!game::position(&me, nullptr)) return L"";
+    const float dx = q.x - me.x, dy = q.y - me.y, dz = q.z - me.z;
+    const long d = std::lround(std::sqrt(dx * dx + dy * dy + dz * dz));
+    std::wstring s = std::to_wstring(std::max(d, 1L)) + L" m away";
+    if (std::fabs(dy) >= 3.0f) {
+        s += L", " + std::to_wstring(std::lround(std::fabs(dy))) + (dy > 0 ? L" m above you" : L" m below you");
     }
-    return pressed != 0;
+    return s;
 }
 
-void set_prompt(const std::wstring& text) {
-    g_prompt_slot = (g_prompt_slot + 1) % kPromptSlots;
-    std::wstring t = text.substr(0, 95);
-    std::memcpy(g_prompt[g_prompt_slot], t.c_str(), (t.size() + 1) * sizeof(wchar_t));
+// The prompt's second line: where the choice is.
+std::wstring where_line(const Choice& c) {
+    const char* area = area_name(c.map);
+    const std::wstring in = area ? text::widen(area) : std::wstring();
+    if (c.sign) {
+        // Drawn here (gold while shown) when its block is in use here, and then in our world's coordinates.
+        if (rules::map_in_use(c.map)) {
+            const game::Vec3 q{c.at.pos[0], c.at.pos[1], c.at.pos[2]};
+            const std::wstring d = distance_text(q);
+            return (in.empty() ? L"" : in + L", ") + d + L" (the sign glowing gold)";
+        }
+        return in.empty() ? L"Far away" : L"Far away, in " + in;
+    }
+    game::Vec3 q{};
+    if (c.mate->chr && remote_character(c.mate->chr) && game::chr_position(c.mate->chr, &q)) {
+        return (in.empty() ? L"" : in + L", ") + distance_text(q);
+    }
+    return in.empty() ? L"Far away" : L"Far away, in " + in;
+}
+
+// The view's prompt (bottom centre): the choice, where it is, and the buttons.
+void show_box(const Choice& c, int at, int count) {
+    std::vector<std::wstring> lines;
+    lines.push_back(L"Summon yourself to " + (c.sign ? c.name + L"'s summon sign" : c.name));
+    lines.push_back(where_line(c));
+    std::wstring keys;
+    if (count > 1) keys = L"Left / Right: " + std::to_wstring(at + 1) + L" of " + std::to_wstring(count) + L"        ";
+    keys += L"A or Enter: go        B or Esc: back";
+    lines.push_back(keys);
+    overlay::set_prompt(lines);
+    g_box_at = now();
+}
+
+void hide_box() {
+    overlay::set_prompt({});
+    g_box_at = 0;
 }
 
 // The action prompt at the bottom of the screen ("Rest at bonfire"). A talk object (a bonfire) registers its request
@@ -1074,7 +1136,6 @@ bool cancel_action(uint32_t mgr) {
 }
 
 void clear_action_prompt(const char* why) {
-    g_prompt_up = false;
     uint32_t mgr = 0, mm = 0;
     if (read32(kActionManVar, &mgr) && mgr) cancel_action(mgr);
     if (read32(kMenuManVar, &mm) && mm) {
@@ -1086,26 +1147,24 @@ void clear_action_prompt(const char* why) {
 }
 
 // ---------------------------------------------------------------- the view
-void show_target(const Choice& c, bool first) {
+void show_target(const Choice& c) {
     g_target_id = c.id;
     g_target_sign = c.sign;
     const uint32_t chr = !c.sign && c.mate->chr && remote_character(c.mate->chr) ? c.mate->chr : 0;
     g_shown_chr = chr;
     spectate::knell_view(chr);
-    set_prompt(L"Summon yourself to " + label(c));
-    if (first) say(L"Death Knell: choose a co-operator or a summon sign with the D-pad or the arrow keys");
+    session::set_knell_sign(c.sign ? c.id : 0);  // the sign shown glows gold
+    g_box_at = 0;                                // the prompt is drawn anew on this frame (view_tick)
     LOG_INFO("[coop] Death Knell: viewing %s%s", narrow(label(c)).c_str(),
-             chr ? "" : c.sign ? " (a summon sign: the camera stays)" : " (not in our world: no camera)");
+             chr ? "" : c.sign ? " (a summon sign: the camera stays; it glows gold)" : " (not in our world: no camera)");
 }
 
 void close_view(const char* why) {
     if (g_state == State::View) LOG_INFO("[coop] Death Knell: view closed (%s)", why);
     g_hold_end = why;
     if (g_state == State::View || g_state == State::Opening) release_hold(why);
-    if (g_prompt_up) {
-        g_prompt_up = false;
-        clear_action_prompt("the Death Knell's view closed");
-    }
+    hide_box();
+    session::set_knell_sign(0);
     spectate::knell_view(0);
     g_shown_chr = 0;
     InterlockedExchange(&g_mask_dpad, 0);
@@ -1145,7 +1204,7 @@ void open_view() {
     g_confirm_down = true;
     InterlockedExchange(&g_mask_dpad, 1);
     LOG_INFO("[coop] Death Knell: view open (%d co-operator(s) and summon sign(s))", static_cast<int>(can.size()));
-    show_target(*best, true);
+    show_target(*best);
 }
 
 void confirm();
@@ -1160,15 +1219,18 @@ bool cancel_pressed() {
     return pressed;
 }
 
-// A on the pad, as well as the game's own prompt (which may not answer during the item's use).
-bool confirm_pressed() {
+// A on the pad or Enter (read through our own import: the game's is masked meanwhile). Null when neither was pressed
+// on this frame.
+const char* confirm_pressed() {
     DWORD pid = 0;
     const HWND fg = GetForegroundWindow();
     const bool focus = fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId();
-    const bool down = focus && (spectate::pad_buttons() & kPadA);
+    const bool pad = focus && (spectate::pad_buttons() & kPadA);
+    const bool key = focus && (GetAsyncKeyState(VK_RETURN) & 0x8000);
+    const bool down = pad || key;
     const bool pressed = down && !g_confirm_down;
     g_confirm_down = down;
-    return pressed;
+    return pressed ? (pad ? "A on the pad" : "Enter") : nullptr;
 }
 
 void view_tick() {
@@ -1190,11 +1252,11 @@ void view_tick() {
     }
     const int step = spectate::switch_step();
     if (at < 0) {
-        show_target(can.front(), false);  // the one shown fell or left, or the sign went
+        show_target(can.front());  // the one shown fell or left, or the sign went
         return;
     }
     if (step != 0 && can.size() > 1) {
-        show_target(can[(at + step + static_cast<int>(can.size())) % can.size()], false);
+        show_target(can[(at + step + static_cast<int>(can.size())) % can.size()]);
         return;
     }
     // Their character came into our world, or left it: the camera follows.
@@ -1203,20 +1265,30 @@ void view_tick() {
     if (chr != g_shown_chr) {
         g_shown_chr = chr;
         spectate::knell_view(chr);
+        g_box_at = 0;
     }
-    uint32_t mgr = 0;
-    if (!read32(kActionManVar, &mgr) || !mgr) return;
-    g_prompt_up = true;
-    const bool prompt = request_action(mgr, kPromptText + g_prompt_slot);
-    const bool pad = confirm_pressed();
-    if (prompt || pad) {
-        LOG_INFO("[coop] Death Knell: chosen (%s)", prompt ? "the game's action prompt" : "A on the pad");
+    if (g_box_at == 0 || now() - g_box_at >= kBoxEvery) show_box(shown, at, static_cast<int>(can.size()));
+    if (const char* how = confirm_pressed()) {
+        LOG_INFO("[coop] Death Knell: chosen (%s)", how);
         confirm();
     }
 }
 
-// The action button on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so
-// it does not swing back to us and out again, and the arrival's sound is heard where we arrive.
+// On our way (the choice): the ring plays on from its crouch (the player rises with its light), inside the ring's rings
+// here and in the others' games, and the warp comes once they are up. The prompt goes; the sign shown stays gold.
+void set_going(const char* what) {
+    InterlockedExchange(&g_mask_dpad, 0);
+    hide_box();
+    g_state = State::Going;
+    const bool rise = g_hold_on;
+    release_hold("chosen: the ring plays out", true);
+    g_rings_on = true;
+    g_at = now() + (rise ? kRiseWarp : kGoDelay);
+    LOG_INFO("[coop] Death Knell: going to %s (the warp in %.1f s, inside the ring's rings)", what, g_at - now());
+}
+
+// A or Enter on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so it does
+// not swing back to us and out again, and the arrival's sound is heard where we arrive.
 void confirm() {
     const auto can = choices();
     const Choice* c = find_choice(can, g_target_id, g_target_sign);
@@ -1232,13 +1304,7 @@ void confirm() {
         g_dest.map = c->map;
         std::copy(std::begin(c->at.pos), std::end(c->at.pos), g_dest.pos);
         g_dest.angle = c->at.angle;
-        InterlockedExchange(&g_mask_dpad, 0);
-        g_state = State::Going;
-        const bool rise = g_hold_on;
-        release_hold("chosen: the ring plays out");
-        g_at = now() + (rise ? kRiseWarp : kGoDelay);
-        LOG_INFO("[coop] Death Knell: going to %s's summon sign (the warp in %.1f s)", narrow(c->name).c_str(),
-                 g_at - now());
+        set_going((narrow(c->name) + "'s summon sign").c_str());
         return;
     }
     const spectate::Teammate* t = c->mate;
@@ -1261,13 +1327,7 @@ void confirm() {
     g_dest.name = t->name;
     g_dest.map = t->map;
     std::copy(std::begin(t->pos), std::end(t->pos), g_dest.pos);
-    InterlockedExchange(&g_mask_dpad, 0);
-    g_state = State::Going;
-    // The ring plays on from its crouch (the player rises with its light), and the warp comes once they are up.
-    const bool rise = g_hold_on;
-    release_hold("chosen: the ring plays out");
-    g_at = now() + (rise ? kRiseWarp : kGoDelay);
-    LOG_INFO("[coop] Death Knell: going to %s (the warp in %.1f s)", narrow(t->name).c_str(), g_at - now());
+    set_going(narrow(t->name).c_str());
 }
 
 bool do_warp(uint32_t me, uint32_t fn, const float* pp, const float* pr, uint32_t floor) {
@@ -1720,7 +1780,12 @@ void tick() {
             break;
     }
     hold_tick();
+    // The ring's rings from the choice to the warp (or to a load that takes us there).
+    if (g_rings_on && (g_state != State::Going || game::loading() || !game::player())) g_rings_on = false;
+    if (g_rings_on) ask_rings(game::player());
 }
+
+void rings(uint32_t chr) { ask_rings(chr); }
 
 bool viewing() { return g_state == State::View; }
 
@@ -1733,7 +1798,6 @@ void set_soul_level_price(bool on) {
 const wchar_t* text(uint32_t id) {
     if (id == kDrainedText) return L"! SOUL LEVEL DRAINED !";
     if (id == kDebuffedText) return L"! DEBUFFED !";
-    if (id >= kPromptText && id < kPromptText + kPromptSlots) return g_prompt[id - kPromptText];
     return nullptr;
 }
 

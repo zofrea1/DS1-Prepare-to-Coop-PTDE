@@ -427,7 +427,9 @@ void send_knell_arrival(int anim) {
     g_knell_send_at = GetTickCount64();
 }
 
-void send_knell_hold(bool on) { queue(Anim{static_cast<uint8_t>(on ? kHold : kRelease), 0, 0}); }
+void send_knell_hold(bool on, bool rings) {
+    queue(Anim{static_cast<uint8_t>(on ? kHold : kRelease), !on && rings ? 1 : 0, 0});
+}
 
 // The speed a character's animation set (ChrCtrl+0x14) runs at: its update (0xD98A50, from the ChrCtrl update
 // 0xE368C0) multiplies the frame's time by +0x64 when that is not 1, else by +0x48 (both 1 when it is made,

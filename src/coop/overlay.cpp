@@ -39,11 +39,13 @@ struct Box {
     int text_w = 0, text_h = 0;
     bool visible = false;
     bool notice = false;  // larger, gold first line, more opaque, drawn at the top centre
+    bool prompt = false;  // as a notice, drawn at the bottom centre
 };
 
 std::mutex g_mutex;
 Box g_panel;
 Box g_notice_box;
+Box g_prompt_box;
 IDirect3DStateBlock9* g_state = nullptr;
 bool g_notice_told = false;  // the notice's first frame since it was rendered was logged
 
@@ -143,10 +145,14 @@ struct Vertex {
     float x, y, z, rhw, u, v;
 };
 
-// Where a box goes on screen: the panel at the top right, a notice at the top centre.
+// Where a box goes on screen: the panel at the top right, a notice at the top centre, a prompt at the bottom centre
+// (above the game's own action box, where its prompt would be).
 void place(const Box& box, const D3DVIEWPORT9& vp, float* x0, float* y0) {
     const float margin = vp.Height / 40.0f;
-    if (box.notice) {
+    if (box.prompt) {
+        *x0 = vp.X + (vp.Width - box.text_w) / 2.0f;
+        *y0 = vp.Y + vp.Height * 0.78f - box.text_h;
+    } else if (box.notice) {
         *x0 = vp.X + (vp.Width - box.text_w) / 2.0f;
         *y0 = vp.Y + margin * 3.0f;
     } else {
@@ -202,7 +208,7 @@ void draw(IDirect3DDevice9* dev) {
     const D3DVIEWPORT9 vp{0, 0, bd.Width, bd.Height, 0.0f, 1.0f};
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        for (Box* box : {&g_panel, &g_notice_box}) {
+        for (Box* box : {&g_panel, &g_notice_box, &g_prompt_box}) {
             if (box->dirty) {
                 box->dirty = false;
                 rebuild(dev, *box, box->lines, static_cast<int>(vp.Height));
@@ -210,7 +216,8 @@ void draw(IDirect3DDevice9* dev) {
             }
         }
     }
-    if ((!g_panel.visible || !g_panel.tex) && (!g_notice_box.visible || !g_notice_box.tex)) {
+    if ((!g_panel.visible || !g_panel.tex) && (!g_notice_box.visible || !g_notice_box.tex) &&
+        (!g_prompt_box.visible || !g_prompt_box.tex)) {
         back->Release();
         return;
     }
@@ -275,6 +282,7 @@ void draw(IDirect3DDevice9* dev) {
         dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
         draw_box(dev, g_panel, vp);
         draw_box(dev, g_notice_box, vp);
+        draw_box(dev, g_prompt_box, vp);
         dev->EndScene();
         if (!g_notice_told && g_notice_box.visible && g_notice_box.tex) {
             g_notice_told = true;
@@ -317,6 +325,7 @@ HRESULT WINAPI hk_reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_panel.dirty = true;  // re-render at the new size
         g_notice_box.dirty = true;
+        g_prompt_box.dirty = true;
     }
     return g_reset(dev, pp);
 }
@@ -345,6 +354,15 @@ void set_notice(const std::vector<std::wstring>& lines) {
     if (lines == g_notice_box.lines) return;
     g_notice_box.lines = lines;
     g_notice_box.dirty = true;
+}
+
+void set_prompt(const std::vector<std::wstring>& lines) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_prompt_box.notice = true;
+    g_prompt_box.prompt = true;
+    if (lines == g_prompt_box.lines) return;
+    g_prompt_box.lines = lines;
+    g_prompt_box.dirty = true;
 }
 
 }  // namespace coop::overlay

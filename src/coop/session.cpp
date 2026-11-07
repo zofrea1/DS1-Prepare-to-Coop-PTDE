@@ -3901,12 +3901,19 @@ std::map<uint64_t, SignInfo> g_signs;  // the others', by owner
 // soapstone stays the game's). Its handle is the game's and must not move while the effect lasts: the map's nodes do
 // not.
 constexpr int kSignEffect = 100;
+// The sign the Death Knell's view shows glows gold here, with the Warrior of Sunlight's sign effect (118), so its
+// player can see which sign it is and where (1.5.0: the view's prompt never showed during the ring's held crouch, and
+// the camera stays with the player for a sign).
+constexpr int kKnellSignEffect = 118;
 struct SignFx {
     alignas(4) uint8_t handle[0x18] = {};
     bool on = false;
     uint32_t serial = 0;
+    int effect = 0;  // the effect it was drawn with
 };
 std::map<uint64_t, SignFx> g_sign_fx;  // by owner (ours under our own id)
+uint64_t g_knell_sign = 0;             // the sign the Death Knell's view shows (0 none)
+bool g_sign_fx_now = false;            // redraw at once (the view's sign changed)
 
 bool coop_in_world() {
     return (g_role == Role::Host && (g_step == Step::Hosting || g_step == Step::Closing)) ||
@@ -4015,8 +4022,9 @@ void sign_fx_end(SignFx& fx) {
 // The effects follow the signs, twice a second; a load ends them all (they are made again where their block is in use).
 void sign_fx_tick() {
     static double last = 0;
-    if (now() - last < 0.5 && !game::loading()) return;
+    if (now() - last < 0.5 && !game::loading() && !g_sign_fx_now) return;
     last = now();
+    g_sign_fx_now = false;
     const bool show = coop_in_world() && game::in_game() && !game::loading() && game::player();
     std::map<uint64_t, const SignInfo*> want;
     if (show) {
@@ -4026,7 +4034,11 @@ void sign_fx_tick() {
     for (auto it = g_sign_fx.begin(); it != g_sign_fx.end();) {
         const auto w = want.find(it->first);
         const bool keep = w != want.end() && rules::map_in_use(w->second->map);
-        if (!keep || it->second.serial != (w == want.end() ? 0 : w->second->serial)) sign_fx_end(it->second);
+        const int effect = it->first == g_knell_sign ? kKnellSignEffect : kSignEffect;
+        if (!keep || it->second.serial != (w == want.end() ? 0 : w->second->serial) ||
+            (it->second.on && it->second.effect != effect)) {
+            sign_fx_end(it->second);
+        }
         if (w == want.end()) {
             it = g_sign_fx.erase(it);
         } else {
@@ -4037,13 +4049,20 @@ void sign_fx_tick() {
         SignFx& fx = g_sign_fx[owner];
         if (fx.on || !rules::map_in_use(sign->map)) continue;
         const float at[3] = {sign->pos[0], sign->pos[1] + 0.05f, sign->pos[2]};
-        fx.on = rules::effect_at(fx.handle, kSignEffect, at);
+        fx.effect = owner == g_knell_sign ? kKnellSignEffect : kSignEffect;
+        fx.on = rules::effect_at(fx.handle, fx.effect, at);
+        if (!fx.on && fx.effect != kSignEffect) {
+            static int gold_lines = 0;
+            if (++gold_lines <= 5) LOG_INFO("[coop] Summon sign: the gold effect %d was not made; white", fx.effect);
+            fx.effect = kSignEffect;
+            fx.on = rules::effect_at(fx.handle, fx.effect, at);
+        }
         fx.serial = sign->serial;
         static int lines = 0;
-        if (++lines <= 40) {
-            LOG_INFO("[coop] Summon sign of %s %s at (%.1f, %.1f, %.1f)",
+        if (++lines <= 60) {
+            LOG_INFO("[coop] Summon sign of %s %s at (%.1f, %.1f, %.1f)%s",
                      owner == steam::self() ? "ours" : steam::persona(owner).c_str(), fx.on ? "drawn" : "NOT drawn",
-                     at[0], at[1], at[2]);
+                     at[0], at[1], at[2], fx.effect == kKnellSignEffect ? " in gold (the Death Knell shows it)" : "");
         }
     }
 }
@@ -4149,6 +4168,29 @@ struct KnellHeld {
 };
 std::map<uint64_t, KnellHeld> g_knell_held;
 constexpr double kKnellHoldLimit = 130.0;
+// The ring's rings on their character as they go (1.5.0, the user's design): their choice's release carries anim 1
+// (older 1.5.0 builds read only the release), and from it to their arrival their character here is given the rings
+// once a frame, as their own game gives theirs (knell::rings), so the others see the warp take them inside the rings.
+// Ended when their arrival is shown on their character (it jumped to where they arrived), by their next hold, a load,
+// another character of theirs, or kKnellRingsLimit (their rise is 1.5 s; a far one's load takes their character away).
+struct KnellRings {
+    uint32_t chr = 0;
+    double at = 0;
+};
+std::map<uint64_t, KnellRings> g_knell_rings;
+constexpr double kKnellRingsLimit = 3.0;
+
+void knell_rings_tick() {
+    for (auto it = g_knell_rings.begin(); it != g_knell_rings.end();) {
+        const uint32_t chr = chr_of_peer(it->first);
+        if ((chr && chr != it->second.chr) || now() - it->second.at > kKnellRingsLimit) {
+            it = g_knell_rings.erase(it);
+            continue;
+        }
+        if (chr) knell::rings(chr);  // missing for a frame: the rings wait for it
+        ++it;
+    }
+}
 
 void knell_held_tick() {
     static int lines = 0;
@@ -4231,10 +4273,12 @@ void knell_anims_tick() {
             }
         }
         g_knell_held.clear();
+        g_knell_rings.clear();
         if (game::loading()) motion::forget_held();
         return;
     }
     if (!g_knell_held.empty()) knell_held_tick();
+    if (!g_knell_rings.empty()) knell_rings_tick();
     if (!g_knell_late.empty()) knell_late_tick();
     if (g_knell_waits.empty()) return;
     static int lines = 0;
@@ -4311,6 +4355,9 @@ void knell_anims_tick() {
                      : w.from_set ? (age < kKnellJumpWait ? "; once it jumped to where they arrived"
                                                           : "; it did not jump: a short warp, or none")
                                   : "");
+        }
+        if (g_knell_rings.erase(it->first) && ++lines <= 60) {
+            LOG_INFO("[coop] %s: the ring's rings on their character end with their arrival", name);
         }
         it = g_knell_waits.erase(it);
     }
@@ -5040,10 +5087,18 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 } else if (chr && held != g_knell_held.end()) {
                     g_knell_held.erase(held);  // let go on their character, or a hold that failed on it
                 }
+                // Their choice (anim 1): the ring's rings on their character until their arrival.
+                const bool rings = !on && m.anim == 1 && chr;
+                if (rings) {
+                    g_knell_rings[from] = KnellRings{chr, now()};
+                } else {
+                    g_knell_rings.erase(from);
+                }
                 static int lines = 0;
                 if (++lines <= 120) {
-                    LOG_INFO("[coop] %s: knell crouch %s%s", p->name.c_str(), on ? "held" : "let go",
-                             done ? " on their character" : chr ? " (FAILED on their character)" : " (their character is not here)");
+                    LOG_INFO("[coop] %s: knell crouch %s%s%s", p->name.c_str(), on ? "held" : "let go",
+                             done ? " on their character" : chr ? " (FAILED on their character)" : " (their character is not here)",
+                             rings ? "; the ring's rings on it until they arrive" : "");
                 }
                 break;
             }
@@ -6137,7 +6192,8 @@ void tick() {
                 static int lines = 0;
                 if (++lines <= 200) {
                     if (a.kind == motion::kHold || a.kind == motion::kRelease) {
-                        LOG_INFO("[coop] Our knell crouch %s: told the others", a.kind == motion::kHold ? "held" : "let go");
+                        LOG_INFO("[coop] Our knell crouch %s: told the others%s", a.kind == motion::kHold ? "held" : "let go",
+                                 a.kind == motion::kRelease && a.anim == 1 ? " (chosen: the ring's rings until we arrive)" : "");
                     } else {
                         LOG_INFO("[coop] Our %s animation %s %d%s: told the others",
                                  a.kind == 0 && !motion::synced_anim(a.anim) ? "knell" : "bonfire",
@@ -6563,6 +6619,12 @@ std::vector<SummonSign> summon_signs() {
         out.push_back(o);
     }
     return out;
+}
+
+void set_knell_sign(uint64_t owner) {
+    if (owner == g_knell_sign) return;
+    g_knell_sign = owner;
+    g_sign_fx_now = true;  // sign_fx_tick redraws it (and the one before) on the next frame
 }
 
 const char* sign_refusal() {

@@ -129,6 +129,8 @@ struct SummonSign {
 };
 // The other co-op players' signs (not ours).
 std::vector<SummonSign> summon_signs();
+// The Death Knell's view shows this player's sign (0: none): it glows gold here instead of white.
+void set_knell_sign(uint64_t owner);
 // Our Vigil Soapstone: our sign where we stand, in place of the last. Null when placed, else why not.
 const char* place_summon_sign();
 // Why the Vigil Soapstone cannot be used now (null: it can).

@@ -102,22 +102,20 @@ constexpr uint32_t kLuaEventsVar = 0x0137D790;
 // answered (every choice that evening was A on the pad): the player could not tell whose summon sign the view was on,
 // nor where it was. A on the pad or Enter chooses (Enter is hidden from the game meanwhile, as the arrows are).
 constexpr double kBoxEvery = 0.25;  // the prompt's distances are brought up to date this often
-// The ring's rings (1.5.0, the user's design: "the magic rings surrounding the player ... to play when the warp actually
-// takes them too"). The rings around the player as they go down into the ring's crouch are the first effect of 6060's
-// TAE: event 120 from 0.0 s (0xE61580, by the character's type: effect 151, or 165 / 167 for a white / black phantom
-// and 160 for type 9, on dummy poly 200, in the character's effect slot 1 of chr+0x2B8), which event 110 empties at the
-// use (1.2 s). Three tries to make that effect again on its own showed nothing (the 2026-11-06 tests): asked for in an
-// effect slot of ours from the frame tick, then in the character's TAE step after the game's own event 120 (no slot was
-// ever there: a TAE effect slot is the game's to keep), then made as a lasting effect at the character's feet as the
-// summon signs are (made every time, in every game, and never seen: it needs the character it is on). So the choice
-// plays the ring's animation again from its start, as an event animation (kReplayAnim): its own event 120 makes the
-// rings as on the way down the first time, and the warp takes the player kReplayWarp on, near the bottom of the crouch,
-// inside them. The others are sent that start (motion, a knell animation) and play it on our character, whose TAE makes
-// the rings there too. The replay's own item use (its 1.2 s) is swallowed for kReplaySwallow (swallow_use): it would
-// use whatever item is selected.
+// The way out (1.5.0). The user asked for the rings the eye orb's use shows around the player as they go down into its
+// crouch to play when the warp takes them too. Made again on their own they never showed (the 2026-11-06 tests: an
+// effect slot asked for from the frame tick, then in the TAE step, then a lasting effect at the character's feet, made
+// every time and never seen), and the held crouch put back to its beginning (its animation records' time at 0) only
+// rose as before, without them. 6060, taken for the eye orb's use (it is not: that animation is the player's state
+// machine's choice from the goods' use animation byte, among 62xx-65xx), is a knockdown: played as an event animation
+// it throws the player up into the air with a shake of the camera (6060 to 6067: launched, down, lying, up). The user
+// kept that for the release ("the one where you got launched into the air was funny"): the choice plays it, the bell's
+// toll taking the player, and the warp comes kReplayWarp on (the user's 1.5 s). The others are sent its start (motion, a
+// knell animation) and play it on our character. Its events at 1.2 and 2.8 s are no item use; any use that comes on the
+// way is swallowed for kReplaySwallow all the same (swallow_use).
 constexpr int kReplayAnim = 6060;
-constexpr double kReplayWarp = 1.0;
-constexpr double kReplaySwallow = 2.0;
+constexpr double kReplayWarp = 1.5;
+constexpr double kReplaySwallow = 3.0;
 
 // The class's starting soul level and attributes (CharaInitParam 3000-3009: soulLv, baseVit, baseWil, baseEnd,
 // baseStr, baseDex, baseDurability, baseMag, baseFai), in the menu's order.
@@ -146,7 +144,7 @@ constexpr double kGoDelay = 1.2;     // before the player goes, when the crouch 
 // our character in the others' games (motion kHold). It is still the item's use, an ordinary animation: hits land
 // (and close the view), and the game takes no roll and no weapon or item switch during it. B or Esc, a hit or any
 // other close lets it go, here and there, and the ring plays on: the player rises with its light. The choice plays the
-// crouch again with its rings (kReplayAnim; the warp as the player is up, kRiseWarp, only should that not start). The 2026-11-06 test held the crouch with event
+// bell's knockdown (kReplayAnim; the warp as the player is up, kRiseWarp, only should that not start). The 2026-11-06 test held the crouch with event
 // animation 6066 instead, which is no crouch (the character lay on their back, twitching), took no hits, rolled out at
 // once (an event animation can be cancelled), and showed no action prompt.
 // 6060 lets the player act again 1.27 s after the use. The warp came at 1.5 s until the 2026-11-06 21:20 test, and in
@@ -1323,16 +1321,16 @@ void view_tick() {
     }
 }
 
-// On our way (the choice): the crouch is let go and the ring's animation plays again from its start, with its rings,
-// here and in the others' games, and the warp takes the player near the bottom of that crouch (kReplayWarp). Should the
-// replay not start, the ring plays on as before (the player rises with its light) and the warp comes as they are up.
+// On our way (the choice): the crouch is let go and the bell's knockdown throws the player up (kReplayAnim), here and in
+// the others' games, and the warp takes them kReplayWarp on. Should it not start, the ring plays on as before (the
+// player rises with its light) and the warp comes as they are up.
 // The prompt goes; the sign shown stays gold, the camera stays where it is, and the D-pad and the arrows stay hidden
 // from the game until the warp (close_view).
 void set_going(const char* what) {
     hide_box();
     g_state = State::Going;
     const bool held = g_hold_on;
-    release_hold("chosen: the ring's crouch again, with its rings");
+    release_hold("chosen: the bell's knockdown");
     const uint32_t me = game::player();
     bool replay = false;
     if (me && !game::loading()) {
@@ -1342,7 +1340,7 @@ void set_going(const char* what) {
     }
     g_at = now() + (replay ? kReplayWarp : held ? kRiseWarp : kGoDelay);
     LOG_INFO("[coop] Death Knell: going to %s (the warp in %.1f s, %s)", what, g_at - now(),
-             replay ? "in the ring's crouch again, with its rings" : "the replay did not start: as the player rises");
+             replay ? "thrown up by the bell's knockdown" : "the knockdown did not start: as the player rises");
 }
 
 // A or Enter on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so it does
@@ -1882,7 +1880,7 @@ const wchar_t* text(uint32_t id) {
 
 bool swallow_use(int32_t goods) {
     if (g_state != State::Going && now() >= g_swallow_until) return false;
-    LOG_INFO("[coop] Death Knell: item %d used on the way (the ring's crouch again): not used", goods);
+    LOG_INFO("[coop] Death Knell: item %d used on the way: not used", goods);
     return true;
 }
 

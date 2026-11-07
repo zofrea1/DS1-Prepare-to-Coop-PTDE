@@ -151,7 +151,7 @@ std::vector<Anim> g_pending;
 bool g_enabled = true;      // [SeamlessCoop] BonfireAnimations
 // The Death Knell's arrivals (knell.cpp): the living player's rise (6950), the summoned phantom's (6951) and the
 // Warrior of Sunlight's (6952, "Praise the Sun"). Passed on only when the Knell starts one (send_knell_arrival). And
-// the price's stagger, and the ring's animation played again for the choice (6060, with its rings).
+// the price's stagger, and the bell's knockdown that takes the player at the choice (6060).
 constexpr int kKnellAnims[] = {6950, 6951, 6952, 2010, 6060};
 int g_knell_send = 0;
 ULONGLONG g_knell_send_at = 0;

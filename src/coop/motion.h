@@ -29,8 +29,7 @@ namespace coop::motion {
 
 enum Gait : int8_t { kUnknown = -1, kStand = 0, kWalk = 1, kRun = 2, kSprint = 3 };
 
-// kHold / kRelease (1.5.0): the Death Knell's crouch, the sender's character held where its animation is (anim 0; a
-// release with anim 1 is the choice, with the ring's rings until the sender arrives).
+// kHold / kRelease (1.5.0): the Death Knell's crouch, the sender's character held where its animation is (anim 0).
 enum AnimKind : uint8_t { kStart = 0, kStop = 1, kHold = 2, kRelease = 3 };
 
 struct Anim {
@@ -73,8 +72,7 @@ bool synced_anim(int anim);
 // animations are not passed on otherwise.
 void send_knell_arrival(int anim);
 // The Death Knell's crouch (1.5.0): the others hold our character's animations where they are (on) or let them go.
-// A release for the choice carries `rings` (anim 1): the others give our character the ring's rings until we arrive.
-void send_knell_hold(bool on, bool rings = false);
+void send_knell_hold(bool on);
 // A character's animations held where they are (its animation set's speed at 0), or let go again at the speed they
 // had. False when the character has no animation set to hold.
 bool hold_anims(uint32_t chr, bool on);

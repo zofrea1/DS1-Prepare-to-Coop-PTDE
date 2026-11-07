@@ -28,9 +28,6 @@ void use();
 void tick();
 // The view is open (the camera may be on a teammate).
 bool viewing();
-// The ring's rings on `chr` for this frame (game thread, once a frame while they last): another player's character
-// here while that player goes (session.cpp).
-void rings(uint32_t chr);
 // A texture the game made from data in memory (title.cpp's D3DX hook): the icon atlas gets the Death Knell's and the
 // Vigil Soapstone's icons.
 void note_texture(IDirect3DTexture9* texture, const void* data, unsigned size);

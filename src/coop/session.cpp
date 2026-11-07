@@ -4202,30 +4202,6 @@ struct KnellHeld {
 };
 std::map<uint64_t, KnellHeld> g_knell_held;
 constexpr double kKnellHoldLimit = 130.0;
-// The ring's rings on their character as they go (1.5.0, the user's design): their choice's release carries anim 1
-// (older 1.5.0 builds read only the release), and from it to their arrival their character here is given the rings
-// once a frame, as their own game gives theirs (knell::rings), so the others see the warp take them inside the rings.
-// Ended when their arrival is shown on their character (it jumped to where they arrived), by their next hold, a load,
-// another character of theirs, or kKnellRingsLimit (their rise is 1.5 s; a far one's load takes their character away).
-struct KnellRings {
-    uint32_t chr = 0;
-    double at = 0;
-};
-std::map<uint64_t, KnellRings> g_knell_rings;
-constexpr double kKnellRingsLimit = 3.0;
-
-void knell_rings_tick() {
-    for (auto it = g_knell_rings.begin(); it != g_knell_rings.end();) {
-        const uint32_t chr = chr_of_peer(it->first);
-        if ((chr && chr != it->second.chr) || now() - it->second.at > kKnellRingsLimit) {
-            it = g_knell_rings.erase(it);
-            continue;
-        }
-        if (chr) knell::rings(chr);  // missing for a frame: the rings wait for it
-        ++it;
-    }
-}
-
 void knell_held_tick() {
     static int lines = 0;
     for (auto it = g_knell_held.begin(); it != g_knell_held.end();) {
@@ -4307,12 +4283,10 @@ void knell_anims_tick() {
             }
         }
         g_knell_held.clear();
-        g_knell_rings.clear();
         if (game::loading()) motion::forget_held();
         return;
     }
     if (!g_knell_held.empty()) knell_held_tick();
-    if (!g_knell_rings.empty()) knell_rings_tick();
     if (!g_knell_late.empty()) knell_late_tick();
     if (g_knell_waits.empty()) return;
     static int lines = 0;
@@ -4389,9 +4363,6 @@ void knell_anims_tick() {
                      : w.from_set ? (age < kKnellJumpWait ? "; once it jumped to where they arrived"
                                                           : "; it did not jump: a short warp, or none")
                                   : "");
-        }
-        if (g_knell_rings.erase(it->first) && ++lines <= 60) {
-            LOG_INFO("[coop] %s: the ring's rings on their character end with their arrival", name);
         }
         it = g_knell_waits.erase(it);
     }
@@ -5128,18 +5099,10 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                 } else if (chr && held != g_knell_held.end()) {
                     g_knell_held.erase(held);  // let go on their character, or a hold that failed on it
                 }
-                // Their choice (anim 1): the ring's rings on their character until their arrival.
-                const bool rings = !on && m.anim == 1 && chr;
-                if (rings) {
-                    g_knell_rings[from] = KnellRings{chr, now()};
-                } else {
-                    g_knell_rings.erase(from);
-                }
                 static int lines = 0;
                 if (++lines <= 120) {
-                    LOG_INFO("[coop] %s: knell crouch %s%s%s", p->name.c_str(), on ? "held" : "let go",
-                             done ? " on their character" : chr ? " (FAILED on their character)" : " (their character is not here)",
-                             rings ? "; the ring's rings on it until they arrive" : "");
+                    LOG_INFO("[coop] %s: knell crouch %s%s", p->name.c_str(), on ? "held" : "let go",
+                             done ? " on their character" : chr ? " (FAILED on their character)" : " (their character is not here)");
                 }
                 break;
             }
@@ -6238,8 +6201,7 @@ void tick() {
                 static int lines = 0;
                 if (++lines <= 200) {
                     if (a.kind == motion::kHold || a.kind == motion::kRelease) {
-                        LOG_INFO("[coop] Our knell crouch %s: told the others%s", a.kind == motion::kHold ? "held" : "let go",
-                                 a.kind == motion::kRelease && a.anim == 1 ? " (chosen: the ring's rings until we arrive)" : "");
+                        LOG_INFO("[coop] Our knell crouch %s: told the others", a.kind == motion::kHold ? "held" : "let go");
                     } else {
                         LOG_INFO("[coop] Our %s animation %s %d%s: told the others",
                                  a.kind == 0 && !motion::synced_anim(a.anim) ? "knell" : "bonfire",

@@ -104,17 +104,20 @@ constexpr uint32_t kLuaEventsVar = 0x0137D790;
 constexpr double kBoxEvery = 0.25;  // the prompt's distances are brought up to date this often
 // The ring's rings (1.5.0, the user's design: "the magic rings surrounding the player ... to play when the warp actually
 // takes them too"). The rings around the player as they go down into the ring's crouch are the first effect of 6060's
-// TAE: event 120 from 0.0 s (0xE61580, "by the character's type": effect 151, or 165 / 167 for a white / black phantom
+// TAE: event 120 from 0.0 s (0xE61580, by the character's type: effect 151, or 165 / 167 for a white / black phantom
 // and 160 for type 9, on dummy poly 200, in the character's effect slot 1 of chr+0x2B8), which event 110 empties at the
-// use (1.2 s). Asked for again in a slot of ours (from the frame tick, then in the character's TAE step after the
-// game's own event 120 at 0xE63236), no slot was ever there (2026-11-06 21:20 and 21:46 tests: "our effect slots on the
-// way up: none"; 6060's own slot 1 was gone as well: a TAE effect slot is the game's to keep). So the same effect is
-// made as the summon signs are, a lasting effect at a point (rules::effect_at; 151, 160, 165 and 167 are in
-// FRPG_SfxBnd_CommonEffects with the signs' 100 and 118): at the character's feet from the choice, ended kRingsLinger
-// after the warp, where the player stood. The others make it at our character's feet (session.cpp, kRelease with
-// anim 1) until our arrival is shown on it.
-const int32_t kRingValues[4] = {151, 160, 165, 167};
-constexpr double kRingsLinger = 0.5;
+// use (1.2 s). Three tries to make that effect again on its own showed nothing (the 2026-11-06 tests): asked for in an
+// effect slot of ours from the frame tick, then in the character's TAE step after the game's own event 120 (no slot was
+// ever there: a TAE effect slot is the game's to keep), then made as a lasting effect at the character's feet as the
+// summon signs are (made every time, in every game, and never seen: it needs the character it is on). So the choice
+// plays the ring's animation again from its start, as an event animation (kReplayAnim): its own event 120 makes the
+// rings as on the way down the first time, and the warp takes the player kReplayWarp on, near the bottom of the crouch,
+// inside them. The others are sent that start (motion, a knell animation) and play it on our character, whose TAE makes
+// the rings there too. The replay's own item use (its 1.2 s) is swallowed for kReplaySwallow (swallow_use): it would
+// use whatever item is selected.
+constexpr int kReplayAnim = 6060;
+constexpr double kReplayWarp = 1.0;
+constexpr double kReplaySwallow = 2.0;
 
 // The class's starting soul level and attributes (CharaInitParam 3000-3009: soulLv, baseVit, baseWil, baseEnd,
 // baseStr, baseDex, baseDurability, baseMag, baseFai), in the menu's order.
@@ -142,8 +145,8 @@ constexpr double kGoDelay = 1.2;     // before the player goes, when the crouch 
 // our character's animations are held where they are (motion::hold_anims: the animation set's speed at 0), and so is
 // our character in the others' games (motion kHold). It is still the item's use, an ordinary animation: hits land
 // (and close the view), and the game takes no roll and no weapon or item switch during it. B or Esc, a hit or any
-// other close lets it go, here and there, and the ring plays on: the player rises with its light. The choice does the
-// same, and the warp comes as the player is up (kRiseWarp). The 2026-11-06 test held the crouch with event
+// other close lets it go, here and there, and the ring plays on: the player rises with its light. The choice plays the
+// crouch again with its rings (kReplayAnim; the warp as the player is up, kRiseWarp, only should that not start). The 2026-11-06 test held the crouch with event
 // animation 6066 instead, which is no crouch (the character lay on their back, twitching), took no hits, rolled out at
 // once (an event animation can be cancelled), and showed no action prompt.
 // 6060 lets the player act again 1.27 s after the use. The warp came at 1.5 s until the 2026-11-06 21:20 test, and in
@@ -195,7 +198,7 @@ constexpr double kJoinRiseWait = 1.5;   // the arrival starts by itself once we 
                                         // (the rise came 0.15 to 1.2 s after the load in the 2026-11-04 test)
 bool g_join_arrival = false;            // the arrival playing is a join's (the game's rise may still come over it)
 double g_box_at = 0;                     // the view's prompt was last drawn (0: draw it now)
-bool g_rings_on = false;                 // the ring's rings are asked for on our character (the choice to the warp)
+double g_swallow_until = 0;              // the replay's own item use is swallowed until then
 std::mt19937 g_rng(static_cast<uint32_t>(GetTickCount64()));
 // DeathKnellSoulLevel (1.5.0, default off): going to a teammate takes a soul level (the bell's first price) instead of
 // their souls and humanity.
@@ -798,79 +801,6 @@ int play_arrival(const char* why) {
     return anim;
 }
 
-// ---------------------------------------------------------------- the ring's rings
-// The effect TAE event 120 gives the character (0xE61580): by its type chr+0x70 (types 1..12 through the byte table
-// 0xE61634: 1 white 165, 2 black 167, 9 160), else by its side (0xE6A400: 1 white, 2 black), else the first, 151.
-int ring_effect(uint32_t chr) {
-    static const uint8_t kByType[12] = {0, 1, 3, 3, 3, 3, 3, 3, 2, 3, 3, 3};
-    uint32_t type = 0;
-    read32(chr + 0x70, &type);
-    const int pick = type >= 1 && type <= 12 ? kByType[type - 1] : 3;
-    if (pick == 0) return kRingValues[2];
-    if (pick == 1) return kRingValues[3];
-    if (pick == 2) return kRingValues[1];
-    int side = 0;
-    const uint32_t fn = kChrTypeFxSide;
-    __try {
-        __asm {
-            mov ecx, chr
-            mov eax, fn
-            call eax
-            mov side, eax
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        side = 0;
-    }
-    return side == 1 ? kRingValues[2] : side == 2 ? kRingValues[3] : kRingValues[0];
-}
-
-// The rings on a character: made at its feet the first time they are wanted, ended kRingsLinger after they were last
-// wanted, and at once by a load. Their handles must not move while the effects last.
-struct RingFx {
-    uint32_t chr = 0;
-    alignas(4) uint8_t handle[0x18] = {};
-    bool on = false;
-    double wanted = 0;
-};
-RingFx g_ring_fx[8];
-
-void want_rings(uint32_t chr) {
-    if (!chr || game::loading()) return;
-    for (RingFx& r : g_ring_fx) {
-        if (r.on && r.chr == chr) {
-            r.wanted = now();
-            return;
-        }
-    }
-    for (RingFx& r : g_ring_fx) {
-        if (r.on) continue;
-        game::Vec3 at{};
-        if (!game::chr_position(chr, &at) || !std::isfinite(at.x) || !std::isfinite(at.y) || !std::isfinite(at.z)) return;
-        const int id = ring_effect(chr);
-        const float p[3] = {at.x, at.y + 0.02f, at.z};
-        r.on = rules::effect_at(r.handle, id, p);
-        r.chr = chr;
-        r.wanted = now();
-        static int lines = 0;
-        if (++lines <= 60) {
-            LOG_INFO("[coop] Death Knell: the ring's rings (effect %d) %s at (%.1f, %.1f, %.1f) on %s", id,
-                     r.on ? "made" : "NOT made", p[0], p[1], p[2],
-                     chr == game::player() ? "our character" : "another player's character");
-        }
-        return;
-    }
-}
-
-void rings_upkeep() {
-    const bool loading = game::loading();
-    for (RingFx& r : g_ring_fx) {
-        if (!r.on || (!loading && now() - r.wanted < kRingsLinger)) continue;
-        rules::effect_end(r.handle);
-        r.on = false;
-        r.chr = 0;
-    }
-}
-
 // ---------------------------------------------------------------- the ring's crouch
 // At the ring (the item's use, the bottom of its crouch): held here and in the others' games.
 void start_hold() {
@@ -882,17 +812,13 @@ void start_hold() {
     LOG_INFO("[coop] Death Knell: the crouch %s", g_hold_on ? "held while the view is open" : "NOT held (no animation set)");
 }
 
-// Let go, here and there: the ring plays on and the player rises with its light. For the choice (`rings`) the others
-// give our character the ring's rings until we arrive, held or not.
-void release_hold(const char* why, bool rings = false) {
-    if (!g_hold_on) {
-        if (rings) motion::send_knell_hold(false, true);
-        return;
-    }
+// Let go, here and there: the ring plays on and the player rises with its light.
+void release_hold(const char* why) {
+    if (!g_hold_on) return;
     g_hold_on = false;
     const uint32_t me = game::player();
     const bool done = me && !game::loading() && motion::hold_anims(me, false);
-    motion::send_knell_hold(false, rings);
+    motion::send_knell_hold(false);
     LOG_INFO("[coop] Death Knell: the crouch let go (%s)%s", why, done ? "" : "; our character was not there");
 }
 
@@ -1397,17 +1323,26 @@ void view_tick() {
     }
 }
 
-// On our way (the choice): the ring plays on from its crouch (the player rises with its light), inside the ring's rings
-// here and in the others' games, and the warp comes as they are up. The prompt goes; the sign shown stays gold, the
-// camera stays where it is, and the D-pad and the arrows stay hidden from the game until the warp (close_view).
+// On our way (the choice): the crouch is let go and the ring's animation plays again from its start, with its rings,
+// here and in the others' games, and the warp takes the player near the bottom of that crouch (kReplayWarp). Should the
+// replay not start, the ring plays on as before (the player rises with its light) and the warp comes as they are up.
+// The prompt goes; the sign shown stays gold, the camera stays where it is, and the D-pad and the arrows stay hidden
+// from the game until the warp (close_view).
 void set_going(const char* what) {
     hide_box();
     g_state = State::Going;
-    const bool rise = g_hold_on;
-    release_hold("chosen: the ring plays out", true);
-    g_rings_on = true;
-    g_at = now() + (rise ? kRiseWarp : kGoDelay);
-    LOG_INFO("[coop] Death Knell: going to %s (the warp in %.1f s, inside the ring's rings)", what, g_at - now());
+    const bool held = g_hold_on;
+    release_hold("chosen: the ring's crouch again, with its rings");
+    const uint32_t me = game::player();
+    bool replay = false;
+    if (me && !game::loading()) {
+        motion::send_knell_arrival(kReplayAnim);  // the others play it on our character
+        g_swallow_until = now() + kReplaySwallow;
+        replay = start_event_anim(me, kReplayAnim);
+    }
+    g_at = now() + (replay ? kReplayWarp : held ? kRiseWarp : kGoDelay);
+    LOG_INFO("[coop] Death Knell: going to %s (the warp in %.1f s, %s)", what, g_at - now(),
+             replay ? "in the ring's crouch again, with its rings" : "the replay did not start: as the player rises");
 }
 
 // A or Enter on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so it does
@@ -1929,13 +1864,7 @@ void tick() {
             break;
     }
     hold_tick();
-    // The ring's rings from the choice to the warp (or to a load that takes us there).
-    if (g_rings_on && (g_state != State::Going || game::loading() || !game::player())) g_rings_on = false;
-    if (g_rings_on) want_rings(game::player());
-    rings_upkeep();
 }
-
-void rings(uint32_t chr) { want_rings(chr); }
 
 bool viewing() { return g_state == State::View; }
 
@@ -1952,8 +1881,8 @@ const wchar_t* text(uint32_t id) {
 }
 
 bool swallow_use(int32_t goods) {
-    if (g_state != State::Going) return false;
-    LOG_INFO("[coop] Death Knell: item %d used on the way: not used", goods);
+    if (g_state != State::Going && now() >= g_swallow_until) return false;
+    LOG_INFO("[coop] Death Knell: item %d used on the way (the ring's crouch again): not used", goods);
     return true;
 }
 

@@ -103,20 +103,21 @@ constexpr uint32_t kLuaEventsVar = 0x0137D790;
 // nor where it was. A on the pad or Enter chooses (Enter is hidden from the game meanwhile, as the arrows are).
 constexpr double kBoxEvery = 0.25;  // the prompt's distances are brought up to date this often
 // The ring's rings (1.5.0, the user's design: "the magic rings surrounding the player ... to play when the warp actually
-// takes them too"): the rings the eye orb's use shows around the player as they go down into its crouch. Made again on
-// their own they never showed (the 2026-11-06 tests: an effect slot asked for from the frame tick, then in the TAE step,
-// then a lasting effect at the character's feet, made every time and never seen), and 6060, taken for the eye orb's use
-// and played as an event animation, is a blow that launches the player up with a shake of the camera (the 22:59 test:
-// 6060 to 6067 are that knockdown: launched, down, lying, up; 6066 was the "lying on the back" of the first hold). The
-// eye orb's use is the player's state machine's choice (the goods' use animation byte, +0x3E, through its query
-// 0xE7C410; its animations are among 62xx-65xx, whose TAE event 114 makes the item's own effect, value * 100 + its
-// sfxVariation: 20040 for the bell). So the choice plays the very animation the ring is held in again: its records are
-// put back to their beginning while held (motion::rewind_anims) and then let go, so the item's use runs again from its
-// start, its rings with it, and the warp takes the player kRewindWarp on (the user asked for about 1.5 s). The others
-// start their copy of it over the same way (the release carries kReleaseRewind). Its use comes again on the way: it is
-// swallowed for kRewindSwallow (swallow_use), the trip called off or not.
-constexpr double kRewindWarp = 1.5;
-constexpr double kRewindSwallow = 3.0;
+// takes them too"). The rings around the player as they go down into the ring's crouch are the first effect of 6060's
+// TAE: event 120 from 0.0 s (0xE61580, by the character's type: effect 151, or 165 / 167 for a white / black phantom
+// and 160 for type 9, on dummy poly 200, in the character's effect slot 1 of chr+0x2B8), which event 110 empties at the
+// use (1.2 s). Three tries to make that effect again on its own showed nothing (the 2026-11-06 tests): asked for in an
+// effect slot of ours from the frame tick, then in the character's TAE step after the game's own event 120 (no slot was
+// ever there: a TAE effect slot is the game's to keep), then made as a lasting effect at the character's feet as the
+// summon signs are (made every time, in every game, and never seen: it needs the character it is on). So the choice
+// plays the ring's animation again from its start, as an event animation (kReplayAnim): its own event 120 makes the
+// rings as on the way down the first time, and the warp takes the player kReplayWarp on, near the bottom of the crouch,
+// inside them. The others are sent that start (motion, a knell animation) and play it on our character, whose TAE makes
+// the rings there too. The replay's own item use (its 1.2 s) is swallowed for kReplaySwallow (swallow_use): it would
+// use whatever item is selected.
+constexpr int kReplayAnim = 6060;
+constexpr double kReplayWarp = 1.0;
+constexpr double kReplaySwallow = 2.0;
 
 // The class's starting soul level and attributes (CharaInitParam 3000-3009: soulLv, baseVit, baseWil, baseEnd,
 // baseStr, baseDex, baseDurability, baseMag, baseFai), in the menu's order.
@@ -145,7 +146,7 @@ constexpr double kGoDelay = 1.2;     // before the player goes, when the crouch 
 // our character in the others' games (motion kHold). It is still the item's use, an ordinary animation: hits land
 // (and close the view), and the game takes no roll and no weapon or item switch during it. B or Esc, a hit or any
 // other close lets it go, here and there, and the ring plays on: the player rises with its light. The choice plays the
-// crouch again with its rings (rewind_anims; the warp as the player is up, kRiseWarp, only should that not start). The 2026-11-06 test held the crouch with event
+// crouch again with its rings (kReplayAnim; the warp as the player is up, kRiseWarp, only should that not start). The 2026-11-06 test held the crouch with event
 // animation 6066 instead, which is no crouch (the character lay on their back, twitching), took no hits, rolled out at
 // once (an event animation can be cancelled), and showed no action prompt.
 // 6060 lets the player act again 1.27 s after the use. The warp came at 1.5 s until the 2026-11-06 21:20 test, and in
@@ -811,19 +812,14 @@ void start_hold() {
     LOG_INFO("[coop] Death Knell: the crouch %s", g_hold_on ? "held while the view is open" : "NOT held (no animation set)");
 }
 
-// Let go, here and there: the ring plays on and the player rises with its light. With `rewind` (the choice) the held
-// crouch is put back to its beginning first, here and in the others' games: the use plays again, with its rings.
-// Returns the number of our animations put back (0: none, or no rewind asked).
-int release_hold(const char* why, bool rewind = false) {
-    if (!g_hold_on) return 0;
+// Let go, here and there: the ring plays on and the player rises with its light.
+void release_hold(const char* why) {
+    if (!g_hold_on) return;
     g_hold_on = false;
     const uint32_t me = game::player();
-    const int rewound = rewind && me && !game::loading() ? motion::rewind_anims(me) : 0;
     const bool done = me && !game::loading() && motion::hold_anims(me, false);
-    motion::send_knell_hold(false, rewind && rewound > 0);
-    LOG_INFO("[coop] Death Knell: the crouch let go (%s)%s%s", why, done ? "" : "; our character was not there",
-             rewind ? (rewound ? "; it starts over" : "; nothing to start over") : "");
-    return rewound;
+    motion::send_knell_hold(false);
+    LOG_INFO("[coop] Death Knell: the crouch let go (%s)%s", why, done ? "" : "; our character was not there");
 }
 
 // While the crouch is held: let go once the view is closed (by any way out), and held again when something else
@@ -1327,19 +1323,26 @@ void view_tick() {
     }
 }
 
-// On our way (the choice): the held crouch starts over from its beginning, with its rings, here and in the others'
-// games, and the warp takes the player kRewindWarp on. Should nothing start over (the crouch was not held), the ring
-// plays on as before and the warp comes as the player is up. The prompt goes; the sign shown stays gold, the camera
-// stays where it is, and the D-pad and the arrows stay hidden from the game until the warp (close_view).
+// On our way (the choice): the crouch is let go and the ring's animation plays again from its start, with its rings,
+// here and in the others' games, and the warp takes the player near the bottom of that crouch (kReplayWarp). Should the
+// replay not start, the ring plays on as before (the player rises with its light) and the warp comes as they are up.
+// The prompt goes; the sign shown stays gold, the camera stays where it is, and the D-pad and the arrows stay hidden
+// from the game until the warp (close_view).
 void set_going(const char* what) {
     hide_box();
     g_state = State::Going;
     const bool held = g_hold_on;
-    g_swallow_until = now() + kRewindSwallow;
-    const bool again = release_hold("chosen: the ring's crouch again, with its rings", true) > 0;
-    g_at = now() + (again ? kRewindWarp : held ? kRiseWarp : kGoDelay);
+    release_hold("chosen: the ring's crouch again, with its rings");
+    const uint32_t me = game::player();
+    bool replay = false;
+    if (me && !game::loading()) {
+        motion::send_knell_arrival(kReplayAnim);  // the others play it on our character
+        g_swallow_until = now() + kReplaySwallow;
+        replay = start_event_anim(me, kReplayAnim);
+    }
+    g_at = now() + (replay ? kReplayWarp : held ? kRiseWarp : kGoDelay);
     LOG_INFO("[coop] Death Knell: going to %s (the warp in %.1f s, %s)", what, g_at - now(),
-             again ? "in the ring's crouch again, with its rings" : "nothing started over: as the player rises");
+             replay ? "in the ring's crouch again, with its rings" : "the replay did not start: as the player rises");
 }
 
 // A or Enter on the prompt: the teammate shown is where we go. The camera stays on them until the warp, so it does

@@ -500,6 +500,7 @@ struct GroupGoMsg {
     uint64_t lobby;  // the world the group invades (its host holds a place for each of `ids`)
     uint8_t count;
     uint64_t ids[kGroupMax];
+    uint64_t host;   // that world's host: each of the group opens the link to them at once (open_link)
 };
 struct GroupBackMsg {
     Header h;
@@ -555,6 +556,7 @@ constexpr const wchar_t* kMsgBreakInSuccess = L"Invasion success! Returning to y
 constexpr const wchar_t* kMsgBreakInFailed = L"Invasion failed... Returning to your world";
 constexpr const wchar_t* kMsgRewardInvader = L"Invasion reward: {} Humanity";
 constexpr const wchar_t* kMsgRewardTeam = L"The invader is defeated. Reward: {} Humanity";
+constexpr const wchar_t* kMsgRewardTeamMany = L"The invaders are defeated. Reward: {} Humanity";
 constexpr const wchar_t* kMsgHostTimeout = L"Failed to create session";
 constexpr const wchar_t* kMsgJoinTimeout = L"Failed to find session";
 constexpr const wchar_t* kMsgBreakInTimeout = L"Failed to find session to invade";
@@ -880,6 +882,12 @@ constexpr int32_t kHumanity = 500;  // the Humanity item (goods)
 int g_reward = 0;                   // Humanity still to give
 bool g_reward_home = false;         // wait for our own world
 const wchar_t* g_reward_text = nullptr;
+// When the last Humanity was added to it. Several invaders of one team lose together, each death message a moment after
+// the other: the host's two came 0.2 s apart and gave two rewards of one, each with its own item window and line, the
+// second over the first, so the host saw "Reward: 1 Humanity" for the two (2026-11-07 14:40:43). They are given as one
+// once none has come for kRewardGather.
+double g_reward_at = 0;
+constexpr double kRewardGather = 1.0;
 bool g_invade_open = false;  // host: our lobby tells invaders' searches we take invaders (ptdesc_invade)
 // An invader drinks from the Estus Flask (the game's own rule forbids it; coop.cpp allows it) with at most
 // kInvaderEstus charges: more are set aside on arrival and given back once home, so an invasion costs only what
@@ -1244,6 +1252,22 @@ bool send_to(uint64_t to, T& msg, bool reliable = true) {
     return steam::send(to, &msg, sizeof(msg), reliable);
 }
 
+// Opens the peer-to-peer link to a player before anything needs it (1.6.0): a no-op (kPong with no ping number, which
+// every version's handler drops). Steam lets a player's first packet through only once the receiver accepts their
+// session, and a request that came before we accepted it (the joiner's hello can beat Steam's word that they entered our
+// lobby) waits for Steam to ask again: a group's second invader's knock reached the host 3.3 s after they entered its
+// lobby, the first's (whose link was open from its ask) 12 ms after (2026-11-07 14:39). Sending to them accepts their
+// request at once and starts our side of the link.
+void open_link(uint64_t to) {
+    if (!to || to == steam::self()) return;
+    Simple m{};
+    m.h.magic = kMagic;
+    m.h.type = kPong;
+    m.value = 0;
+    steam::accept(to);
+    steam::send(to, &m, sizeof(m), true);
+}
+
 bool is_lost(uint64_t id) { return std::find(g_lost.begin(), g_lost.end(), id) != g_lost.end(); }
 
 void unmark_lost(uint64_t id) { g_lost.erase(std::remove(g_lost.begin(), g_lost.end(), id), g_lost.end()); }
@@ -1445,6 +1469,7 @@ void invasion_won() {
     if (!fallen) game::call_lua("HostDead");  // the game's own invader victory
     if (g_cfg.invasion_rewards) {  // one per co-op player defeated, as "Defeat {} players" counted them
         g_reward += std::max(1, g_host_coop_players);
+        g_reward_at = now();
         g_reward_home = true;
         g_reward_text = kMsgRewardInvader;
     }
@@ -1471,7 +1496,7 @@ void reward_tick() {
     static double retry_at = 0;
     if (g_reward <= 0 || !game::in_game() || game::loading() || !game::player() || world::local_dead()) return;
     if (g_reward_home && (!game::own_world() || g_role != Role::None)) return;
-    if (now() < retry_at) return;
+    if (now() < retry_at || now() - g_reward_at < kRewardGather) return;
     const int before = items::count(kHumanity);
     if (!items::give(kHumanity, g_reward)) {
         for (int i = 0; i < g_reward; ++i) {
@@ -1485,7 +1510,11 @@ void reward_tick() {
         LOG_INFO("[coop] Reward: %d of %d Humanity fit in the inventory; the rest is tried again in 30 s", given,
                  g_reward);
     }
-    if (given > 0) say(fmt(g_reward_text, std::to_wstring(given)));
+    if (given > 0) {
+        // The co-op side's reward for more than one invader: one line for all of them.
+        const wchar_t* text = g_reward_text == kMsgRewardTeam && given > 1 ? kMsgRewardTeamMany : g_reward_text;
+        say(fmt(text, std::to_wstring(given)));
+    }
     g_reward -= given;
     if (g_reward <= 0) {
         g_reward = 0;
@@ -1908,6 +1937,10 @@ void host_ensure_game_session() {
     if (state != 0) return;
     if (now() - g_last_create < 5.0) return;
     g_last_create = now();
+    // As for a join (guest_on_welcome): the lone-member timer of a session we left a moment ago must not end this one.
+    if (const float left = game::stop_idle_timer()) {
+        LOG_INFO("[coop] The game's timer from our last session had %.1f s left: stopped before our new one", left);
+    }
     const bool ok = game::create_session(game::map_id(), 55.0f);
     LOG_INFO("[coop] Game session %s (map %08X)", ok ? "starting" : "could not start", game::map_id());
 }
@@ -3279,6 +3312,12 @@ void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
     // Until the guest rests, a death uses the host's bonfire. Set before the join: the reload can run inside it.
     if (w.bonfire >= 0 && !g_invade) g_guest_bonfire = w.bonfire;
     const game::Vec3 pos{w.pos[0], w.pos[1], w.pos[2]};
+    // The lone-member timer of the session we left last (game::kSessIdleTimer) would end this join 10 s after that
+    // leave, before its load: stopped first.
+    if (const float left = game::stop_idle_timer()) {
+        LOG_INFO("[coop] The game's timer from our last session had %.1f s left (it would have ended this join): "
+                 "stopped", left);
+    }
     if (!game::join_from_invitation(w.invitation, w.invitation_size, w.map, pos, w.angle)) {
         finish(kMsgConnectTimeout);
         return;
@@ -5004,6 +5043,7 @@ void group_go() {
     m.lobby = g_group.target;
     m.count = static_cast<uint8_t>(std::min<size_t>(going.size(), kGroupMax));
     for (int i = 0; i < m.count; ++i) m.ids[i] = going[i];
+    m.host = target_host;
     send_group(m);
     LOG_INFO("[coop] Group invasion: %s's world holds our %zu place(s); our world closes and we go (%s)",
              steam::persona(target_host).c_str(), going.size(), group_names().c_str());
@@ -5077,7 +5117,11 @@ void group_on_ask(uint64_t from, const GroupAskMsg& m) {
         hold.leader = from;
         hold.until = now() + kGroupHoldFor;
         for (int i = 0; i < count; ++i) {
-            if (m.ids[i]) hold.ids.push_back(m.ids[i]);
+            if (!m.ids[i]) continue;
+            hold.ids.push_back(m.ids[i]);
+            // The link to each of them is opened now, while they are on their way (open_link): their knock comes
+            // straight through. They open theirs to us when their host's kGroupGo names us.
+            if (m.ids[i] != from) open_link(m.ids[i]);
         }
         g_group_holds.push_back(hold);
     }
@@ -5100,9 +5144,13 @@ void group_on_go(uint64_t from, const GroupGoMsg& m) {
     g_group.members = ids;
     g_group.target = m.lobby;
     set_group_phase(GroupPhase::Leaving, "our host's group invades another world");
-    LOG_INFO("[coop] Group invasion: our host's group invades another world (lobby %016llx): %s",
-             static_cast<unsigned long long>(m.lobby), group_names().c_str());
+    LOG_INFO("[coop] Group invasion: our host's group invades another world (lobby %016llx, %s's): %s",
+             static_cast<unsigned long long>(m.lobby), m.host ? steam::persona(m.host).c_str() : "?",
+             group_names().c_str());
     guest_go_home(kMsgGroupGoMember, "our host's group invades another world");
+    // The link to that world's host opens on our way home (open_link; the host opened its side at the ask), so our
+    // knock does not wait for Steam to set it up.
+    if (m.host) open_link(m.host);
 }
 
 // The group's host: our knock did not get us there; the others stop theirs.
@@ -5306,7 +5354,8 @@ void group_tick() {
                 say(g_group.members.size() > 1 ? kMsgGroupBack : kMsgGroupBackSolo);
             }
             {
-                // Each player not back yet gets our lobby every 3 s for as long as they keep saying they are out (one
+                // Each player not back yet gets our lobby every kGroupBackResend (0.75 s) for as long as they keep
+                // saying they are out (one
                 // still invading after we came home waits on), and is let go after kGroupQuietFor without a word from
                 // them, counted from our world's opening at the earliest.
                 const std::vector<uint64_t> in_lobby = steam::lobby_members(g_lobby);
@@ -5374,8 +5423,9 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
     if (g_role == Role::Host && h.type != kHello && h.type != kBye && h.type != kPing && h.type != kGroupAsk &&
         h.type != kGroupAnswer && h.type != kGroupHere && !admitted(from)) {
         static int lines = 0;
-        // a joiner's status, gait and animations are sent before the answer comes
-        if (h.type != kInfo && h.type != kGait && h.type != kAnim && ++lines <= 50) {
+        // a joiner's status, gait and animations are sent before the answer comes, and a group's player opens its
+        // link early with a no-op (open_link)
+        if (h.type != kInfo && h.type != kGait && h.type != kAnim && h.type != kPong && ++lines <= 50) {
             LOG_INFO("[coop] Message %u from %s ignored: they were not let into the session", h.type,
                      steam::persona(from).c_str());
         }
@@ -5697,6 +5747,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                     LOG_INFO("[coop] The invasion of %s is repelled (they had fallen before): a Humanity for us",
                              utf8(event_name(m)).c_str());
                     ++g_reward;
+                    g_reward_at = now();
                     g_reward_text = kMsgRewardTeam;
                 }
                 break;
@@ -5715,6 +5766,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             if (m.invader && m.lost && !g_invade && g_cfg.invasion_rewards) {
                 LOG_INFO("[coop] The invasion of %s is repelled: a Humanity for us", utf8(event_name(m)).c_str());
                 ++g_reward;
+                g_reward_at = now();
                 g_reward_text = kMsgRewardTeam;
             }
             break;
@@ -7030,7 +7082,7 @@ void set_callbacks() {
     steam::on_lobby_member([](uint64_t lobby, uint64_t user, bool entered) {
         if (lobby != g_lobby) return;
         if (entered) {
-            steam::accept(user);
+            open_link(user);  // accepts them, and a session request of theirs that came before this
             if (g_role == Role::Host) LOG_INFO("[coop] %s entered the lobby", steam::persona(user).c_str());
             return;
         }

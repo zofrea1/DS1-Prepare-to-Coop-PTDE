@@ -29,6 +29,13 @@ constexpr uint32_t kSessMaxMembers = 0x8C;
 constexpr uint32_t kSessJoinStep = 0x194;   // guest: 1 joined, 2 host data received, 3 reload into the host's
                                             // world requested, 4 in the host's world
 constexpr uint32_t kSessRoomTimer = 0x1BC;  // host: seconds left until an empty room closes (<0 = never)
+// The session's lone-member timer (1.6.0 finding): when a session's member count drops to one, the member handler
+// (0xD2E841) sets 10 s here; 0xD2D080 counts it down and, at 0, ends the session (0xD2B460, returning to 0xD2D0EC)
+// unless the join is at step 3, then sets -1 (off). Nothing a join or a session's creation does sets it back, so a
+// player who left a session (a guest going home, an invader whose invasion ended) and joined another within 10 s had
+// that join ended 10.6 s after the leave, still at join step 2: a group's second invader every time, the first
+// invasion after an invasion (2026-10-25, 2026-11-07 x4).
+constexpr uint32_t kSessIdleTimer = 0x1EC;
 constexpr uint32_t kSessLocked = 0x1C2;     // LockSession: refuse new members
 constexpr uint32_t kSessMembersBegin = 0x100, kSessMembersEnd = 0x104;  // 0x24-byte member records
 
@@ -104,6 +111,9 @@ bool create_session(int map, float timeout);
 bool build_invitation(int join_type, int flag, std::vector<uint8_t>* out);
 // Guest: joins the session an invitation describes (the vanilla guest code path), then sets the spawn point.
 bool join_from_invitation(const uint8_t* data, uint32_t size, int map, const Vec3& pos, float angle);
+// Stops a lone-member timer left from an earlier session (kSessIdleTimer: -1, as the session's own setup sets it).
+// Returns the seconds it had left (0 when it was off).
+float stop_idle_timer();
 // The game's own leave (also used for invasion endings and genuine disconnects). Sets the session to
 // "leaving", which takes the host to the title screen.
 void leave_session();

@@ -251,6 +251,12 @@ struct Made {
     int deaths = -1;
     int death_events = -1;
     bool seen_dead = false;
+    // The party entry's state when we began watching this character: a dead entry (2, 5) counts for a death only once it
+    // has gone dead while we watched. A character made again keeps its entry's state 5 (the game does not set it back),
+    // and counted then, it was made again every 1.5 s, the host's and a guest's characters in an invader's game after a
+    // team wipe, until the invader left (2026-11-07 14:43:25).
+    int entry_state = -1;
+    bool entry_seen = false;  // entry_state was read
 };
 
 // PartyMemberInfo ([GameMan+0xBEC]) keeps its members (eight: partylist.cpp) from +0x18, 0x14 bytes each: +0 character handle (-1 none),
@@ -421,7 +427,14 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
         // invader was a dead copy without their phantom glow, gone from sight, for the rest of the invasion while
         // alive in their own game (2026-11-07 13:31, host and guest).
         const int state = party_state_of(r.chr);
-        if (state == 2 || state == 5) made.seen_dead = true;
+        if (!made.entry_seen) {
+            made.entry_seen = true;
+            made.entry_state = state;
+        }
+        const bool entry_dead = state == 2 || state == 5;
+        const bool was_dead = made.entry_state == 2 || made.entry_state == 5;
+        if (entry_dead && !was_dead) made.seen_dead = true;
+        if (!entry_dead) made.entry_state = state;  // alive again: a later dead entry counts
         // A death shows as 0 HP here, a dead party entry, a higher death count, or the player's own death message (the
         // copy's HP is not always seen at 0 in the 1 s checks).
         const bool counted = (ps.known && made.deaths >= 0 && ps.deaths > made.deaths) ||

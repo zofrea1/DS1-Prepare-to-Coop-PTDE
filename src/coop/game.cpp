@@ -228,6 +228,14 @@ int last_bonfire() { return field<int>(game_man(), kGmLastBonfire, -1); }
 bool loading() { return player() == 0; }
 bool in_game() { return player_game_data() != 0 && player() != 0; }
 
+float stop_idle_timer() {
+    const uint32_t s = sess_man();
+    if (!s) return 0;
+    const float left = field<float>(s, kSessIdleTimer, -1.0f);
+    if (left > 0) put<float>(s, kSessIdleTimer, -1.0f);
+    return left > 0 ? left : 0;
+}
+
 bool create_session(int map, float timeout) {
     const uint32_t s = sess_man();
     if (!s) return false;

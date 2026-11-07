@@ -613,8 +613,18 @@ void tick() {
     const ULONGLONG t = GetTickCount64();
     if (!g_free_since) g_free_since = t;
     if (t - g_free_since < 1000) return;
+    // A goods item no longer held by now is not shown (as many as are held at most): a fallen host's Bloody Mary waited
+    // for the player to stand again, and the team wipe that followed had taken it away; the window showed it after
+    // "YOUR TEAM DIED" all the same (2026-11-07 14:43).
     bool all = true;
-    for (const Shown& s : g_announce) all &= show_obtained(s.category, s.id, s.count);
+    for (const Shown& s : g_announce) {
+        const int n = s.category == kGoodsCategory ? std::min(s.count, count(s.id)) : s.count;
+        if (n <= 0) {
+            LOG_INFO("[coop] Item window for goods %d not shown: none held any more", s.id);
+            continue;
+        }
+        all &= show_obtained(s.category, s.id, n);
+    }
     g_announce.clear();
     if (!all) text::show(L"Prepare to Co-op items added to your inventory");
 }

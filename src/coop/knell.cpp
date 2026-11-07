@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "hook.h"
+#include "items.h"
 #include "log.h"
 #include "motion.h"
 #include "overlay.h"
@@ -1451,9 +1452,44 @@ bool warp_here(uint32_t target) {
     return true;
 }
 
+// An invader's far Death Knell is a load in another player's world, and every such load empties the key array the
+// inventory uses there (MoveMapStep 0xEFC470 -> 0xEFC6C3: 0x51C520 with clear 1). A co-op guest gets its keys back
+// from the session's key poll (session.cpp, guest_carry_keys), which an invader does not run: a key item it held in
+// the invasion was gone for the rest of it (Grok review 44169466). The world's keys it holds when the load starts go
+// back once it stands; nothing of the host's is lent. The co-op key items (the Crimson Blossom, the Bloody Mary) have
+// their own counts.
+std::vector<int32_t> g_invader_keys;
+
+void give_back_invader_keys() {
+    if (g_invader_keys.empty()) return;
+    const std::vector<int32_t> held = items::key_items();
+    std::string back, kept;
+    for (int32_t id : g_invader_keys) {
+        if (std::find(held.begin(), held.end(), id) != held.end()) {
+            kept += " " + std::to_string(id);
+        } else if (items::give(id, 1)) {
+            back += " " + std::to_string(id);
+        }
+    }
+    LOG_INFO("[coop] Death Knell (invading): key items after the load: given back:%s; still held:%s",
+             back.empty() ? " none" : back.c_str(), kept.empty() ? " none" : kept.c_str());
+    g_invader_keys.clear();
+}
+
 // A load into `map`, stood at `pos` facing `angle` (rules::place_next_load_at).
 void load_into(int map_id, const float* pos, float angle, const std::wstring& what) {
     const int map = static_cast<int>(static_cast<uint32_t>(map_id) & 0xFFFF0000u);
+    g_invader_keys.clear();
+    if (session::invader()) {
+        for (int32_t id : items::key_items()) {
+            if (id < items::kFirst || id > items::kLast) g_invader_keys.push_back(id);
+        }
+        if (!g_invader_keys.empty()) {
+            std::string ids;
+            for (int32_t id : g_invader_keys) ids += " " + std::to_string(id);
+            LOG_INFO("[coop] Death Knell (invading): key items held before the load:%s", ids.c_str());
+        }
+    }
     rules::place_next_load_at(map, pos[0], pos[1], pos[2], angle);
     world::warp_now(map, -1);
     g_state = State::Loading;
@@ -1595,6 +1631,7 @@ void loading_tick() {
         g_stand_since = 0;
         if (now() - g_load_since > 120.0) {
             LOG_INFO("[coop] Death Knell: the load took over two minutes; no arrival");
+            g_invader_keys.clear();
             g_state = State::Idle;
         }
         return;
@@ -1603,6 +1640,7 @@ void loading_tick() {
         if (now() - g_load_since > 8.0) {
             LOG_INFO("[coop] Death Knell: the load into %08X never began", static_cast<uint32_t>(g_dest.map));
             say(L"The Death Knell falls silent");
+            g_invader_keys.clear();  // nothing was emptied
             g_state = State::Idle;
         }
         return;
@@ -1610,6 +1648,7 @@ void loading_tick() {
     // Standing in the new map: the arrival plays once the world is up.
     if (g_stand_since == 0) g_stand_since = now();
     if (now() - g_stand_since < 0.5) return;
+    give_back_invader_keys();
     if (world::local_dead()) {
         LOG_INFO("[coop] Death Knell: arrived fallen; no arrival");
         g_state = State::Idle;

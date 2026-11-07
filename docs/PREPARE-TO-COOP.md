@@ -582,16 +582,25 @@ invades on), and the group gathers again as after an invasion.
 
 Back home after the invasion (every session's end leaves the group's state as it is), the host opens its world again
 1 s after it stands at home ("Your world is open again: your group is coming back") and sends message 50, `kGroupBack`,
-with its new lobby straight to each of the group who is not in that lobby yet, every 3 s for up to 240 s: no lobby joins
-them any more, so each guest accepts the host's P2P session every 2 s while the group lasts (every session's end closes
-the channels to its players). A guest waits at home ("Waiting for ... to open their world again...") and joins that
-lobby as a co-op guest 1.5 s after it stands at home once it has the lobby, arriving at the host's last bonfire. One who
-gets home before the host waits; one still invading when the host is home keeps the lobby for when it is. Anything else
-a player starts meanwhile (an orb, a hotkey) ends the group for that player; a guest who hears nothing for 240 s is told
-the host did not open their world again.
+with its new lobby straight to each of the group who is not in that lobby yet, every 3 s: no lobby joins them any more,
+so each guest accepts the host's P2P session every 2 s while the group lasts (every session's end closes the channels
+to its players). A guest waits at home ("Waiting for ... to open their world again...") and joins that lobby as a co-op
+guest 1.5 s after it stands at home once it has the lobby, arriving at the host's last bonfire. One who gets home before
+the host waits; one still invading when the host is home keeps the lobby for when it is.
+
+The players need not get home together (Grok review a55ef919): a guest whose knock failed is home at once while the
+host invades on, and a host whose connection dropped is home while the others fight on. So no side waits a fixed time
+from its own return. While out (joining, invading, on its way home) the host tells the group every 5 s that it is
+(`kGroupBack` with lobby 0), and each other player not yet on its way back into the host's world tells the host the
+same (message 51, `kGroupHere`, which a host takes from players outside its session). A guest waiting at home gives up
+after 90 s without a word from the host, counted from its own return at the earliest ("... did not open their world
+again"); the host, its world open again, sends its lobby to each other player for as long as they keep saying they are
+out, and lets one go after 90 s without a word from them, counted from its world's opening at the earliest. Anything else
+a player starts meanwhile (an orb, a hotkey) ends the group for that player, and their silence then ends it for the
+others.
 
 A group of one (a host alone) goes the same way: its world stays open while it searches, closes for the invasion, and
-opens again after it. Older guests and older worlds ignore messages 45 to 50, so a group goes only with players and into
+opens again after it. Older guests and older worlds ignore messages 45 to 51, so a group goes only with players and into
 worlds of 1.6.0 or later; the co-op protocol is unchanged (9), and 1.6.0 plays with 1.5.0 otherwise.
 
 ### When a player leaves

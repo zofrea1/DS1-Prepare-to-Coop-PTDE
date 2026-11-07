@@ -141,7 +141,9 @@ enum MsgType : uint8_t {
     kGroupAnswer = 47,   // that host -> the asker: a WelcomeStatus (GroupAnswerMsg); kOk holds the places kGroupHoldFor
     kGroupGo = 48,       // the group's host -> its co-op guests: we invade that world together; home first (GroupGoMsg)
     kGroupOff = 49,      // the group's host -> the group: its own knock failed, the invasion is off; we gather again
-    kGroupBack = 50,     // the group's host -> the group, home again: our world is open, this lobby (GroupBackMsg)
+    kGroupBack = 50,     // the group's host -> the group, home again: our world is open, this lobby (GroupBackMsg); lobby 0
+                         // while the host is still out (joining, invading, on its way home): keep waiting
+    kGroupHere = 51,     // a player of the group -> its host, until back in the host's world: still out, keep sending
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -920,8 +922,12 @@ struct Group {
     double asked_at = 0;
     Refusals refusals;             // why the worlds asked could not take us
     int older = 0;                 // worlds found that are not 1.6.0 (they keep no invader limit)
-    // The host, after the invasion.
+    // Gathering again (kGroupBack, kGroupHere). The host: when it last sent its kGroupBack, and when each other player
+    // last said they are still out. A guest: when the host was last heard from, and when we last said we are out.
     double back_sent = 0;
+    std::map<uint64_t, double> member_heard;
+    double heard_at = 0;
+    double beat_sent = 0;
 };
 Group g_group;
 // Host: the places held for a group that asked (kGroupAsk) until its players come in or kGroupHoldFor passes. The
@@ -939,8 +945,15 @@ constexpr double kGroupHoldFor = 45.0;
 constexpr double kGroupLeaveFor = 120.0;
 // The group's host waits this long for a world's lobby and its answer before asking the next.
 constexpr double kGroupAskWait = 8.0;
-// After the invasion: the host sends its lobby to the others this long, and a guest waits this long to hear it.
-constexpr double kGroupBackFor = 240.0;
+// Gathering again after the invasion (Grok review a55ef919). The players of a group need not get home together: a
+// guest whose knock failed is home at once while the host invades on, and a host whose connection dropped is home
+// while the others fight on. So neither side waits for a fixed time from its own return. While out (joining, invading,
+// on the way home) the host tells the others every kGroupBeat that it is (kGroupBack with lobby 0), and each other
+// player not yet back in the host's world tells the host the same (kGroupHere); a guest waiting at home gives up only
+// after kGroupQuietFor without a word from the host, and the host, its world open again, stops sending its lobby to a
+// player not heard from for as long.
+constexpr double kGroupBeat = 5.0;
+constexpr double kGroupQuietFor = 90.0;
 constexpr const char* kGroupVersion = "1.6.0";
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -5113,6 +5126,23 @@ void group_tick() {
             steam::accept(g_group.leader);
         }
     }
+    // While out, each side says so every kGroupBeat (see kGroupQuietFor): the host until its world is open again (then
+    // its kGroupBack carries the lobby), a guest until it is on its way back into the host's world.
+    const bool out = g_group.phase == GroupPhase::Joining || g_group.phase == GroupPhase::Invading ||
+                     g_group.phase == GroupPhase::Returning || (!g_group.lead && g_group.phase == GroupPhase::Leaving);
+    if (out && now() - g_group.beat_sent >= kGroupBeat) {
+        g_group.beat_sent = now();
+        if (g_group.lead) {
+            GroupBackMsg m{};
+            fill_header(&m, kGroupBack);
+            m.lobby = 0;
+            send_group(m);
+        } else if (g_group.leader) {
+            Simple m{};
+            fill_header(&m, kGroupHere);
+            send_to(g_group.leader, m);
+        }
+    }
     switch (g_group.phase) {
         case GroupPhase::Searching: {
             if (!g_group.lead || !hosting()) {
@@ -5209,9 +5239,11 @@ void group_tick() {
                 join_world(lobby);
                 break;
             }
-            if (in_phase > kGroupBackFor) {
+            // The host may still be out (it invades on): we wait as long as it keeps saying so, and give up only after
+            // kGroupQuietFor without a word from it, counted from our own return at the earliest.
+            if (now() - std::max(g_group.since, g_group.heard_at) > kGroupQuietFor) {
                 say(fmt(kMsgGroupNotBack, g_group.leader_name));
-                set_group_phase(GroupPhase::None, "the host's world did not open again");
+                set_group_phase(GroupPhase::None, "nothing heard from the host for too long");
             }
             break;
         case GroupPhase::Rejoining:
@@ -5235,14 +5267,23 @@ void group_tick() {
                 say(g_group.members.size() > 1 ? kMsgGroupBack : kMsgGroupBackSolo);
             }
             {
+                // Each player not back yet gets our lobby every 3 s for as long as they keep saying they are out (one
+                // still invading after we came home waits on), and is let go after kGroupQuietFor without a word from
+                // them, counted from our world's opening at the earliest.
                 const std::vector<uint64_t> in_lobby = steam::lobby_members(g_lobby);
                 const bool resend = now() - g_group.back_sent >= 3.0;
                 if (resend) g_group.back_sent = now();
-                bool all = true;
+                int waiting = 0, lost = 0;
                 for (uint64_t id : g_group.members) {
                     if (id == steam::self() || admitted(id)) continue;
                     if (std::find(in_lobby.begin(), in_lobby.end(), id) != in_lobby.end()) continue;
-                    all = false;
+                    const auto heard = g_group.member_heard.find(id);
+                    const double last = std::max(g_group.since, heard != g_group.member_heard.end() ? heard->second : 0.0);
+                    if (now() - last > kGroupQuietFor) {
+                        ++lost;
+                        continue;
+                    }
+                    ++waiting;
                     if (resend) {
                         GroupBackMsg m{};
                         fill_header(&m, kGroupBack);
@@ -5250,10 +5291,9 @@ void group_tick() {
                         send_to(id, m);
                     }
                 }
-                if (all) {
-                    set_group_phase(GroupPhase::None, "the whole group is back in our world");
-                } else if (in_phase > kGroupBackFor) {
-                    set_group_phase(GroupPhase::None, "not everyone came back");
+                if (waiting == 0) {
+                    set_group_phase(GroupPhase::None, lost ? "everyone still heard from is back in our world"
+                                                           : "the whole group is back in our world");
                 }
             }
             break;
@@ -5289,10 +5329,11 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
     }
     // The host takes a Hello, Bye or Ping from anyone in the lobby and the rest only from the players it let in:
     // Steam passes on packets from every lobby member, also ones refused or not answered yet. Group invasions (1.6.0):
-    // a group's ask comes from a player not in our session (in our lobby only to ask), and its answer to our own ask
-    // from the host of another world (each checks who it is from).
+    // a group's ask comes from a player not in our session (in our lobby only to ask), its answer to our own ask from
+    // the host of another world, and a player of our group still out says so while not in our session (each checks who
+    // it is from).
     if (g_role == Role::Host && h.type != kHello && h.type != kBye && h.type != kPing && h.type != kGroupAsk &&
-        h.type != kGroupAnswer && !admitted(from)) {
+        h.type != kGroupAnswer && h.type != kGroupHere && !admitted(from)) {
         static int lines = 0;
         // a joiner's status, gait and animations are sent before the answer comes
         if (h.type != kInfo && h.type != kGait && h.type != kAnim && ++lines <= 50) {
@@ -6102,19 +6143,25 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kGroupOff: {
             if (g_group.phase == GroupPhase::None || g_group.lead || from != g_group.leader) return;
+            g_group.heard_at = now();
             group_on_off();
             break;
         }
         case kGroupBack: {
             GroupBackMsg m{};
-            if (!as(&m) || g_group.phase == GroupPhase::None || g_group.lead || from != g_group.leader || !m.lobby) {
-                return;
-            }
+            if (!as(&m) || g_group.phase == GroupPhase::None || g_group.lead || from != g_group.leader) return;
+            g_group.heard_at = now();  // lobby 0: the host is still out, and we wait on
+            if (!m.lobby) return;
             if (g_group.back != m.lobby) {
                 LOG_INFO("[coop] Group invasion: %s's world is open again (lobby %016llx)",
                          steam::persona(from).c_str(), static_cast<unsigned long long>(m.lobby));
             }
             g_group.back = m.lobby;
+            break;
+        }
+        case kGroupHere: {
+            if (!g_group.lead || g_group.phase == GroupPhase::None || !in_group(from)) return;
+            g_group.member_heard[from] = now();
             break;
         }
         default:

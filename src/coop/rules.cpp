@@ -7177,6 +7177,17 @@ void track_own_chr_type() {
     LOG_INFO("[coop] Reverse Hollowing in the host's world: we stay human from now on (was hollow on joining)");
 }
 
+bool set_player_chr_type(int chr_type) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd || !game::player()) return false;
+    __try {
+        set_chr_type(pgd, chr_type);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 void set_remote_players(const std::vector<RemotePlayer>& players) { g_remote = players; }
 
 uint32_t driven_lift_map() { return kDrivenLiftMap; }

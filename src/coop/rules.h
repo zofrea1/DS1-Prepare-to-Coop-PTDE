@@ -203,6 +203,9 @@ struct RemotePlayer {
     int map = -1;          // the map that player last reported standing in (-1 unknown)
 };
 void set_remote_players(const std::vector<RemotePlayer>& players);
+// Our player's chr type (0 human, 2 black, 8 hollow ...), set as the game's arrival in another world sets it (0xEA15B0
+// calls 0x455FC0 on the PlayerGameData of a character already standing there). False without a character.
+bool set_player_chr_type(int chr_type);
 
 // The Demon Ruins lift that the Centipede Demon's death starts (event 11410400) moves for one game at a time (rules.cpp,
 // "one game moves the Demon Ruins lift"); session.cpp picks it among the players standing in its map. `someone`: a

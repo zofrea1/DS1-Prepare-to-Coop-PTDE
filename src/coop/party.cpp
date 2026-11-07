@@ -272,6 +272,18 @@ uint32_t chr_of_handle(uint32_t handle) {
     return chr;
 }
 
+// The state of the party entry that holds this character (1, 3 alive; 4 dying; 2, 5 dead; 6, 7), -1 none.
+int party_state_of(uint32_t chr) {
+    uint32_t gm = 0, pmi = 0;
+    if (!read32(game::kGameManVar, &gm) || !gm || !read32(gm + kGmParty, &pmi) || !pmi) return -1;
+    for (int i = 0; i < partylist::entries(); ++i) {
+        uint32_t handle = 0, state = 0;
+        if (!read32(pmi + 0x18 + i * 0x14, &handle) || !read32(pmi + 0x20 + i * 0x14, &state)) return -1;
+        if (handle != 0xFFFFFFFF && chr_of_handle(handle) == chr) return static_cast<int>(state);
+    }
+    return -1;
+}
+
 bool party_reads_character(uint32_t chr) {
     uint32_t gm = 0, pmi = 0;
     if (!read32(game::kGameManVar, &gm) || !gm || !read32(gm + kGmParty, &pmi) || !pmi) return true;
@@ -390,9 +402,7 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
             continue;
         }
         // An invader's character missing after our own load (we died and respawned) is asked for like anyone's:
-        // the host and the guests saw no invader after their respawn (2026-10-16/17 invasions, 1.0.0 players). An
-        // invader who dies goes home, so nothing below (the rebuild after a death) is for them.
-        if (ps.invader) continue;
+        // the host and the guests saw no invader after their respawn (2026-10-16/17 invasions, 1.0.0 players).
         Made& made = g_made[r.slot];
         if (made.chr != r.chr || (ps.known && made.peer != ps.id)) {
             made = Made{};
@@ -405,13 +415,24 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
             made.seen_dead = ps.known && ps.dead;
         }
         if (hp(r.chr) <= 0) made.seen_dead = true;
-        // A death shows as 0 HP here, a higher death count, or the player's own death message (the copy's HP is
-        // not always seen at 0 in the 1 s checks).
-        const bool died = made.seen_dead || (ps.known && made.deaths >= 0 && ps.deaths > made.deaths) ||
-                          (ps.known && made.death_events >= 0 && ps.death_events > made.death_events);
+        // The party can hold the character dead (state 2 or 5) after its HP came back from a moment at 0 between two
+        // of these checks: an invader's Death Knell to a summon sign by a load (their game frees its character and
+        // makes it again) showed 0 HP here for half a second, the party entry went to 5 and stayed there, and the
+        // invader was a dead copy without their phantom glow, gone from sight, for the rest of the invasion while
+        // alive in their own game (2026-11-07 13:31, host and guest).
+        const int state = party_state_of(r.chr);
+        if (state == 2 || state == 5) made.seen_dead = true;
+        // A death shows as 0 HP here, a dead party entry, a higher death count, or the player's own death message (the
+        // copy's HP is not always seen at 0 in the 1 s checks).
+        const bool counted = (ps.known && made.deaths >= 0 && ps.deaths > made.deaths) ||
+                             (ps.known && made.death_events >= 0 && ps.death_events > made.death_events);
+        const bool died = made.seen_dead || counted;
         if (made.deaths < 0) made.deaths = ps.deaths;
         if (made.death_events < 0) made.death_events = ps.death_events;
         if (!died) continue;
+        // An invader who really dies goes home (or spectates a standing invader, still dead to us): no rebuild for
+        // them. A copy held dead while its invader never died is their own load (above): rebuilt as a co-op player's.
+        if (ps.invader && counted) continue;
         // Their character here died. Rebuild it once that player reports being alive (they respawned) and the
         // party is done with it; a character no player can be matched to stays as it is. The old character goes
         // first; a later check finds the slot empty and asks for the new one, which then takes the same slot.
@@ -426,7 +447,8 @@ void tick(bool active, PeerState (*peer)(uint32_t chr, const std::wstring& name,
             g_removed_at[r.slot] = now();
             made = Made{};
             g_queued_at[r.slot] = now() - kRequestGap;  // the new character on the first check that finds the slot empty
-            LOG_INFO("[coop] %s is back after dying: their character is created again", name);
+            LOG_INFO("[coop] %s is back after %s: their character is created again", name,
+                     ps.invader ? "a load (an invader's copy held dead)" : counted ? "dying" : "being held dead");
         }
     }
 }

@@ -1510,13 +1510,70 @@ void invader_keys_tick() {
     give_back_invader_keys();
 }
 
+// An invader's chr type through the knell's load (1.6.0). The game turns a summoned player into a phantom of the join
+// type on arrival (0xEA15B0: chr type 2 for a black phantom, set with 0x455FC0) and keeps their own type pending in
+// GameDataMan+0x60, which the next load applies: in vanilla that load is always the trip home. The Death Knell's load
+// into a far summon sign is a load in the host's world, and it made the invader human (chr 2/2 before, 0/0 after,
+// 2026-11-07 13:31): no red glow, and the others saw a human character there. So the invader's own type is the pending
+// one for that load, and once they stand it is set back on the character if it changed anyway, and the pending type is
+// put back for the trip home.
+constexpr uint32_t kGdmNextChrType = 0x60;
+int g_invader_type = -1;        // our chr type before the load (-1: no invader's knell load pending)
+int g_invader_pending = -1;     // GameDataMan+0x60 then
+bool g_type_load_seen = false;
+double g_type_armed_at = 0;
+
+void put_back_pending_type(const char* why) {
+    if (const uint32_t gdm = game::game_data_man()) *ptr<int>(gdm + kGdmNextChrType) = g_invader_pending;
+    LOG_INFO("[coop] Death Knell (invading): the pending chr type is %d again (%s)", g_invader_pending, why);
+    g_invader_type = -1;
+}
+
+void invader_type_tick() {
+    if (g_invader_type < 0) return;
+    if (game::loading() || !game::player()) {
+        g_type_load_seen = true;
+        return;
+    }
+    if (!g_type_load_seen) {
+        if (now() - g_type_armed_at > 10.0) put_back_pending_type("the load never began");
+        return;
+    }
+    if (!session::invader() || game::own_world()) {
+        put_back_pending_type("we are home, or the invasion is over");
+        return;
+    }
+    const int type = game::chr_type();
+    if (type != g_invader_type) {
+        const bool ok = rules::set_player_chr_type(g_invader_type);
+        LOG_INFO("[coop] Death Knell (invading): chr type %d after the load, set back to %d%s", type, g_invader_type,
+                 ok ? "" : " (failed)");
+    } else {
+        LOG_INFO("[coop] Death Knell (invading): still chr type %d after the load", type);
+    }
+    put_back_pending_type("after the load");
+}
+
 // A load into `map`, stood at `pos` facing `angle` (rules::place_next_load_at).
 void load_into(int map_id, const float* pos, float angle, const std::wstring& what) {
     const int map = static_cast<int>(static_cast<uint32_t>(map_id) & 0xFFFF0000u);
     g_invader_keys.clear();
     g_keys_load_seen = false;
     g_keys_stand_since = 0;
+    if (g_invader_type >= 0) put_back_pending_type("another load");
     if (session::invader()) {
+        const int type = game::chr_type();
+        const uint32_t gdm = game::game_data_man();
+        // A phantom's type only (an invader is a black phantom, 2): 0 or 8 is a body of its own, and none to keep.
+        if (gdm && type != 0 && type != 8 && type >= 0) {
+            g_invader_type = type;
+            g_invader_pending = *ptr<int>(gdm + kGdmNextChrType);
+            g_type_load_seen = false;
+            g_type_armed_at = now();
+            *ptr<int>(gdm + kGdmNextChrType) = g_invader_type;
+            LOG_INFO("[coop] Death Knell (invading): chr type %d kept for the load (the pending type was %d)",
+                     g_invader_type, g_invader_pending);
+        }
         for (int32_t id : items::key_items()) {
             if (id < items::kFirst || id > items::kLast) g_invader_keys.push_back(id);
         }
@@ -1883,6 +1940,7 @@ void tick() {
     if (was_loading && !loading) clear_action_prompt("after a load");
     was_loading = loading;
     invader_keys_tick();
+    invader_type_tick();
     pending_price_tick();
     // A join's arrival: the moment the game starts its own rise at the host's bonfire (6950, 0.2 to 0.8 s after the
     // load in the 2026-11-04 test), it is replaced by the arrival, or after kJoinRiseWait standing if no rise comes.

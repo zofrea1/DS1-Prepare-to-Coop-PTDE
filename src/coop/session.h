@@ -96,9 +96,9 @@ void tick();
 void host();         // Blessed Eye Orb
 void join();         // Crystal Eye Orb
 void invade();       // Chaos Eye Orb; while hosting (1.6.0), the whole party invades together (again: calls it off)
-// The Chaos Eye Orb can lead our party into another world now: we host, and no invader is in our world, or our search
-// runs (1.6.0: the orb calls it off). Why not when it cannot go is said on use (a guest of an older version, a boss
-// fight, a teammate down, ...).
+// The Chaos Eye Orb can lead our party into another world now: we host, and no invader is in our world (1.6.0; one who
+// comes in calls our search off). Why not when it cannot go is said on use (a guest of an older version, a boss fight,
+// a teammate down, ...).
 bool group_invade_open();
 void leave();        // Abyssal Eye Orb
 void close_world();  // the host's Black Separation Crystal: every other player goes home, the session ends

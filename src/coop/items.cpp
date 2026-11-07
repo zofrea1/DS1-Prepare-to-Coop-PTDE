@@ -99,7 +99,8 @@ const Def kDefs[kCount] = {
      L"shares your\npassword. You travel in your own body and keep all\nthat you gain."},
     {-98, 81, 2002, L"Chaos Eye Orb", L"Invade a co-operative session",
      L"A small eye orb, red with heat and spite.\n\nUse it to invade, as an evil spirit, a\n"
-     L"co-operative session that welcomes invaders."},
+     L"co-operative session that welcomes invaders.\n\nA host who uses it leads the whole party into\n"
+     L"another world, and returns with them after."},
     {-97, 0, 2132, L"Abyssal Eye Orb", L"Leave or disband a co-operative session",
      L"A small black eye orb whose gaze never wavers.\n\nA guest or an invader uses it to return home. A host\n"
      L"uses it to disband the session."},

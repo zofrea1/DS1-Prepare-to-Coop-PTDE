@@ -19,6 +19,9 @@ struct Config {
     bool allow_invaders = true;
     bool invasion_rewards = true;  // Humanity for the side that wins an invasion
     int invasion_cooldown_s = 180; // InvasionCooldown: after an invasion of our world, no other invader for this long
+    // ExtraInvaders (1.6.0): our world takes at most its co-op players (the host and the guests) plus this many invaders
+    // at once; 1 at the least.
+    int extra_invaders = 1;
     bool seal_boss_fogs = false;   // SealBossFogsDuringInvasions: the boss fogs stay shut while an invader is here
     // Enemy health, damage, posture, boss health, damage, posture scaling (percent per extra player): the host's
     // go to its guests (world::set_host_scaling).
@@ -92,7 +95,10 @@ void tick();
 // Requests (items, hotkeys). Each does nothing (and says why in the log) when it does not apply.
 void host();         // Blessed Eye Orb
 void join();         // Crystal Eye Orb
-void invade();       // Chaos Eye Orb
+void invade();       // Chaos Eye Orb; while hosting (1.6.0), the whole party invades together (again: calls it off)
+// The Chaos Eye Orb can lead our party into another world now: we host, and no invader is in our world (1.6.0). Why
+// not when it cannot go is said on use (a guest of an older version, a boss fight, a teammate down, ...).
+bool group_invade_open();
 void leave();        // Abyssal Eye Orb
 void close_world();  // the host's Black Separation Crystal: every other player goes home, the session ends
 void cycle_rules();  // Ominous Tome: none -> allies hostile -> teams -> none

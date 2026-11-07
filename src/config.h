@@ -20,6 +20,9 @@ struct CoopConfig {
     // Host: after an invasion of the world ends, no other invader comes in for this long (InvasionCooldown, in minutes
     // in the INI: 0 to 10).
     int invasion_cooldown_s = 180;
+    // 1.6.0, host: the world takes at most its co-op players (the host and the guests) plus this many invaders at once
+    // (ExtraInvaders; 1 at the least, so never fewer than N + 1).
+    int extra_invaders = 1;
     // Host: while an invader is in the world, the boss fogs stay shut for the host and the guests (off by default:
     // vanilla shuts them only for covenant invaders, see world.cpp).
     bool seal_boss_fogs = false;

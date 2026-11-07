@@ -139,9 +139,10 @@ int can_use(int32_t id) {
     const bool invader = session::invader();
     const bool invader_present = rules::state().invader_present;
     switch (id) {
+        case items::kInvade:  // 1.6.0: also while hosting, with no invader in the world (the party invades together)
+            return (!in_session || session::group_invade_open()) && area_allows(id) ? 1 : 0;
         case items::kHost:
         case items::kJoin:
-        case items::kInvade:
         case items::kParchment:
             return !in_session && area_allows(id) ? 1 : 0;
         case items::kLeave:  // an invader goes home with it too; the others not while an invader is in the world
@@ -492,6 +493,7 @@ void coop_install(const CoopConfig& config) {
     cfg.allow_invaders = g_cfg.allow_invaders;
     cfg.invasion_rewards = g_cfg.invasion_rewards;
     cfg.invasion_cooldown_s = g_cfg.invasion_cooldown_s;
+    cfg.extra_invaders = g_cfg.extra_invaders;
     cfg.seal_boss_fogs = g_cfg.seal_boss_fogs;
     cfg.death_debuffs = g_cfg.death_debuffs;
     cfg.bloody_mary = g_cfg.bloody_mary;
@@ -520,6 +522,11 @@ void coop_install(const CoopConfig& config) {
                  "(InvasionCooldown)", g_cfg.invasion_cooldown_s / 60, g_cfg.invasion_cooldown_s % 60);
     } else {
         LOG_INFO("[coop] Invasion cooldown: off (InvasionCooldown)");
+    }
+    if (g_cfg.allow_invaders) {
+        const int extra = std::max(1, std::min(coop::session::kMaxSessionPlayers, g_cfg.extra_invaders));
+        LOG_INFO("[coop] Invaders at once: as many as this world's co-op players (the host and the guests) plus %d "
+                 "(ExtraInvaders%s)", extra, extra != g_cfg.extra_invaders ? ", raised to the least" : "");
     }
     LOG_INFO("[coop] Boss fogs while an invader is in this world: %s (SealBossFogsDuringInvasions)",
              g_cfg.seal_boss_fogs ? "shut for the host and the guests" : "open, as in vanilla");

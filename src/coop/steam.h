@@ -54,6 +54,9 @@ void on_lobby_member(std::function<void(uint64_t lobby, uint64_t user, bool ente
 bool send(uint64_t to, const void* data, uint32_t size, bool reliable);
 void poll(const std::function<void(uint64_t from, const uint8_t* data, uint32_t size)>& fn);
 void accept(uint64_t peer);  // let `peer` open a P2P session with us
+// Asked for a session request from a player not accepted yet: true lets them in at once (a lobby member whose entry
+// Steam has not told us of yet).
+void set_accept_check(std::function<bool(uint64_t peer)> fn);
 void close(uint64_t peer);
 void on_p2p_failed(std::function<void(uint64_t peer, int error)> fn);
 

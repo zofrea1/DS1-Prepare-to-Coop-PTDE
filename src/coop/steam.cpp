@@ -54,6 +54,7 @@ std::set<uint64_t> g_tagged;
 std::function<void(uint64_t, uint64_t, bool)> g_member_fn;
 std::function<void(uint64_t, int)> g_fail_fn;
 std::set<uint64_t> g_accepted;
+std::function<bool(uint64_t)> g_accept_check;
 
 // ------------------------------------------------------------------ callbacks
 template <typename T>
@@ -124,8 +125,18 @@ void register_callbacks() {
     });
     g_cb_p2p_request = new Callback<P2PSessionRequest_t>([](const P2PSessionRequest_t& r) {
         const uint64_t peer = r.m_steamIDRemote.ConvertToUint64();
-        if (g_accepted.count(peer) && g_net) {
+        if (!g_net) return;
+        static int lines = 0;
+        // A request can come before Steam's word that its player entered our lobby: a lobby member is let in now,
+        // not when Steam asks again 3.4 s later.
+        if (!g_accepted.count(peer) && g_accept_check && g_accept_check(peer)) {
+            g_accepted.insert(peer);
+            if (++lines <= 40) LOG_INFO("[coop] Steam: %s's session accepted (in our lobby)", persona(peer).c_str());
+        }
+        if (g_accepted.count(peer)) {
             g_net->AcceptP2PSessionWithUser(CSteamID(peer));
+        } else if (++lines <= 40) {
+            LOG_INFO("[coop] Steam: a session request from %s not accepted yet (not in our lobby)", persona(peer).c_str());
         }
     });
     g_cb_p2p_fail = new Callback<P2PSessionConnectFail_t>([](const P2PSessionConnectFail_t& f) {
@@ -370,6 +381,7 @@ int reconnects() { return g_reconnects; }
 
 void on_lobby_member(std::function<void(uint64_t, uint64_t, bool)> fn) { g_member_fn = std::move(fn); }
 void on_p2p_failed(std::function<void(uint64_t, int)> fn) { g_fail_fn = std::move(fn); }
+void set_accept_check(std::function<bool(uint64_t)> fn) { g_accept_check = std::move(fn); }
 
 bool send(uint64_t to, const void* data, uint32_t size, bool reliable) {
     if (!g_net || !to) return false;

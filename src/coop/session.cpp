@@ -500,7 +500,7 @@ struct GroupGoMsg {
     uint64_t lobby;  // the world the group invades (its host holds a place for each of `ids`)
     uint8_t count;
     uint64_t ids[kGroupMax];
-    uint64_t host;   // that world's host: each of the group opens the link to them at once (open_link)
+    uint64_t host;   // that world's host: each of the group accepts their session at once (steam::accept)
 };
 struct GroupBackMsg {
     Header h;
@@ -687,6 +687,7 @@ bool g_last_busy = false;  // the host's last answer was "busy"
 // over for InvasionCooldown), for the line shown when none could (finish_search).
 struct Refusals {
     int cooldown = 0, boss = 0, full = 0, busy = 0, refused = 0;
+    int quiet = 0;  // a group's ask that had no answer in kGroupAskWait (not "loading or fallen": they never said)
     double open_at = 0;  // the soonest a world on cooldown takes invaders again (now())
 };
 Refusals g_refusals;
@@ -965,7 +966,10 @@ constexpr double kGroupHoldFor = 45.0;
 // again with the others. Longer than the hold: a slow load still knocks, and gets in if the world has room by then.
 constexpr double kGroupLeaveFor = 120.0;
 // The group's host waits this long for a world's lobby and its answer before asking the next.
-constexpr double kGroupAskWait = 2.0;  // (a lobby join and its answer take a fraction of a second; was 8 s)
+// An answer takes a fraction of a second, but a first packet Steam did not let through at once comes 3.4 s later
+// (a session request that came before the asked host accepted us; joins show it too, 2026-11-07): 2 s missed every
+// ask that came that way, and the asker's leave then closed the link before it came. Was 8 s, then 2 s.
+constexpr double kGroupAskWait = 4.0;
 // Home and standing this long before a group's player knocks or comes back (a quarter of what they were, 1.6.0).
 constexpr double kGroupLeadKnockAfter = 0.15;
 constexpr double kGroupKnockAfter = 0.4;
@@ -1250,22 +1254,6 @@ void fill_header(T* m, MsgType t) {
 template <typename T>
 bool send_to(uint64_t to, T& msg, bool reliable = true) {
     return steam::send(to, &msg, sizeof(msg), reliable);
-}
-
-// Opens the peer-to-peer link to a player before anything needs it (1.6.0): a no-op (kPong with no ping number, which
-// every version's handler drops). Steam lets a player's first packet through only once the receiver accepts their
-// session, and a request that came before we accepted it (the joiner's hello can beat Steam's word that they entered our
-// lobby) waits for Steam to ask again: a group's second invader's knock reached the host 3.3 s after they entered its
-// lobby, the first's (whose link was open from its ask) 12 ms after (2026-11-07 14:39). Sending to them accepts their
-// request at once and starts our side of the link.
-void open_link(uint64_t to) {
-    if (!to || to == steam::self()) return;
-    Simple m{};
-    m.h.magic = kMagic;
-    m.h.type = kPong;
-    m.value = 0;
-    steam::accept(to);
-    steam::send(to, &m, sizeof(m), true);
 }
 
 bool is_lost(uint64_t id) { return std::find(g_lost.begin(), g_lost.end(), id) != g_lost.end(); }
@@ -4846,6 +4834,7 @@ std::wstring group_none_line() {
     add(r.boss, L"in a boss fight");
     add(r.full, solo ? L"full" : L"without room for you all");
     add(r.busy, L"loading or fallen");
+    add(r.quiet, L"not answering");
     add(r.refused, L"closed to invaders");
     add(g_group.older, L"on an older version");
     if (parts.empty()) return solo ? kMsgGroupNoneSolo : kMsgGroupNone;
@@ -5119,9 +5108,11 @@ void group_on_ask(uint64_t from, const GroupAskMsg& m) {
         for (int i = 0; i < count; ++i) {
             if (!m.ids[i]) continue;
             hold.ids.push_back(m.ids[i]);
-            // The link to each of them is opened now, while they are on their way (open_link): their knock comes
-            // straight through. They open theirs to us when their host's kGroupGo names us.
-            if (m.ids[i] != from) open_link(m.ids[i]);
+            // Each of them is accepted now, while they are on their way: a knock whose session request comes before
+            // Steam says they entered our lobby is let through at once, not 3.4 s later. Accepted only, nothing sent:
+            // with bbc197f's no-op sent to them as well (here and at every lobby entry), every ask of the 2026-11-07
+            // 15:58-18:03 tests went unanswered and Steam's link to the asked host timed out.
+            steam::accept(m.ids[i]);
         }
         g_group_holds.push_back(hold);
     }
@@ -5148,9 +5139,8 @@ void group_on_go(uint64_t from, const GroupGoMsg& m) {
              static_cast<unsigned long long>(m.lobby), m.host ? steam::persona(m.host).c_str() : "?",
              group_names().c_str());
     guest_go_home(kMsgGroupGoMember, "our host's group invades another world");
-    // The link to that world's host opens on our way home (open_link; the host opened its side at the ask), so our
-    // knock does not wait for Steam to set it up.
-    if (m.host) open_link(m.host);
+    // That world's host is accepted on our way home (it accepted us at the ask), for anything of theirs that comes first.
+    if (m.host) steam::accept(m.host);
 }
 
 // The group's host: our knock did not get us there; the others stop theirs.
@@ -5257,7 +5247,7 @@ void group_tick() {
             if (g_group.ask_pending && now() - g_group.asked_at > kGroupAskWait) {
                 LOG_INFO("[coop] Group invasion: no answer from %s within %.0f s; the next world",
                          g_group.asking_host ? steam::persona(g_group.asking_host).c_str() : "a world", kGroupAskWait);
-                note_refusal_to(g_group.refusals, kBusy, 0);
+                ++g_group.refusals.quiet;
                 ++g_group.gen;  // a late lobby join is stale
                 group_ask_next();
             }
@@ -5423,9 +5413,8 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
     if (g_role == Role::Host && h.type != kHello && h.type != kBye && h.type != kPing && h.type != kGroupAsk &&
         h.type != kGroupAnswer && h.type != kGroupHere && !admitted(from)) {
         static int lines = 0;
-        // a joiner's status, gait and animations are sent before the answer comes, and a group's player opens its
-        // link early with a no-op (open_link)
-        if (h.type != kInfo && h.type != kGait && h.type != kAnim && h.type != kPong && ++lines <= 50) {
+        // a joiner's status, gait and animations are sent before the answer comes
+        if (h.type != kInfo && h.type != kGait && h.type != kAnim && ++lines <= 50) {
             LOG_INFO("[coop] Message %u from %s ignored: they were not let into the session", h.type,
                      steam::persona(from).c_str());
         }
@@ -7082,7 +7071,7 @@ void set_callbacks() {
     steam::on_lobby_member([](uint64_t lobby, uint64_t user, bool entered) {
         if (lobby != g_lobby) return;
         if (entered) {
-            open_link(user);  // accepts them, and a session request of theirs that came before this
+            steam::accept(user);  // nothing sent: see group_on_ask
             if (g_role == Role::Host) LOG_INFO("[coop] %s entered the lobby", steam::persona(user).c_str());
             return;
         }
@@ -7107,13 +7096,22 @@ void set_callbacks() {
                           g_peers.end());
             set_admitted(user, false);
             g_p2p_failed.erase(user);
-            // A dropped player stays marked: woken from sleep, they still talk to us as if in the session.
-            if (is_lost(user)) {
+            // A dropped player stays marked: woken from sleep, they still talk to us as if in the session. A group's
+            // player whose place we hold (its host, done asking) comes back to knock: their session stays accepted.
+            if (is_lost(user) || holds_place(user)) {
                 steam::accept(user);
             } else {
                 steam::close(user);
             }
         }
+    });
+    // A session request from a member of our lobby (or a group's player whose place we hold) is let in when it comes,
+    // also before Steam's word that they entered (on_lobby_member, which accepts them too).
+    steam::set_accept_check([](uint64_t peer) {
+        if (g_role == Role::Host && holds_place(peer)) return true;
+        if (!g_lobby) return false;
+        const std::vector<uint64_t> members = steam::lobby_members(g_lobby);
+        return std::find(members.begin(), members.end(), peer) != members.end();
     });
     steam::on_p2p_failed([](uint64_t peer_id, int error) {
         LOG_INFO("[coop] P2P with %016llx failed (%d)", static_cast<unsigned long long>(peer_id), error);

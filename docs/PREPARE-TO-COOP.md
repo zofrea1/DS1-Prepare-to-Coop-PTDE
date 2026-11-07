@@ -585,12 +585,18 @@ leaving a session died at the 10th second; the group's host got in only because 
 every join (`guest_on_welcome`) and every session we create (`host_ensure_game_session`), with its leftover logged. A
 join the game still ends at home while its leave is going (state 7) waits up to 2.5 s for the leave to end and knocks
 again once (`retry_join` needs state 0). Joins are not made to wait for one another (a one-at-a-time rule was tried and
-left out, the user's choice). The world that holds a group's places opens the peer-to-peer link to each of them at the
-ask, and each of them to that world's host at `kGroupGo` (which names it), with a no-op (`open_link`: kPong without a ping
-number, which every version drops): Steam lets a player's first packet through only once the receiver accepts their
+left out, the user's choice). Steam lets a player's first packet through only once the receiver accepts their
 session, and a request that came before the host accepted it (before Steam said they had entered its lobby) waited for
-Steam to ask again (the second invader's knock arrived 3.3 s after they entered the lobby, the first's 12 ms after). A host
-opens the link the same way to anyone who enters its lobby. There they are invaders like any
+Steam to ask again, 3.4 s later (the second invader's knock arrived 3.3 s after they entered the lobby, the first's 12 ms
+after). The world that holds a group's places accepts each of them at the ask, keeps its group's host accepted when it
+leaves the lobby after asking, and each of the group accepts that world's host at `kGroupGo` (which names it); and every
+game accepts a session request from a member of its lobby when it comes (`steam::set_accept_check`), not only once Steam
+says they entered it. Accepted only, nothing sent: bbc197f also sent each of them a no-op the moment they entered the
+lobby or were named at an ask (`open_link`), and with that every ask of the 2026-11-07 15:58-18:03 tests (five, three
+hosts) went unanswered and Steam's link to the asked host timed out (error 4), most likely the two first packets crossing:
+the ask waited past the 2 s the asker gives a world (now 4 s, `kGroupAskWait`, longer than Steam's second try), whose leave then
+closed the link. Joins showed the same 3.4 s more often with it. A world that does not answer is reported as "not
+answering", not "loading or fallen". There they are invaders like any
 others, one team with an outcome for all (1.3.0). A knock of the host's that does not get it there (refused, the join
 fell through, or not home and standing to knock within 120 s, `kGroupLeaveFor`; the same for a guest) sends message 49,
 `kGroupOff`: a guest not let in yet stops knocking (one already let in

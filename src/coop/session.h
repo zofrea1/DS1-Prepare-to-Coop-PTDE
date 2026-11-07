@@ -126,6 +126,8 @@ struct SummonSign {
     int map = -1;       // area << 24 | block << 16
     float pos[3] = {};
     float angle = 0;
+    int floor_map = -1;  // the floor its owner stood on (rules::floor_by_id), -1 not known
+    int floor_index = -1;
 };
 // The other co-op players' signs (not ours).
 std::vector<SummonSign> summon_signs();

@@ -111,9 +111,17 @@ constexpr double kBoxEvery = 0.25;  // the prompt's distances are brought up to 
 // (a new slot starts its effect, 0xDF89A0; 6060's slot 1 stays emptied while its event 120 runs on): the player rises
 // inside the rings and the warp takes them there. The others give our character the same (session.cpp, kRelease with
 // anim 1) until our arrival is shown on it.
+// The 2026-11-06 21:20 test showed no rings: asked for from our own frame tick, outside the character's update, the
+// slot never got its effect (the asks of a slot belong to the character's TAE step, where the game's own are made and
+// looked at). They are now asked for in that step: the TAE executor's case for event 120 (the call at 0xE63236, once a
+// frame for each event 120 the character's animation has running; 6060's runs from 0.0 to 2.8 s, through its rise)
+// calls the game's handler for the animation's own event, then ours for a character the rings are wanted on.
 constexpr uint32_t kTaeChrTypeFx = 0x00E61580;  // eax = the TAE's executor (+8 the character), ecx = the event
+constexpr uint32_t kTae120CallSite = 0x00E63236;
 constexpr int32_t kRingSlot = 61;
 const int32_t kRingValues[6] = {151, 160, 165, 167, 200, kRingSlot};
+constexpr uint32_t kChrFxSlots = 0x2B8;  // the character's effect slots: a list, +4 id, +6 flags (0x3FFF kind, 0x4000
+                                         // in use, 0x8000 asked for), +8 next, +0x10 the effect made, +0x14 wanted
 
 // The class's starting soul level and attributes (CharaInitParam 3000-3009: soulLv, baseVit, baseWil, baseEnd,
 // baseStr, baseDex, baseDurability, baseMag, baseFai), in the menu's order.
@@ -142,10 +150,14 @@ constexpr double kGoDelay = 1.2;     // before the player goes, when the crouch 
 // our character in the others' games (motion kHold). It is still the item's use, an ordinary animation: hits land
 // (and close the view), and the game takes no roll and no weapon or item switch during it. B or Esc, a hit or any
 // other close lets it go, here and there, and the ring plays on: the player rises with its light. The choice does the
-// same, and the warp comes once the player is up (kRiseWarp). The 2026-11-06 test held the crouch with event
+// same, and the warp comes as the player is up (kRiseWarp). The 2026-11-06 test held the crouch with event
 // animation 6066 instead, which is no crouch (the character lay on their back, twitching), took no hits, rolled out at
 // once (an event animation can be cancelled), and showed no action prompt.
-constexpr double kRiseWarp = 1.5;    // 6060 lets the player act again 1.27 s after the use, its light still on
+// 6060 lets the player act again 1.27 s after the use. The warp came at 1.5 s until the 2026-11-06 21:20 test, and in
+// between the player stood free and their weapons switched ("just moments after the player gets out of the crouch",
+// the user, who asked for the warp right as the stand-up ends): it now comes at 1.2 s, before the player is free, and
+// the D-pad and the arrow keys stay hidden from the game until the warp.
+constexpr double kRiseWarp = 1.2;
 constexpr double kViewLimit = 120.0;
 constexpr double kPosFresh = 4.0;    // a teammate's reported position is used up to this old
 constexpr uint16_t kPadB = 0x2000;   // XINPUT_GAMEPAD_B
@@ -191,6 +203,7 @@ constexpr double kJoinRiseWait = 1.5;   // the arrival starts by itself once we 
 bool g_join_arrival = false;            // the arrival playing is a join's (the game's rise may still come over it)
 double g_box_at = 0;                     // the view's prompt was last drawn (0: draw it now)
 bool g_rings_on = false;                 // the ring's rings are asked for on our character (the choice to the warp)
+bool g_rings_logged = false;             // our effect slots were logged on this way up
 std::mt19937 g_rng(static_cast<uint32_t>(GetTickCount64()));
 // DeathKnellSoulLevel (1.5.0, default off): going to a teammate takes a soul level (the bell's first price) instead of
 // their souls and humanity.
@@ -743,9 +756,8 @@ int play_arrival(const char* why) {
 }
 
 // ---------------------------------------------------------------- the ring's rings
-// For this frame (kRingValues): TAE event 120 as the TAE executor hands it to its handler.
-void ask_rings(uint32_t chr) {
-    if (!chr) return;
+// For this frame (kRingValues): TAE event 120 as the TAE executor hands it to its handler (`executor` +8 the character).
+void ask_rings_from(uint32_t executor) {
     struct Event {
         uint32_t type;
         const int32_t* values;
@@ -754,20 +766,122 @@ void ask_rings(uint32_t chr) {
         uint8_t pad[15];
     };
     Event ev{120, kRingValues, {0, 0}, 0, {}};
-    uint32_t executor[4] = {0, 0, chr, 0};
     void* e = &ev;
-    void* x = executor;
     __try {
         __asm {
-            mov eax, x
+            mov eax, executor
             mov ecx, e
             mov edx, kTaeChrTypeFx
             call edx
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static int lines = 0;
-        if (++lines <= 5) LOG_ERROR("[coop] Death Knell: the ring's rings failed on %08X", chr);
+        if (++lines <= 5) LOG_ERROR("[coop] Death Knell: the ring's rings failed (executor %08X)", executor);
     }
+}
+
+// The characters the rings are wanted on, each until when (ours while we go; the others' while they go, session.cpp).
+struct RingTarget {
+    uint32_t chr = 0;
+    double until = 0;
+};
+RingTarget g_ring_targets[8];
+volatile LONG g_ring_count = 0;  // targets with time left: the hook's quick test
+bool g_ring_hook = false;        // the TAE hook is in (else the rings are asked for from the frame tick, as before)
+uint32_t g_ring_asked_chr = 0;   // the last character the hook asked them on (for the log)
+
+void want_rings(uint32_t chr, double seconds) {
+    if (!chr) return;
+    const double t = now();
+    RingTarget* slot = nullptr;
+    for (RingTarget& r : g_ring_targets) {
+        if (r.chr == chr) slot = &r;
+    }
+    for (RingTarget& r : g_ring_targets) {
+        if (!slot && r.until <= t) slot = &r;
+    }
+    if (!slot) return;
+    slot->chr = chr;
+    slot->until = t + seconds;
+    InterlockedExchange(&g_ring_count, 1);
+}
+
+void rings_upkeep() {
+    const double t = now();
+    LONG n = 0;
+    for (const RingTarget& r : g_ring_targets) n += r.until > t ? 1 : 0;
+    InterlockedExchange(&g_ring_count, n);
+}
+
+void __stdcall tae_rings(uint32_t executor) {
+    uint32_t chr = 0;
+    if (!read32(executor + 8, &chr) || !chr) return;
+    const double t = now();
+    for (const RingTarget& r : g_ring_targets) {
+        if (r.chr != chr || r.until <= t) continue;
+        ask_rings_from(executor);
+        g_ring_asked_chr = chr;
+        return;
+    }
+}
+
+// The call of the game's event-120 handler in the TAE executor (eax = the executor, ecx = the event): the animation's
+// own event first, then the rings when they are wanted on this character.
+__declspec(naked) void hk_tae_120() {
+    __asm {
+        push eax
+        mov edx, kTaeChrTypeFx
+        call edx
+        pop eax
+        cmp g_ring_count, 0
+        je tae_done
+        push eax
+        call tae_rings
+    tae_done:
+        ret
+    }
+}
+
+bool patch_tae_120() {
+    static const uint8_t expect[5] = {0xE8, 0x45, 0xE3, 0xFF, 0xFF};  // call 0xE61580
+    uint8_t code[5];
+    code[0] = 0xE8;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_tae_120) - (kTae120CallSite + 5));
+    std::memcpy(code + 1, &rel, 4);
+    return patch(kTae120CallSite, expect, code, sizeof(code));
+}
+
+// Without the hook: from the frame tick (a fake executor).
+void ask_rings(uint32_t chr) {
+    if (!chr) return;
+    uint32_t executor[4] = {0, 0, chr, 0};
+    ask_rings_from(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(executor)));
+}
+
+// The character's effect slots of the kind the TAE effects use (3), for the log: id, flags, the effect made, wanted.
+void log_fx_slots(uint32_t chr, const char* when) {
+    static int lines = 0;
+    if (!chr || ++lines > 24) return;
+    std::string out;
+    uint32_t node = 0;
+    read32(chr + kChrFxSlots, &node);
+    for (int k = 0; node && k < 32; ++k) {
+        uint32_t idflags = 0, made = 0, wanted = 0, next = 0;
+        if (!read32(node + 4, &idflags) || !read32(node + 8, &next)) break;
+        read32(node + 0x10, &made);
+        read32(node + 0x14, &wanted);
+        const int id = static_cast<int16_t>(idflags & 0xFFFF);
+        const unsigned flags = idflags >> 16;
+        if ((flags & 0x3FFF) == 3) {
+            char one[80];
+            std::snprintf(one, sizeof(one), " [%d %04X made %d wanted %d]", id, flags, static_cast<int>(made),
+                          static_cast<int>(wanted));
+            out += one;
+        }
+        node = next;
+    }
+    LOG_INFO("[coop] Death Knell: our effect slots %s:%s (the rings' is %d)", when, out.empty() ? " none" : out.c_str(),
+             kRingSlot);
 }
 
 // ---------------------------------------------------------------- the ring's crouch
@@ -1153,10 +1267,16 @@ void show_target(const Choice& c) {
     const uint32_t chr = !c.sign && c.mate->chr && remote_character(c.mate->chr) ? c.mate->chr : 0;
     g_shown_chr = chr;
     spectate::knell_view(chr);
-    session::set_knell_sign(c.sign ? c.id : 0);  // the sign shown glows gold
-    g_box_at = 0;                                // the prompt is drawn anew on this frame (view_tick)
+    // A summon sign: the camera turns around it (spectate.cpp), and it glows gold.
+    if (c.sign) {
+        spectate::knell_point(c.at.pos, c.map, c.at.floor_map, c.at.floor_index);
+    } else {
+        spectate::knell_point(nullptr, -1, -1, -1);
+    }
+    session::set_knell_sign(c.sign ? c.id : 0);
+    g_box_at = 0;  // the prompt is drawn anew on this frame (view_tick)
     LOG_INFO("[coop] Death Knell: viewing %s%s", narrow(label(c)).c_str(),
-             chr ? "" : c.sign ? " (a summon sign: the camera stays; it glows gold)" : " (not in our world: no camera)");
+             chr ? "" : c.sign ? " (a summon sign: the camera goes to it; it glows gold)" : " (not in our world: no camera)");
 }
 
 void close_view(const char* why) {
@@ -1166,6 +1286,7 @@ void close_view(const char* why) {
     hide_box();
     session::set_knell_sign(0);
     spectate::knell_view(0);
+    spectate::knell_point(nullptr, -1, -1, -1);
     g_shown_chr = 0;
     InterlockedExchange(&g_mask_dpad, 0);
     if (g_state == State::View || g_state == State::Opening) g_state = State::Idle;
@@ -1267,6 +1388,7 @@ void view_tick() {
         spectate::knell_view(chr);
         g_box_at = 0;
     }
+    if (shown.sign) spectate::knell_point(shown.at.pos, shown.map, shown.at.floor_map, shown.at.floor_index);  // moved?
     if (g_box_at == 0 || now() - g_box_at >= kBoxEvery) show_box(shown, at, static_cast<int>(can.size()));
     if (const char* how = confirm_pressed()) {
         LOG_INFO("[coop] Death Knell: chosen (%s)", how);
@@ -1275,14 +1397,15 @@ void view_tick() {
 }
 
 // On our way (the choice): the ring plays on from its crouch (the player rises with its light), inside the ring's rings
-// here and in the others' games, and the warp comes once they are up. The prompt goes; the sign shown stays gold.
+// here and in the others' games, and the warp comes as they are up. The prompt goes; the sign shown stays gold, the
+// camera stays where it is, and the D-pad and the arrows stay hidden from the game until the warp (close_view).
 void set_going(const char* what) {
-    InterlockedExchange(&g_mask_dpad, 0);
     hide_box();
     g_state = State::Going;
     const bool rise = g_hold_on;
     release_hold("chosen: the ring plays out", true);
     g_rings_on = true;
+    g_rings_logged = false;
     g_at = now() + (rise ? kRiseWarp : kGoDelay);
     LOG_INFO("[coop] Death Knell: going to %s (the warp in %.1f s, inside the ring's rings)", what, g_at - now());
 }
@@ -1412,6 +1535,12 @@ bool warp_to_point(const float* p, float angle) {
     if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) return false;
     const uint32_t floor = rules::floor_at(p);
     if (!floor) return false;
+    // A map loaded only because the view showed the sign there: the load takes us, as for a far teammate.
+    if (rules::view_only_hit(floor)) {
+        LOG_INFO("[coop] Death Knell: %s's summon sign is in a map loaded only for the view: going by a load",
+                 narrow(g_dest.name).c_str());
+        return false;
+    }
     if (!rules::floor_ready(floor)) {
         LOG_INFO("[coop] Death Knell: the floor under %s's summon sign is not loaded here: going by a load",
                  narrow(g_dest.name).c_str());
@@ -1464,6 +1593,10 @@ void go_to_sign() {
 }
 
 void going_tick() {
+    if (!g_rings_logged && now() >= g_at - 0.8) {
+        g_rings_logged = true;
+        log_fx_slots(game::player(), "on the way up");
+    }
     if (now() < g_at) return;
     if (const char* why = refusal()) {
         say(text::widen(why));
@@ -1682,6 +1815,13 @@ bool install() {
     const int devices = patch_dinput_devices();
     LOG_INFO("[coop] Death Knell: the arrow keys hidden from the game while its view is open (USER32 %s/%s, DirectInput "
              "%d device table(s))", async ? "yes" : "no", state ? "yes" : "no", devices);
+    g_ring_hook = patch_tae_120();
+    if (g_ring_hook) {
+        LOG_INFO("[coop] Death Knell: the ring's rings are asked for in the characters' TAE step (event 120)");
+    } else {
+        LOG_ERROR("[coop] Death Knell: the TAE's event 120 call did not match this build (the rings are asked for "
+                  "from the frame tick)");
+    }
     if (patch_chr_type_fx()) {
         LOG_INFO("[coop] Summon arrivals: the white arrival glows on every character (human ones too)");
     } else {
@@ -1782,10 +1922,23 @@ void tick() {
     hold_tick();
     // The ring's rings from the choice to the warp (or to a load that takes us there).
     if (g_rings_on && (g_state != State::Going || game::loading() || !game::player())) g_rings_on = false;
-    if (g_rings_on) ask_rings(game::player());
+    if (g_rings_on) {
+        if (g_ring_hook) {
+            want_rings(game::player(), 0.25);
+        } else {
+            ask_rings(game::player());
+        }
+    }
+    rings_upkeep();
 }
 
-void rings(uint32_t chr) { ask_rings(chr); }
+void rings(uint32_t chr) {
+    if (g_ring_hook) {
+        want_rings(chr, 0.25);
+    } else {
+        ask_rings(chr);
+    }
+}
 
 bool viewing() { return g_state == State::View; }
 

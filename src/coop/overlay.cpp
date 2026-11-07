@@ -61,21 +61,43 @@ void* patch_slot(void* object, int slot, void* replacement) {
     return original;
 }
 
+HFONT make_font(int px) {
+    return CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+}
+
 // Renders the lines with GDI and uploads them as text on a translucent dark box (white; a notice's first line gold).
-void rebuild(IDirect3DDevice9* dev, Box& box, const std::vector<std::wstring>& lines, int screen_h) {
+// The text is sized by the height a 16:9 picture as wide as the screen would have (no more than the screen's), and
+// made smaller until the box fits the screen's width: sized by the height alone, on a portrait screen (2160 x 3840,
+// FixAspect) the Death Knell's prompt was some 2900 pixels wide and was not seen at all (2026-11-06).
+void rebuild(IDirect3DDevice9* dev, Box& box, const std::vector<std::wstring>& lines, int screen_w, int screen_h) {
     box.visible = !lines.empty();
     if (!box.visible) return;
-    const int px = std::max(box.notice ? 16 : 14, screen_h / (box.notice ? 38 : 54));
+    const int ref = std::min(screen_h, screen_w * 9 / 16);
+    const int min_px = 12;
+    int px = std::max(box.notice ? 16 : 14, ref / (box.notice ? 38 : 54));
     HDC dc = CreateCompatibleDC(nullptr);
-    HFONT font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    HGDIOBJ old_font = SelectObject(dc, font);
-    int w = 0, line_h = px + px / 4;
-    for (const auto& l : lines) {
-        SIZE sz{};
-        GetTextExtentPoint32W(dc, l.c_str(), static_cast<int>(l.size()), &sz);
-        w = std::max<int>(w, sz.cx);
+    HFONT font = nullptr;
+    HGDIOBJ old_font = nullptr;
+    int w = 0;
+    for (int pass = 0; pass < 4; ++pass) {
+        HFONT f = make_font(px);
+        HGDIOBJ was = SelectObject(dc, f);
+        if (!old_font) old_font = was;
+        if (font) DeleteObject(font);
+        font = f;
+        w = 0;
+        for (const auto& l : lines) {
+            SIZE sz{};
+            GetTextExtentPoint32W(dc, l.c_str(), static_cast<int>(l.size()), &sz);
+            w = std::max<int>(w, sz.cx);
+        }
+        const int pad_now = box.notice ? px : px / 2;
+        const int room = screen_w * 94 / 100 - 2 * pad_now;
+        if (w <= room || px <= min_px || w <= 0) break;
+        px = std::max(min_px, px * room / w);
     }
+    const int line_h = px + px / 4;
     const int pad = box.notice ? px : px / 2;
     box.text_w = w + 2 * pad;
     box.text_h = static_cast<int>(lines.size()) * line_h + 2 * pad;
@@ -161,16 +183,38 @@ void place(const Box& box, const D3DVIEWPORT9& vp, float* x0, float* y0) {
     }
 }
 
+// The box's quad is cut to the screen (with its texture coordinates): a screen-space quad reaching past the screen's
+// edge may not be drawn at all.
 void draw_box(IDirect3DDevice9* dev, const Box& box, const D3DVIEWPORT9& vp) {
     if (!box.visible || !box.tex) return;
     float x0 = 0, y0 = 0;
     place(box, vp, &x0, &y0);
-    const float x1 = x0 + box.text_w, y1 = y0 + box.text_h;
-    const float u1 = static_cast<float>(box.text_w) / box.tex_w, v1 = static_cast<float>(box.text_h) / box.tex_h;
+    float x1 = x0 + box.text_w, y1 = y0 + box.text_h;
+    const float tw = static_cast<float>(box.tex_w), th = static_cast<float>(box.tex_h);
+    float u0 = 0, v0 = 0, u1 = box.text_w / tw, v1 = box.text_h / th;
+    const float left = static_cast<float>(vp.X), top = static_cast<float>(vp.Y);
+    const float right = left + vp.Width, bottom = top + vp.Height;
+    if (x0 < left) {
+        u0 += (left - x0) / tw;
+        x0 = left;
+    }
+    if (y0 < top) {
+        v0 += (top - y0) / th;
+        y0 = top;
+    }
+    if (x1 > right) {
+        u1 -= (x1 - right) / tw;
+        x1 = right;
+    }
+    if (y1 > bottom) {
+        v1 -= (y1 - bottom) / th;
+        y1 = bottom;
+    }
+    if (x1 <= x0 || y1 <= y0) return;
     const Vertex quad[4] = {
-        {x0 - 0.5f, y0 - 0.5f, 0, 1, 0, 0},
-        {x1 - 0.5f, y0 - 0.5f, 0, 1, u1, 0},
-        {x0 - 0.5f, y1 - 0.5f, 0, 1, 0, v1},
+        {x0 - 0.5f, y0 - 0.5f, 0, 1, u0, v0},
+        {x1 - 0.5f, y0 - 0.5f, 0, 1, u1, v0},
+        {x0 - 0.5f, y1 - 0.5f, 0, 1, u0, v1},
         {x1 - 0.5f, y1 - 0.5f, 0, 1, u1, v1},
     };
     dev->SetTexture(0, box.tex);
@@ -211,7 +255,7 @@ void draw(IDirect3DDevice9* dev) {
         for (Box* box : {&g_panel, &g_notice_box, &g_prompt_box}) {
             if (box->dirty) {
                 box->dirty = false;
-                rebuild(dev, *box, box->lines, static_cast<int>(vp.Height));
+                rebuild(dev, *box, box->lines, static_cast<int>(vp.Width), static_cast<int>(vp.Height));
                 if (box == &g_notice_box) g_notice_told = false;
             }
         }

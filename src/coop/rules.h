@@ -143,6 +143,8 @@ void arm_trip_reload();
 // characters), besides what ours keeps. Null when done, else why not (no floor, its block not loaded here).
 // `streamed`: the floor added to what is streamed (a collision that does not leaves it to ours).
 const char* draw_from(uint32_t chr, bool stream = false, bool* streamed = nullptr);
+// The same from a floor collision (HitIns) of a block in use here: the Death Knell's view on a summon sign.
+const char* draw_from_hit(uint32_t hit, bool stream = false, bool* streamed = nullptr);
 // Spectating: `map` (a teammate's, as they report it) is kept loaded while this is called every frame, as a floor
 // under them connecting to it would: its block is wanted on every WorldRes update. -1 lets it go (so does a second
 // without a call). The block's state (7 in use), -1 when this world cannot load that map.
@@ -150,6 +152,8 @@ int view_map(int map);
 // The character stands on a floor of a block the view loaded for itself (not in use before it asked), as long as that
 // block stays loaded and we have not come into it ourselves.
 bool view_only_floor(uint32_t chr);
+// The same for a floor collision: a summon sign's.
+bool view_only_hit(uint32_t hit);
 // The view's own blocks forgotten (the session ended, or the trip home began: the loads that follow are ours).
 void view_loaded_clear();
 // A collision (HitIns) loaded enough to stand on, as the game asks of the floor after a load (0xDE3000).

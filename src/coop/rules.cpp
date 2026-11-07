@@ -4381,8 +4381,12 @@ bool map_in_use(int map) {
 
 bool view_only_floor(uint32_t chr) {
     uint32_t hit = 0;
+    return read32(chr + 0x29C, &hit) && view_only_hit(hit);
+}
+
+bool view_only_hit(uint32_t hit) {
     uint8_t block = 0xFF;
-    if (!read32(chr + 0x29C, &hit) || !hit || !read8(hit + 0xF, &block)) return false;
+    if (!hit || !read8(hit + 0xF, &block)) return false;
     const int b = static_cast<int8_t>(block);
     if (b < 0) return false;
     if (g_view_want.ours && b == g_view_want.block) return true;
@@ -4452,12 +4456,11 @@ bool floor_ready(uint32_t hit) {
     return lo == 6 && ((flags & 8) != 0 || hi == 6);
 }
 
-const char* draw_from(uint32_t chr, bool stream, bool* streamed) {
-    const char* why = nullptr;
-    const uint32_t hit = loaded_floor(chr, &why);
+namespace {
+
+// A floor known to be a collision of a block in use here.
+const char* draw_from_loaded(uint32_t hit, bool stream, bool* streamed) {
     uint32_t fa = 0;
-    if (streamed) *streamed = false;
-    if (!hit) return why;
     if (!read32(kFieldAreaVar, &fa) || !fa) return "no field";
     __try {
         *ptr<uint32_t>(fa + kFaFloorOnce) = hit;
@@ -4476,6 +4479,23 @@ const char* draw_from(uint32_t chr, bool stream, bool* streamed) {
         return "the field could not be written";
     }
     return nullptr;
+}
+
+}  // namespace
+
+const char* draw_from(uint32_t chr, bool stream, bool* streamed) {
+    const char* why = nullptr;
+    const uint32_t hit = loaded_floor(chr, &why);
+    if (streamed) *streamed = false;
+    if (!hit) return why;
+    return draw_from_loaded(hit, stream, streamed);
+}
+
+const char* draw_from_hit(uint32_t hit, bool stream, bool* streamed) {
+    if (streamed) *streamed = false;
+    int map = -1, index = -1;
+    if (!floor_id(hit, &map, &index)) return "the floor is no collision of a block in use here";
+    return draw_from_loaded(hit, stream, streamed);
 }
 
 void arm_reset_reload() {

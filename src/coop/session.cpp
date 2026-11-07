@@ -313,6 +313,17 @@ struct SignMsg {
     float angle;
     uint8_t active;    // 0: the owner has no sign any more
 };
+// 1.5.0 (the Death Knell's view on a summon sign): the floor its owner stood on, named as kInfoMore5 names a floor (map
+// and place among that map's collisions), so a game that loads the sign's map for the view finds the floor under it
+// as it finds a far teammate's. After the whole of SignMsg: a game before reads that and no more; one without these
+// fields (a shorter message, or no tag) has none.
+constexpr uint32_t kSignFloorTag = 0x524C4653;  // "SFLR"
+struct SignFloorMsg {
+    SignMsg m;
+    int32_t floor_map;    // -1 none
+    int32_t floor_index;
+    uint32_t tag;         // kSignFloorTag
+};
 struct KnellPriceMsg {
     Header h;
     uint8_t sign;  // the bell took them to a summon sign
@@ -3891,6 +3902,8 @@ struct SignInfo {
     float pos[3] = {};
     float angle = 0;
     double heard = 0;
+    int floor_map = -1;  // the floor its owner stood on (-1 not known)
+    int floor_index = -1;
 };
 SignInfo g_my_sign;
 double g_my_sign_sent = 0;
@@ -3998,7 +4011,8 @@ void on_near(uint64_t from, const uint8_t* data, uint32_t size) {
 }
 
 void send_sign() {
-    SignMsg m{};
+    SignFloorMsg x{};
+    SignMsg& m = x.m;
     fill_header(&m, kSign);
     m.owner = steam::self();
     m.serial = g_my_sign.serial;
@@ -4006,10 +4020,13 @@ void send_sign() {
     std::copy(std::begin(g_my_sign.pos), std::end(g_my_sign.pos), m.pos);
     m.angle = g_my_sign.angle;
     m.active = g_my_sign.map != -1 ? 1 : 0;
+    x.floor_map = g_my_sign.floor_map;
+    x.floor_index = g_my_sign.floor_index;
+    x.tag = kSignFloorTag;
     if (g_role == Role::Host) {
-        broadcast_coop(m);
+        broadcast_coop(x);
     } else if (g_host) {
-        send_to(g_host, m);
+        send_to(g_host, x);
     }
     g_my_sign_sent = now();
 }
@@ -4090,7 +4107,7 @@ void signs_tick() {
     }
 }
 
-void on_sign(uint64_t from, const SignMsg& m) {
+void on_sign(uint64_t from, const SignMsg& m, int floor_map, int floor_index) {
     if (m.owner == steam::self()) return;
     const std::string who = steam::persona(m.owner);
     if (!m.active) {
@@ -4104,6 +4121,8 @@ void on_sign(uint64_t from, const SignMsg& m) {
     std::copy(std::begin(m.pos), std::end(m.pos), s.pos);
     s.angle = m.angle;
     s.heard = now();
+    s.floor_map = floor_map;
+    s.floor_index = floor_index;
     if (fresh) {
         LOG_INFO("[coop] %s's summon sign at (%.1f, %.1f, %.1f) in map %08X%s", who.c_str(), m.pos[0], m.pos[1],
                  m.pos[2], static_cast<uint32_t>(m.map), from != m.owner ? " (through the host)" : "");
@@ -5025,15 +5044,21 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             break;
         }
         case kSign: {
-            SignMsg m;
-            if (!as(&m) || g_invade || g_role == Role::None) return;
+            SignFloorMsg x{};
+            if (!as(&x.m) || g_invade || g_role == Role::None) return;
+            const SignMsg& m = x.m;
+            if (!as(&x) || x.tag != kSignFloorTag) {
+                x.floor_map = -1;
+                x.floor_index = -1;
+                x.tag = kSignFloorTag;  // passed on with the floor unknown
+            }
             if (g_role == Role::Host) {
                 if (peer_is_invader(from) || m.owner != from) return;
-                broadcast_coop(m, from);
+                broadcast_coop(x, from);
             } else if (from != g_host) {
                 return;
             }
-            on_sign(from, m);
+            on_sign(from, m, x.floor_map, x.floor_index);
             break;
         }
         case kNear: {
@@ -6616,6 +6641,8 @@ std::vector<SummonSign> summon_signs() {
         o.map = sign.map;
         std::copy(std::begin(sign.pos), std::end(sign.pos), o.pos);
         o.angle = sign.angle;
+        o.floor_map = sign.floor_map;
+        o.floor_index = sign.floor_index;
         out.push_back(o);
     }
     return out;
@@ -6652,9 +6679,15 @@ const char* place_summon_sign() {
     g_my_sign.pos[1] = at.y;
     g_my_sign.pos[2] = at.z;
     g_my_sign.angle = angle;
+    // The floor we stand on, for the others' view of the sign (SignFloorMsg).
+    uint32_t hit = 0;
+    g_my_sign.floor_map = -1;
+    g_my_sign.floor_index = -1;
+    if (read32(game::player() + 0x29C, &hit) && hit) rules::floor_id(hit, &g_my_sign.floor_map, &g_my_sign.floor_index);
     send_sign();
-    LOG_INFO("[coop] Our summon sign %s (%.1f, %.1f, %.1f) in map %08X", moved ? "moved to" : "placed at", at.x, at.y,
-             at.z, static_cast<uint32_t>(map));
+    LOG_INFO("[coop] Our summon sign %s (%.1f, %.1f, %.1f) in map %08X (on collision %d of map %08X)",
+             moved ? "moved to" : "placed at", at.x, at.y, at.z, static_cast<uint32_t>(map), g_my_sign.floor_index,
+             static_cast<uint32_t>(g_my_sign.floor_map));
     return nullptr;
 }
 

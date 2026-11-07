@@ -58,6 +58,11 @@ const std::vector<Teammate>& teammates();
 // The Death Knell's view (knell.cpp): the camera follows `chr` (a teammate's character in our world) while we stand;
 // 0 gives the camera back. Ignored while our death waits (that view comes first).
 void knell_view(uint32_t chr);
+// The Death Knell's view on a summon sign (knell.cpp): the camera turns around `pos` (x, y, z) instead of our character,
+// the sign's map (area << 24 | block << 16) is kept loaded, and the world is drawn from the floor under it (its owner's
+// floor, floor_map / floor_index as rules::floor_by_id names it, -1 unknown: then by a cast). Null gives it back. A
+// teammate's character given to knell_view comes first.
+void knell_point(const float* pos, int map, int floor_map, int floor_index);
 // D-pad left or right (any controller) or the arrow keys pressed since the last call, while the game has the focus:
 // -1, 1, or 0. The spectating view and the Death Knell's take turns (never both at once).
 int switch_step();

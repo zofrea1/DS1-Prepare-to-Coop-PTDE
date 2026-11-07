@@ -51,6 +51,19 @@ constexpr uint32_t kCamChrSite = 0x00EFDB1F;   // mov edx,[0x137D648] ; mov ecx,
 constexpr uint32_t kDrawChrSite = 0x00EFE4C9;     // mov eax,[esi+0xEC] (esi = [0x137D648]): the floor's character
 constexpr uint32_t kDrawChrSite2 = 0x00EFE4EF;    // mov esi,[esi+0xEC]: the same for +0x294
 constexpr uint32_t kCamDeadSite = 0x00F1457A;  // mov al,[esi+0x40] ; setne [esp+0x6F]  (esi = WorldChrMan)
+// The point the follow camera turns around: ChrExFollowCam's update (0xF02720, edi = the character it follows) takes
+// the character's physics position ([[chr+0x28]+0x1C]+0x10, at 0xF02ACA) as its target, once a frame, and orbits it at
+// the camera's distance and height, with its collision tests from there. The Death Knell's view on a summon sign has
+// no character to give the camera (1.5.0: "the camera stays with the player" for a sign), so while it shows one the
+// target read here for our own character is the sign's point: the camera turns around the sign as around a player
+// standing on it, and the player's stick still turns it.
+constexpr uint32_t kCamTargetSite = 0x00F02B68;   // movq xmm0,[eax+10h]; movq [esp+20h],xmm0; movq xmm0,[eax+18h]
+// Its end (0xF04CCF) builds the camera's matrix (+0x60) in the frame of the same character: 0xE72830 (eax = the
+// character, ecx = out) writes the character's 3x4 transform from its physics (0xEC1A60: the translation at +0x0C,
+// +0x1C, +0x2C). The sign's point is put in that frame too, so the camera is placed as for our character standing
+// there (its own facing).
+constexpr uint32_t kCamFrameCall = 0x00F04CD9;    // call 0xE72830
+constexpr uint32_t kChrTransform = 0x00E72830;
 constexpr uint32_t kDebugChrVar = 0x0137D648;
 constexpr uint32_t kWorldChrManVar = 0x0137D644;  // +0x24 player characters, +0x28 their array (0x20 each)
 // The cameras turn by the followed character's controller input (ChrCtrl+0x244, else +0x54: the vector at +0x40),
@@ -161,6 +174,18 @@ uint32_t g_drawn_for = 0;     // the teammate the view's last "drawn from" line 
 const char* g_drawn_why = "";
 bool g_drawn_streamed = false;  // and whether that floor added to what is streamed
 uint32_t g_knell_chr = 0;     // the Death Knell's view: the teammate it shows (knell.cpp), 0 none
+// The Death Knell's view on a summon sign (knell_point): the camera's target (kCamTargetSite, its w the character's
+// own), the sign's map kept loaded and the world drawn from the floor under it, as for a far teammate.
+alignas(16) float g_cam_point[4] = {};
+volatile LONG g_cam_point_on = 0;
+bool g_cam_target_patched = false;
+bool g_point_on = false;
+float g_point_pos[3] = {};
+int g_point_map = -1;
+int g_point_floor_map = -1, g_point_floor_index = -1;
+uint32_t g_point_cast_hit = 0;  // the floor found under it by a cast (when its owner's game named none)
+double g_point_cast_at = 0;
+std::string g_point_why = "-";  // the last "drawn from" reason logged for the sign
 bool g_streaming = true;      // SpectateStreaming
 bool g_origin_patched = false;
 volatile uint32_t g_pass_origin = 0;  // the character WorldChrMan's pass takes instead of ours (0: ours)
@@ -333,6 +358,68 @@ __declspec(naked) void hk_cam_dead() {
         jne done
         xor al, al
     done:
+        ret
+    }
+}
+
+// The follow camera's target (kCamTargetSite): the summon sign's point for our own character while the Death Knell's
+// view shows one, else the character's position as before. Returns with xmm0 = the target's z and w, as the game's code
+// left it; only eax is used besides (the game sets it again right after).
+__declspec(naked) void hk_cam_target() {
+    __asm {
+        cmp g_cam_point_on, 0
+        je cam_own
+        push ecx
+        mov ecx, 0x0137D644          // WorldChrMan
+        mov ecx, [ecx]
+        test ecx, ecx
+        jz cam_own_pop
+        cmp edi, [ecx + 0x3C]        // our own character
+        jne cam_own_pop
+        pop ecx
+        mov eax, [eax + 0x1C]        // the character's own w
+        mov dword ptr g_cam_point[12], eax
+        lea eax, g_cam_point
+        movq xmm0, qword ptr [eax]
+        movq qword ptr [esp + 0x24], xmm0   // the game's [esp+20h], past our return address
+        movq xmm0, qword ptr [eax + 8]
+        ret
+    cam_own_pop:
+        pop ecx
+    cam_own:
+        movq xmm0, qword ptr [eax + 0x10]
+        movq qword ptr [esp + 0x24], xmm0
+        movq xmm0, qword ptr [eax + 0x18]
+        ret
+    }
+}
+
+// The character's transform for the camera's matrix (kCamFrameCall): the game's, with the summon sign's point for its
+// translation while the view shows a sign and the character is our own. eax = the character, ecx = out; returns out.
+__declspec(naked) void hk_cam_frame() {
+    __asm {
+        push eax
+        mov edx, kChrTransform
+        call edx
+        pop edx                      // the character
+        cmp g_cam_point_on, 0
+        je frame_done
+        push ecx
+        mov ecx, 0x0137D644          // WorldChrMan
+        mov ecx, [ecx]
+        test ecx, ecx
+        jz frame_pop
+        cmp edx, [ecx + 0x3C]        // our own character
+        jne frame_pop
+        mov ecx, dword ptr g_cam_point[0]
+        mov [eax + 0x0C], ecx
+        mov ecx, dword ptr g_cam_point[4]
+        mov [eax + 0x1C], ecx
+        mov ecx, dword ptr g_cam_point[8]
+        mov [eax + 0x2C], ecx
+    frame_pop:
+        pop ecx
+    frame_done:
         ret
     }
 }
@@ -693,11 +780,67 @@ void fix_own_rate(bool on) {
     *ptr<int32_t>(me + kChrRate) = 0;
 }
 
+// Every frame while the Death Knell's view shows a summon sign: its map kept loaded and the world drawn from the floor
+// under it (the one its owner's game named, else one found by a cast), with that block's collisions loaded as ours, so
+// the warp onto it can go at once. The characters there are left to our own pass (no character of theirs to take).
+void point_extras() {
+    fix_rate(0);
+    if (g_cast_chr) {
+        if (player_character(g_cast_chr) && rules::view_only_floor(g_cast_chr)) rules::clear_floor(g_cast_chr);
+        g_cast_chr = 0;
+    }
+    const int map = g_streaming ? (g_point_floor_map != -1 ? g_point_floor_map : g_point_map) : -1;
+    if (map != g_view_map || map >= 0) {
+        g_view_map = map;
+        rules::view_map(map);
+    }
+    g_pass_origin = 0;
+    g_view_block = kNoBlock;
+    g_seam_until = 0;
+    g_seam_chr = 0;
+    fix_own_rate(false);
+    g_drawn_for = 0;
+    uint32_t hit = rules::floor_by_id(g_point_floor_map, g_point_floor_index);
+    if (!hit) {
+        int m = -1, i = -1;
+        if (g_point_cast_hit && !rules::floor_id(g_point_cast_hit, &m, &i)) g_point_cast_hit = 0;  // its block went
+        if (!g_point_cast_hit && now() - g_point_cast_at >= kCastEvery) {
+            g_point_cast_at = now();
+            g_point_cast_hit = rules::floor_at(g_point_pos);
+        }
+        hit = g_point_cast_hit;
+    }
+    bool streamed = false;
+    const char* why = hit ? rules::draw_from_hit(hit, g_streaming, &streamed) : "no floor under it here yet";
+    uint8_t block = 0xFF;
+    if (!why && g_collision_patched && read8(hit + 0xF, &block) && block < 64) {
+        g_collision_floor = hit;
+        g_collision_block = block;
+    } else {
+        g_collision_block = kNoBlock;
+        g_collision_floor = 0;
+    }
+    const std::string now_why = why ? why : streamed ? "+" : "=";
+    if (now_why != g_point_why) {
+        g_point_why = now_why;
+        if (why) {
+            LOG_INFO("[coop] Death Knell: the world stays drawn from our own floor for the summon sign (%s)", why);
+        } else {
+            LOG_INFO("[coop] Death Knell: the world is drawn from the floor under the summon sign%s",
+                     streamed ? ", and what it shows is streamed in" : "");
+        }
+    }
+}
+
 // Every frame while we follow a teammate: the world is drawn from their floor (the reason when not is logged once
 // per change).
 void view_extras() {
     const uint32_t want = g_hold ? g_target : g_knell_chr;
     const uint32_t chr = want && player_character(want) ? want : 0;
+    if (!chr && !g_hold && g_point_on) {
+        point_extras();
+        return;
+    }
     fix_rate(chr);
     // Their map, as they report it, kept loaded while we follow them: the one of the floor their game has them on when
     // they report it (on a map boundary the game's map and the floor's can differ for a while).
@@ -1025,6 +1168,18 @@ bool install() {
              patch_call(kCamDeadSite, dead_k, sizeof(dead_k), reinterpret_cast<void*>(&hk_cam_dead)) &&
              patch_call(kCamChrSite, chr_k, sizeof(chr_k), reinterpret_cast<void*>(&hk_cam_chr));
     if (!g_view) LOG_ERROR("[coop] Spectating: the camera code did not match this build (the camera stays on us)");
+    static const uint8_t target_k[16] = {0xF3, 0x0F, 0x7E, 0x40, 0x10, 0x66, 0x0F, 0xD6,
+                                         0x44, 0x24, 0x20, 0xF3, 0x0F, 0x7E, 0x40, 0x18};
+    static const uint8_t frame_k[5] = {0xE8, 0x52, 0xDB, 0xF6, 0xFF};  // call 0xE72830
+    g_cam_target_patched =
+        g_view && bytes_match(kCamTargetSite, target_k, sizeof(target_k)) &&
+        bytes_match(kCamFrameCall, frame_k, sizeof(frame_k)) &&
+        patch_call(kCamTargetSite, target_k, sizeof(target_k), reinterpret_cast<void*>(&hk_cam_target)) &&
+        patch_call(kCamFrameCall, frame_k, sizeof(frame_k), reinterpret_cast<void*>(&hk_cam_frame));
+    if (g_view && !g_cam_target_patched) {
+        LOG_ERROR("[coop] Spectating: the follow camera's target read did not match this build (the Death Knell's view "
+                  "keeps the camera on us for a summon sign)");
+    }
     static const uint8_t draw_k[6] = {0x8B, 0x86, 0xEC, 0x00, 0x00, 0x00};   // mov eax,[esi+0xEC]
     static const uint8_t draw2_k[6] = {0x8B, 0xB6, 0xEC, 0x00, 0x00, 0x00};  // mov esi,[esi+0xEC]
     const bool look = g_view && bytes_match(kDrawChrSite, draw_k, sizeof(draw_k)) &&
@@ -1140,6 +1295,34 @@ const std::vector<Teammate>& teammates() { return g_team; }
 void knell_view(uint32_t chr) {
     if (chr != g_knell_chr) g_drawn_for = 0;
     g_knell_chr = chr;
+}
+
+void knell_point(const float* pos, int map, int floor_map, int floor_index) {
+    if (!pos || !g_cam_target_patched) {
+        if (g_point_on) LOG_INFO("[coop] Death Knell: the camera leaves the summon sign");
+        g_point_on = false;
+        InterlockedExchange(&g_cam_point_on, 0);
+        g_point_cast_hit = 0;
+        g_point_why = "-";
+        return;
+    }
+    const bool moved = !g_point_on || pos[0] != g_point_pos[0] || pos[1] != g_point_pos[1] || pos[2] != g_point_pos[2];
+    if (moved) {
+        g_point_cast_hit = 0;
+        g_point_cast_at = 0;
+        LOG_INFO("[coop] Death Knell: the camera turns around the summon sign at (%.1f, %.1f, %.1f) (map %08X, its "
+                 "owner's floor %d of %08X)", pos[0], pos[1], pos[2], static_cast<uint32_t>(map), floor_index,
+                 static_cast<uint32_t>(floor_map));
+    }
+    g_point_on = true;
+    std::copy(pos, pos + 3, g_point_pos);
+    g_point_map = map;
+    g_point_floor_map = floor_map;
+    g_point_floor_index = floor_index;
+    g_cam_point[0] = pos[0];
+    g_cam_point[1] = pos[1];
+    g_cam_point[2] = pos[2];
+    InterlockedExchange(&g_cam_point_on, 1);
 }
 
 int switch_step() { return switch_input(); }

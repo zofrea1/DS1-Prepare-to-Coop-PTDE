@@ -8,7 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
-| Prepare to Co-op Edition 1.6.0 | DS1 PTDE FPS Unlock 1.9.0 |
+| Prepare to Co-op Edition 1.6.0 | DS1 PTDE FPS Unlock 2.0.0 |
 | Prepare to Co-op Edition 1.5.0 | DS1 PTDE FPS Unlock 1.9.0 |
 | Prepare to Co-op Edition 1.4.0 | DS1 PTDE FPS Unlock 1.9.0 |
 | Prepare to Co-op Edition 1.3.0 | DS1 PTDE FPS Unlock 1.9.0 |
@@ -21,6 +21,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 - **Group invasions**: host a world, guests or none, and use the Chaos Eye Orb (or Ctrl+F4): the whole party invades another world together. Your world stays open while the search runs, invaders included, and an invasion of it comes first: an invader who comes in calls the search off. Once a world with room for all of you holds your places (45 seconds), your world closes, everyone invades as one team, and afterwards your world opens again and your guests come back to it. Use the orb again to call the search off.
 - **An invader limit** (`ExtraInvaders`): a world takes at most as many invaders at once as it has co-op players, plus one (raise it to let larger groups in; it cannot go lower). A player alone meets two invaders at most.
 - **The 1.5.1 fixes**: a Homeward Bone takes one bone, the Demon Ruins lift moves for one game, an invader's game no longer moves the world's enemies, and an invader's key items come back after a far Death Knell.
+- **Includes the DS1 PTDE FPS Unlock 2.0.0**: the undead dragons' acid slides as far, keeps the rhythm of its volleys and shows on the ground at any frame rate, as it does at 30 FPS.
 - **Plays with 1.5.0 and 1.5.1** (the same co-op protocol). Group invasions need 1.6.0 for everyone in the group and for the world they invade.
 
 The full list is in the [1.6.0 release notes](release-notes/v1.6.0.md).

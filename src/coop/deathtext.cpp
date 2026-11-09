@@ -5,6 +5,7 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "rules.h"
 #include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -159,7 +160,8 @@ void __stdcall hk_set_text_effect(int type) {
         g_want = wipe ? 1 : 0;
         g_up_since = 0;
         if (wipe) {
-            LOG_INFO("[coop] Death text: YOUR TEAM DIED (a team wipe)%s",
+            LOG_INFO("[coop] Death text: YOUR TEAM DIED (%s)%s",
+                     rules::state().invader ? "every invader of the world fell" : "a team wipe",
                      g_broken ? ", but the atlas could not be changed" : "");
         }
     }

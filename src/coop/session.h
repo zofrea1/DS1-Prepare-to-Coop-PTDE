@@ -204,6 +204,9 @@ void note_respawn_went(bool kept);
 // started it over (during our death, `fell_at`) is part of the same wipe. With none gone, it is a wipe when every
 // other co-op player is down.
 bool wipe_reload(double fell_at);
+// We invade, and every invader of this world has fallen, ourselves and at least one other, with the invasion not won:
+// the invaders' team wipe (their death text says YOUR TEAM DIED, deathtext.cpp).
+bool invader_team_fell();
 // A rest after a lost boss fight (world.cpp): our world's reload is pending, waiting (our menu is open, or a fallen
 // player is not at their respawn warp yet) or ready. Every living player whose reload is pending goes once none of
 // them still waits (resets_ready), and the fallen's respawn warps wait until none is pending (team_respawn_wait),

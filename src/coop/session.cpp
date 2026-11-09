@@ -70,9 +70,23 @@ constexpr const char* kLegacyProtocol = "8";
 // Dried Fingers. 1.0.0 invaders go to a world with "ptdesc_taunt" = 1 before any other, so with few players one
 // such host would draw every 1.0.0 invader. Hosts from 1.1.0 on publish "ptdesc_fingers" instead, which only 1.1.0
 // invaders read, and make the world kFingersWeight times as likely to be picked as one without (pick_invade_world):
-// 65% more likely since 1.4.0 (50% before; the invader's game decides, so an older invader still uses 1.5). While they
-// are in effect InvasionCooldown is off (taunt, invasion_over), until the session ends and the rules reset.
-constexpr double kFingersWeight = 1.65;
+// 150% more likely since 1.7.0 (65% from 1.4.0, 50% before; the invader's game decides, so an older invader still uses
+// its own). While they are in effect InvasionCooldown is off (taunt, invasion_over), until the session ends and the
+// rules reset.
+constexpr double kFingersWeight = 2.5;
+// Level matching (1.7.0): a preference, never a filter, since there are too few players for a filter. A host
+// publishes the soul levels of its world's co-op players ("ptdesc_levels": "45,52,60"). An invader's pick weighs each
+// world found by how close its closest player is to the invader: a player within the invader's level range (from 10%
+// below the invader's soul level to 20 + 10% above it, the range the original game's Red Eye Orb used) gives the
+// world the whole pull, kLevelPull times as likely as a world far from it; the pull fades with every level outside the
+// range (by e^-1 every kLevelFade, at least 10% of the invader's level). Dried Fingers multiply on top of it. A world
+// that publishes no levels (a host before 1.7.0) gets kLevelUnknown, between near and far. Only the worlds that can
+// take an invader now are weighed (cooldown, boss fight and invader limit are passed over first), so a single world
+// is still invaded as before. A group invasion (1.6.0) uses its highest soul level, so a strong player cannot bring
+// low-level friends to reach low-level worlds.
+constexpr double kLevelPull = 8.0;
+constexpr double kLevelUnknown = 2.5;
+constexpr double kLevelFade = 10.0;
 // Steam's room in our lobby: more than the game's four players, so that lobby members who never join (players of
 // other games that use Spacewar, or knocks that fail) cannot fill it. The game's own limit is kept by host_answer.
 constexpr int kLobbyRoom = 16;
@@ -1478,6 +1492,23 @@ void invasion_team_lost() {
     if (g_host) send_to(g_host, e);
 }
 
+// The invaders' team wipe (1.7.0): we invade a world of 1.3.0 or later (team invasions), the invasion is not won, and
+// every other invader of this world has fallen, at least one of them: whether they came as a group or one by one, a
+// fallen invader spectates the others until the last one falls, and then every one of them sees YOUR TEAM DIED, as a
+// co-op team does. Asked by the death text (deathtext.cpp) while we are down: the last invader's own fall is counted
+// by its game, and the ones who fell before are released (spectate.cpp) once the last one's fall is reported.
+bool invaders_all_fell() {
+    if (!g_invade || g_step != Step::InWorld || g_invade_won || !team_invasion_host()) return false;
+    const std::vector<party::Remote> members = party::remotes();
+    int fallen = 0;
+    for (const auto& p : g_peers) {
+        if (!invader_teammate(p, members)) continue;
+        if (!p.dead) return false;  // one still stands: our fall waits (spectate.cpp), or it is not a team's
+        ++fallen;
+    }
+    return fallen > 0;
+}
+
 // The reward counts what reached the inventory: a full stack takes none (or only some, one at a time), and the rest
 // is tried again later.
 void reward_tick() {
@@ -1868,6 +1899,7 @@ PlayerEvent player_event(MsgType type, uint64_t who, bool invader, const std::st
 
 // ---------------------------------------------------------------- host
 void publish_invader_places();
+void publish_world_levels();
 
 void host_open_lobby() {
     set_step(Step::HostLobby);
@@ -1892,6 +1924,7 @@ void host_open_lobby() {
         steam::set_lobby_joinable(lobby, true);
         publish_cooldown();  // a cooldown from our last session goes on
         publish_invader_places();
+        publish_world_levels();
         g_away_since = 0;
         g_hidden = false;
         g_lobby_reconnects = steam::reconnects();
@@ -2041,6 +2074,26 @@ void publish_invader_places() {
     lobby = g_lobby;
     last = n;
     steam::set_lobby_data(g_lobby, "ptdesc_inv_room", std::to_string(n).c_str());
+}
+
+// The soul levels of our world's co-op players, ours first, for invaders' level matching (1.7.0, kLevelPull):
+// "ptdesc_levels" = "45,52". Written when it changes (a level-up, a guest coming or going), checked every second.
+void publish_world_levels() {
+    static uint64_t lobby = 0;
+    static std::string last;
+    if (!g_lobby) return;
+    const int own = game::soul_level();
+    std::string s = own > 0 ? std::to_string(own) : std::string();
+    const std::vector<party::Remote> members = party::remotes();
+    for (const auto& p : g_peers) {
+        if (!coop_member(p, members) || p.soul_level <= 0) continue;
+        if (!s.empty()) s += ',';
+        s += std::to_string(p.soul_level);
+    }
+    if (s.empty() || (lobby == g_lobby && s == last)) return;
+    lobby = g_lobby;
+    last = s;
+    steam::set_lobby_data(g_lobby, "ptdesc_levels", s.c_str());
 }
 
 // Host: players in the session we have not heard from (see kLostQuiet). The game's own session lets them go by
@@ -2538,6 +2591,7 @@ void host_invasions_open() {
     if (now() - last < 1.0) return;
     last = now();
     publish_invader_places();
+    publish_world_levels();
     const bool fight = boss_fight_in_world();
     const bool open = g_cfg.allow_invaders && !fight;
     if (open == g_invade_open) return;
@@ -2959,28 +3013,86 @@ void guest_send_hello() {
     set_step(Step::Hello);
 }
 
-// An invader's pick among the worlds found: at random, a world with Dried Fingers kFingersWeight times as likely as
-// one without. A 1.0.0 host with Dried Fingers says so in "ptdesc_taunt", a newer one in "ptdesc_fingers".
+// The soul levels a world's lobby publishes for its co-op players (1.7.0, "ptdesc_levels"); empty when it publishes
+// none (a host before 1.7.0).
+std::vector<int> lobby_levels(uint64_t lobby) {
+    std::vector<int> out;
+    const std::string s = steam::lobby_data(lobby, "ptdesc_levels");
+    const char* p = s.c_str();
+    while (*p) {
+        char* end = nullptr;
+        const long v = std::strtol(p, &end, 10);
+        if (end == p) break;
+        if (v > 0 && v < 1000) out.push_back(static_cast<int>(v));
+        p = *end == ',' ? end + 1 : end;
+    }
+    return out;
+}
+
+// How far (in soul levels) the world's closest player is from our level range, 0 inside it; -1 when it publishes no
+// levels. The range is the original game's Red Eye Orb's: 10% below our level to 20 + 10% above it.
+double level_gap(int sl, const std::vector<int>& levels) {
+    if (levels.empty() || sl <= 0) return -1.0;
+    const double lo = sl * 0.9, hi = sl * 1.1 + 20.0;
+    double best = 1e9;
+    for (int v : levels) best = std::min(best, v < lo ? lo - v : v > hi ? v - hi : 0.0);
+    return best;
+}
+
+// The level matching's weight for a world (kLevelPull inside our range, fading to 1 far outside it).
+double level_weight(int sl, double gap) {
+    if (gap < 0) return kLevelUnknown;
+    const double fade = std::max(kLevelFade, sl * 0.1);
+    return 1.0 + (kLevelPull - 1.0) * std::exp(-gap / fade);
+}
+
+// The soul level an invasion is matched by: ours, or a group's highest (its members as their games report it).
+int invasion_level() {
+    int sl = game::soul_level();
+    if (g_group.lead) {
+        for (uint64_t id : g_group.members) {
+            for (const auto& p : g_peers) {
+                if (p.id == id && p.soul_level > sl) sl = p.soul_level;
+            }
+        }
+    }
+    return sl;
+}
+
+// An invader's pick among the worlds found: at random, weighed by level matching (level_weight) and Dried Fingers
+// (kFingersWeight). A 1.0.0 host with Dried Fingers says so in "ptdesc_taunt", a newer one in "ptdesc_fingers".
 uint64_t pick_invade_world(const std::vector<uint64_t>& found) {
     static std::mt19937_64 rng = [] {
         LARGE_INTEGER t{};
         QueryPerformanceCounter(&t);
         return std::mt19937_64(static_cast<uint64_t>(t.QuadPart) ^ steam::self());
     }();
+    const int sl = invasion_level();
     std::vector<double> weight;
     double total = 0;
-    int fingers = 0;
+    int fingers = 0, in_range = 0, unknown = 0;
     for (uint64_t l : found) {
         const bool f = steam::lobby_data(l, "ptdesc_fingers") == "1" || steam::lobby_data(l, "ptdesc_taunt") == "1";
+        const double gap = level_gap(sl, lobby_levels(l));
         fingers += f ? 1 : 0;
-        weight.push_back(f ? kFingersWeight : 1.0);
+        in_range += gap == 0.0 ? 1 : 0;
+        unknown += gap < 0 ? 1 : 0;
+        weight.push_back(level_weight(sl, gap) * (f ? kFingersWeight : 1.0));
         total += weight.back();
     }
     double r = std::uniform_real_distribution<double>(0.0, total)(rng);
     size_t i = 0;
     while (i + 1 < found.size() && r >= weight[i]) r -= weight[i++];
-    LOG_INFO("[coop] %zu world(s) to invade, %d with Dried Fingers; picked one %s", found.size(), fingers,
-             weight[i] > 1.0 ? "with Dried Fingers" : "without");
+    const bool picked_fingers =
+        steam::lobby_data(found[i], "ptdesc_fingers") == "1" || steam::lobby_data(found[i], "ptdesc_taunt") == "1";
+    const std::string levels = steam::lobby_data(found[i], "ptdesc_levels");
+    const double picked_gap = level_gap(sl, lobby_levels(found[i]));
+    LOG_INFO("[coop] %zu world(s) to invade at SL %d: %d with a player in our level range, %d without levels, %d with "
+             "Dried Fingers; picked one %s Dried Fingers, levels %s (%s), chance %.0f%%",
+             found.size(), sl, in_range, unknown, fingers, picked_fingers ? "with" : "without",
+             levels.empty() ? "unknown" : levels.c_str(),
+             picked_gap < 0 ? "not published" : picked_gap == 0 ? "in range" : "outside the range",
+             total > 0 ? 100.0 * weight[i] / total : 100.0);
     return found[i];
 }
 
@@ -8065,6 +8177,8 @@ std::string reset_phase_missing() {
     }
     return {};
 }
+
+bool invader_team_fell() { return invaders_all_fell(); }
 
 bool wipe_reload(double fell_at) {
     const std::vector<party::Remote> members = party::remotes();

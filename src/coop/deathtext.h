@@ -3,7 +3,8 @@
 #pragma once
 
 // The death text of a team wipe: "YOUR TEAM DIED" instead of "YOU DIED" when every co-op player fell and the world
-// starts over. "YOU DIED" is no string but a band of the game's English menu atlas (see deathtext.cpp); for a wipe
+// starts over, and (1.7.0) when invaders lose as a team: two or more invaders in a world, every one of them fallen,
+// the invasion not won (they spectate each other meanwhile, spectate.cpp). "YOU DIED" is no string but a band of the game's English menu atlas (see deathtext.cpp); for a wipe
 // that band is lettered anew (assets/TeamDied.png, made from the game's own letters by tools/build_team_died.py)
 // while the text shows, and the game's own band is put back afterwards. Every other death keeps "YOU DIED".
 

@@ -111,7 +111,8 @@ bool scale_ready(uint32_t chr);
 bool local_dead();
 // The special effect `id` is on the character.
 bool has_effect(uint32_t chr, int id);
-// The death we are in is part of a team wipe: every co-op player fell and the world starts over (session::wipe_reload).
+// The death we are in is part of a team wipe: every co-op player fell and the world starts over (session::wipe_reload),
+// or we invade and every invader of the world fell, at least two of us (session::invader_team_fell, 1.7.0).
 bool team_wipe_death();
 // A menu or dialog is open (the bonfire menu and its shops included). The game never starts a load under one: our
 // own loads wait for it to close.

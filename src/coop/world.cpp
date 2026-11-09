@@ -2907,7 +2907,8 @@ bool boss_fight() {
 bool team_wipe_death() {
     // The death script can ask before tick() has seen the fall (a fall death starts its text in the same frame).
     const double fell = g_was_alive ? now() : g_fell_at;
-    return g_active && !g_invader && local_dead() && g_players >= 2 && session::wipe_reload(fell);
+    if (g_active && g_invader) return local_dead() && session::invader_team_fell();  // the invaders' team (1.7.0)
+    return g_active && local_dead() && g_players >= 2 && session::wipe_reload(fell);
 }
 
 bool local_dead() {

@@ -6375,8 +6375,10 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
         }
         case kKnellSpy: {
             KnellSpyMsg m{};
-            if (!as(&m) || g_invade || g_step != Step::InWorld) return;
-            if (g_role == Role::Host) {
+            if (!as(&m) || g_invade) return;
+            // The invaded host is on Step::Hosting (Step::InWorld is a guest's step): it shows the notice when it is
+            // the one watched, or passes it to the watched guest.
+            if (g_role == Role::Host && g_step == Step::Hosting) {
                 const PeerInfo* by = peer(from);
                 if (!by || !by->invader || !admitted(from)) return;
                 if (m.target == steam::self()) {
@@ -6385,7 +6387,7 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                     m.watcher = from;
                     send_to(m.target, m);
                 }
-            } else if (g_role == Role::Guest && from == g_host && m.target == steam::self()) {
+            } else if (g_role == Role::Guest && g_step == Step::InWorld && from == g_host && m.target == steam::self()) {
                 knell_spied(m.watcher);
             }
             break;

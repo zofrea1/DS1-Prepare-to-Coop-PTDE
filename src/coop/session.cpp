@@ -158,6 +158,7 @@ enum MsgType : uint8_t {
     kGroupBack = 50,     // the group's host -> the group, home again: our world is open, this lobby (GroupBackMsg); lobby 0
                          // while the host is still out (joining, invading, on its way home): keep waiting
     kGroupHere = 51,     // a player of the group -> its host, until back in the host's world: still out, keep sending
+    kGroupComing = 52,   // 1.7.0, host -> its co-op guests: a group of `value` invaders is coming in (kMsgGroupComing)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -533,6 +534,8 @@ std::wstring fmt(const wchar_t* pattern, const std::wstring& arg) {
 }
 constexpr const wchar_t* kMsgJoined = L"{} has joined!";
 constexpr const wchar_t* kMsgInvaded = L"Evil spirit {} has invaded!";
+// A group invasion (1.6.0) is coming in: its first player's knock was let in (1.7.0, kGroupComing).
+constexpr const wchar_t* kMsgGroupComing = L"Beware! A band of {} evil spirits is breaking into this world!";
 constexpr const wchar_t* kMsgLeft = L"{} has left";
 constexpr const wchar_t* kMsgInvaderLeft = L"Evil spirit {} has left";
 constexpr const wchar_t* kMsgLost = L"{} lost the connection";
@@ -973,6 +976,8 @@ struct GroupHold {
     uint64_t leader = 0;
     std::vector<uint64_t> ids;
     double until = 0;
+    int size = 0;            // the group's players, as asked (1.7.0: the warning's count)
+    bool announced = false;  // the warning that they are coming was given (group_coming)
 };
 std::vector<GroupHold> g_group_holds;
 constexpr double kGroupHoldFor = 45.0;
@@ -2162,6 +2167,29 @@ void send_live_drops(uint64_t to);
 void send_bonfires(uint64_t to);
 bool guests_know_free_for_all();
 
+// A group invasion (1.6.0) is on its way in: its first player's knock was just let in (host_answer), before any of
+// them has arrived. The world is warned, the host and its co-op guests (1.7.0, the user's wish: they are about to be
+// invaded by a band, so some shock to it), with the number of invaders the group holds places for. Once per group,
+// and only for two or more (a host alone who invades with the orb is a group of one).
+void group_coming(uint64_t id) {
+    for (auto& g : g_group_holds) {
+        if (g.announced || std::find(g.ids.begin(), g.ids.end(), id) == g.ids.end()) continue;
+        g.announced = true;
+        if (g.size < 2) return;
+        LOG_INFO("[coop] %s's group of %d invaders is coming in: the world is warned", steam::persona(g.leader).c_str(),
+                 g.size);
+        say(fmt(kMsgGroupComing, std::to_wstring(g.size)));
+        Simple m{};
+        fill_header(&m, kGroupComing);
+        m.value = static_cast<uint32_t>(g.size);
+        const uint64_t me = steam::self();
+        for (const auto& p : g_peers) {
+            if (!p.invader && p.id != me && admitted(p.id)) send_to(p.id, m);
+        }
+        return;
+    }
+}
+
 void host_answer(const Pending& p) {
     Welcome w{};
     fill_header(&w, kWelcome);
@@ -2258,6 +2286,7 @@ void host_answer(const Pending& p) {
     set_admitted(p.from, w.status == kOk);
     if (w.status == kOk && holder) {
         LOG_INFO("[coop] %s takes the place held for their group", steam::persona(p.from).c_str());
+        group_coming(p.from);
         prune_group_holds();
     }
     WelcomeMore more{};
@@ -5226,6 +5255,7 @@ void group_on_ask(uint64_t from, const GroupAskMsg& m) {
             // 15:58-18:03 tests went unanswered and Steam's link to the asked host timed out.
             steam::accept(m.ids[i]);
         }
+        hold.size = static_cast<int>(hold.ids.size());
         g_group_holds.push_back(hold);
     }
     send_to(from, a);
@@ -6316,6 +6346,14 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             GroupAnswerMsg m{};
             if (!as(&m)) return;
             group_on_answer(from, m);
+            break;
+        }
+        case kGroupComing: {
+            Simple m{};
+            if (!as(&m) || g_role != Role::Guest || g_invade || from != g_host || g_step != Step::InWorld) return;
+            const int n = static_cast<int>(std::min<uint32_t>(m.value, 255));
+            LOG_INFO("[coop] Our host warns: a group of %d invaders is coming in", n);
+            if (n >= 2) say(fmt(kMsgGroupComing, std::to_wstring(n)));
             break;
         }
         case kGroupSearch: {

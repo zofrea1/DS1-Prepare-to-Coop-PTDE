@@ -159,6 +159,7 @@ enum MsgType : uint8_t {
                          // while the host is still out (joining, invading, on its way home): keep waiting
     kGroupHere = 51,     // a player of the group -> its host, until back in the host's world: still out, keep sending
     kGroupComing = 52,   // 1.7.0, host -> its co-op guests: a group of `value` invaders is coming in (kMsgGroupComing)
+    kKnellSpy = 53,      // 1.7.0, an invader -> the host (-> that guest): my Death Knell watches you (KnellSpyMsg)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -504,6 +505,12 @@ struct GroupAskMsg {
     uint8_t count;
     uint64_t ids[kGroupMax];  // the group's players, its host first
 };
+// kKnellSpy: the co-op player an invader's Death Knell view shows.
+struct KnellSpyMsg {
+    Header h;
+    uint64_t target;
+    uint64_t watcher;  // the invader (the host passes it on as it came)
+};
 struct GroupAnswerMsg {
     Header h;
     uint32_t status;  // a WelcomeStatus
@@ -536,6 +543,8 @@ constexpr const wchar_t* kMsgJoined = L"{} has joined!";
 constexpr const wchar_t* kMsgInvaded = L"Evil spirit {} has invaded!";
 // A group invasion (1.6.0) is coming in: its first player's knock was let in (1.7.0, kGroupComing).
 constexpr const wchar_t* kMsgGroupComing = L"Beware! A band of {} evil spirits is breaking into this world!";
+// An invader's Death Knell view is on us (1.7.0, kKnellSpy; at most once every kKnellSpyEvery).
+constexpr const wchar_t* kMsgKnellSpied = L"Your Death Knell tolls uneasily... an invader is spying on you!";
 constexpr const wchar_t* kMsgLeft = L"{} has left";
 constexpr const wchar_t* kMsgInvaderLeft = L"Evil spirit {} has left";
 constexpr const wchar_t* kMsgLost = L"{} lost the connection";
@@ -981,6 +990,9 @@ struct GroupHold {
 };
 std::vector<GroupHold> g_group_holds;
 constexpr double kGroupHoldFor = 45.0;
+// The Death Knell's spying (1.7.0): an invader's game tells a co-op player it watches at most this often, and the
+// one watched sees it at most this often.
+constexpr double kKnellSpyEvery = 60.0;
 // A player of the group who is not home and standing to knock this long after the group went gives up and gathers
 // again with the others. Longer than the hold: a slow load still knocks, and gets in if the world has room by then.
 constexpr double kGroupLeaveFor = 120.0;
@@ -2188,6 +2200,19 @@ void group_coming(uint64_t id) {
         }
         return;
     }
+}
+
+// An invader's Death Knell watches us (1.7.0, the user's wish: the co-op players should know they are spied on). Shown
+// at most once every kKnellSpyEvery, however many invaders watch: the one watched is not flooded.
+void knell_spied(uint64_t by) {
+    static double last = -1e9;
+    if (now() - last < kKnellSpyEvery) {
+        LOG_INFO("[coop] %s's Death Knell watches us (told %.0f s ago)", steam::persona(by).c_str(), now() - last);
+        return;
+    }
+    last = now();
+    LOG_INFO("[coop] %s's Death Knell watches us: we are told", steam::persona(by).c_str());
+    say(kMsgKnellSpied);
 }
 
 void host_answer(const Pending& p) {
@@ -6348,6 +6373,23 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             group_on_answer(from, m);
             break;
         }
+        case kKnellSpy: {
+            KnellSpyMsg m{};
+            if (!as(&m) || g_invade || g_step != Step::InWorld) return;
+            if (g_role == Role::Host) {
+                const PeerInfo* by = peer(from);
+                if (!by || !by->invader || !admitted(from)) return;
+                if (m.target == steam::self()) {
+                    knell_spied(from);
+                } else if (const PeerInfo* t = peer(m.target); t && !t->invader && admitted(m.target)) {
+                    m.watcher = from;
+                    send_to(m.target, m);
+                }
+            } else if (g_role == Role::Guest && from == g_host && m.target == steam::self()) {
+                knell_spied(m.watcher);
+            }
+            break;
+        }
         case kGroupComing: {
             Simple m{};
             if (!as(&m) || g_role != Role::Guest || g_invade || from != g_host || g_step != Step::InWorld) return;
@@ -8039,6 +8081,20 @@ bool coop_guest_in_world() {
 bool active() { return g_role != Role::None; }
 bool idle() { return g_role == Role::None; }
 bool invader() { return g_role == Role::Guest && g_invade; }
+
+void knell_watching(uint64_t target) {
+    if (!g_invade || g_step != Step::InWorld || !g_host || !target) return;
+    static std::map<uint64_t, double> sent;
+    const auto it = sent.find(target);
+    if (it != sent.end() && now() - it->second < kKnellSpyEvery) return;
+    sent[target] = now();
+    KnellSpyMsg m{};
+    fill_header(&m, kKnellSpy);
+    m.target = target;
+    m.watcher = steam::self();
+    send_to(g_host, m);
+    LOG_INFO("[coop] Death Knell: watching %s, who is told", steam::persona(target).c_str());
+}
 const std::vector<PeerInfo>& peers() { return g_peers; }
 
 int remote_player_down(uint32_t chr, std::string* name) {

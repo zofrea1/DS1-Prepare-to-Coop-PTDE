@@ -160,6 +160,9 @@ bool coop_guest_in_world();
 bool active();       // any role, including searching and joining
 bool idle();         // no role at all (the session items may start one)
 bool invader();      // we invade
+// We invade and our Death Knell's view shows this co-op player (knell.cpp, every frame): their game is told, so that
+// they know they are spied on (1.7.0; at most once a minute for each player watched).
+void knell_watching(uint64_t target);
 // Another player's character here: 1 when that player's game has said they fell (their death message or status),
 // 0 when it says they live, -1 when the character is not matched to a player. `name` gets the player's name.
 int remote_player_down(uint32_t chr, std::string* name = nullptr);

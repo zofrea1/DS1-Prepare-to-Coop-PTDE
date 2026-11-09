@@ -1308,6 +1308,8 @@ void view_tick() {
     }
     // Their character came into our world, or left it: the camera follows.
     const Choice& shown = can[at];
+    // An invader watching a co-op player: that player hears their own knell toll (1.7.0, session.cpp).
+    if (!shown.sign && session::invader()) session::knell_watching(shown.id);
     const uint32_t chr = !shown.sign && shown.mate->chr && remote_character(shown.mate->chr) ? shown.mate->chr : 0;
     if (chr != g_shown_chr) {
         g_shown_chr = chr;

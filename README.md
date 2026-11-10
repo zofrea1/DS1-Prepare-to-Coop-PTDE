@@ -8,6 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 1.7.0 | DS1 PTDE FPS Unlock 2.1.0 |
 | Prepare to Co-op Edition 1.6.0 | DS1 PTDE FPS Unlock 2.0.0 |
 | Prepare to Co-op Edition 1.5.0 | DS1 PTDE FPS Unlock 1.9.0 |
 | Prepare to Co-op Edition 1.4.0 | DS1 PTDE FPS Unlock 1.9.0 |
@@ -23,7 +24,10 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 - **Spied on by the Death Knell**: when an invader's Death Knell watches a co-op player, that player sees "Your Death Knell tolls uneasily... an invader is spying on you!", at most once a minute however many invaders watch.
 - **Level matching for invasions**: an invader's search prefers worlds with a player near the invader's soul level. It is a preference, not a limit: with few players a world far from your level can still be picked, a single world that can take you is invaded as before, and invasion cooldowns are kept. A world with a player in your level range (from 10% below your soul level to 20 + 10% above it, the original game's Red Eye Orb range) is 8 times as likely to be picked as one far from it; the pull fades with every level outside the range. A group invasion goes by its highest soul level.
 - **Dried Fingers draw harder**: a world with Dried Fingers is now 150% more likely to be picked (was 65%), on top of the level matching.
+- **Includes the DS1 PTDE FPS Unlock 2.1.0**: kicks, jumping attacks, roll direction and the switchback read the stick as at 30 FPS, Blighttown's swamp and lingering attacks such as Poison Mist build up at the original rate, and bodies and enemies are no longer flung when they load in.
 - **Plays with 1.5.0, 1.5.1 and 1.6.0** (the same co-op protocol). Level matching needs 1.7.0 for the invader and for the world's host (a world of an older host counts as neither near nor far); YOUR TEAM DIED for invaders needs 1.7.0 for the invader only; the group warning needs 1.7.0 for the invaded world's host (and for each guest to see it); the Death Knell's warning needs 1.7.0 for the invader, the host and the player watched.
+
+The full list is in the [1.7.0 release notes](release-notes/v1.7.0.md).
 
 ## What's new in 1.6.0
 

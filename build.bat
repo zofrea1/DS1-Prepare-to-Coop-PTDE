@@ -18,7 +18,7 @@ set RSP=build\sources.rsp
 > %RSP% (for /f "usebackq eol=# delims=" %%f in ("fps-unlock\src\ptde\sources.txt") do @echo fps-unlock\%%f)
 >> %RSP% (for /f "usebackq eol=# delims=" %%f in ("src\sources.txt") do @echo %%f)
 
-cmd /c "call %VCVARS% x86 && rc /nologo /fo build\obj\coop.res src\coop.rc && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD /Ifps-unlock\src\common /Ifps-unlock\src\ptde /Isrc @%RSP% build\obj\coop.res /Fobuild\obj\ /Febuild\xinput1_3.dll /link /DEF:fps-unlock\src\ptde\xinput1_3.def /OPT:REF"
+cmd /c "call %VCVARS% x86 && rc /nologo /fo build\obj\coop.res src\coop.rc && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD /Ifps-unlock\src\common /Ifps-unlock\src\ptde /Isrc @%RSP% build\obj\coop.res /Fobuild\obj\ /Febuild\xinput1_3.dll /link /DEF:fps-unlock\src\ptde\xinput1_3.def /OPT:REF /MAP:build\xinput1_3.map"
 if errorlevel 1 exit /b 1
 
 set PSModulePath=

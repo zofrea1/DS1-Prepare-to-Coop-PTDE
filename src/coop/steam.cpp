@@ -130,9 +130,10 @@ private:
     LONGLONG t0_;
 };
 
-// The Steam client's regular pause (SteamPauseGuard, the FPS Unlock's steamguard.h): while its gate is closed the game
-// thread makes no Steam calls of ours. Packets sent meanwhile wait here and go out, in order, once it opens; packet
-// reads wait for the next frame; the Steam id and app id are asked once; the lobby member list keeps its last answer.
+// The Steam client's regular pause (SteamPauseGuard, the FPS Unlock's steamguard.h): our every-frame Steam calls go
+// only right after a quick answer from Steam. Packets sent meanwhile wait here and go out, in order, at the next such
+// moment (within ~10 ms); packet reads wait for it; the Steam id and app id are asked once; the lobby member list keeps
+// its last answer while Steam is in a pause.
 struct PendingSend {
     uint64_t to;
     std::vector<uint8_t> data;
@@ -264,6 +265,7 @@ bool patch_import(const char* name, void* hook, void** orig) {
 }
 
 SteamAPICall_t __fastcall hk_request_lobby_list(void* self, void*) {
+    steamguard_before_lobby_request(self);  // the distance filter the game set (SteamPauseGuard keeps it until now)
     if (!g_bypass && !g_game_tag.empty()) {
         static_cast<ISteamMatchmaking009*>(self)->AddRequestLobbyListStringFilter("ptdesc_game", g_game_tag.c_str(),
                                                                                   k_ELobbyComparisonEqual);
@@ -280,9 +282,10 @@ bool __fastcall hk_set_lobby_data(void* self, void*, uint64_t lobby, const char*
     return ok;
 }
 
-// Swaps the matchmaking interface's vtable for a copy with our two methods (the object is Steam's own).
+// Swaps the matchmaking interface's vtable for a copy with our methods (the object is Steam's own): the password tag
+// on the game's lobbies and searches, and SteamPauseGuard's distance filter (the game sets it every frame).
 void hook_matchmaking_instance(void* mm) {
-    if (!mm || g_mm_vtable_copy || g_game_tag.empty()) return;
+    if (!mm || g_mm_vtable_copy) return;
     void** vt = *static_cast<void***>(mm);
     constexpr int kSlots = 38;  // SteamMatchMaking009: GetFavoriteGameCount .. SetLinkedLobby
     g_mm_vtable_copy = static_cast<void**>(VirtualAlloc(nullptr, kSlots * sizeof(void*), MEM_COMMIT | MEM_RESERVE,
@@ -293,8 +296,9 @@ void hook_matchmaking_instance(void* mm) {
     g_set_data_orig = reinterpret_cast<SetLobbyDataFn>(vt[20]);
     g_mm_vtable_copy[4] = reinterpret_cast<void*>(&hk_request_lobby_list);
     g_mm_vtable_copy[20] = reinterpret_cast<void*>(&hk_set_lobby_data);
+    steamguard_take_distance_filter(g_mm_vtable_copy);
     *static_cast<void***>(mm) = g_mm_vtable_copy;
-    LOG_INFO("[coop] The game's own lobbies are limited to players with the same password");
+    if (!g_game_tag.empty()) LOG_INFO("[coop] The game's own lobbies are limited to players with the same password");
 }
 
 void* __cdecl hk_matchmaking() {
@@ -314,7 +318,8 @@ bool __cdecl hk_restart(uint32_t) {
 }
 
 void __cdecl hk_run_callbacks() {
-    if (!steamguard_closed()) {  // closed: Steam keeps the callbacks for the next frame
+    static int64_t last = 0;
+    if (steamguard_frame_call(&last)) {  // otherwise Steam keeps the callbacks for a later frame
         Timed timed("the game's SteamAPI_RunCallbacks");
         g_api.run_callbacks();
     }
@@ -348,7 +353,7 @@ bool install_early(uint32_t app_id, void (*tick)(), const std::string& game_tag)
     g_api.register_result = reinterpret_cast<CallResultFn>(get("SteamAPI_RegisterCallResult"));
     bool ok = patch_import("SteamAPI_RunCallbacks", reinterpret_cast<void*>(&hk_run_callbacks),
                            reinterpret_cast<void**>(&g_api.run_callbacks));
-    if (!game_tag.empty()) {
+    {
         void* real = nullptr;
         if (patch_import("SteamMatchmaking", reinterpret_cast<void*>(&hk_matchmaking), &real)) {
             g_api.matchmaking = reinterpret_cast<Accessor>(real);
@@ -476,7 +481,7 @@ uint64_t lobby_owner(uint64_t lobby) {
 std::vector<uint64_t> lobby_members(uint64_t lobby) {
     std::vector<uint64_t> out;
     if (!g_mm || !lobby) return out;
-    if (steamguard_closed()) {
+    if (steamguard_paused()) {
         auto it = g_members_seen.find(lobby);
         if (it != g_members_seen.end()) return it->second;
     }
@@ -509,8 +514,8 @@ bool send_now(uint64_t to, const void* data, uint32_t size, bool reliable) {
                                 kChannel);
 }
 
-void flush_pending() {
-    if (g_pending.empty() || steamguard_closed() || !g_net) return;
+void flush_pending() {  // call only when an every-frame call may go ahead
+    if (g_pending.empty() || !g_net) return;
     std::vector<PendingSend> list;
     list.swap(g_pending);
     for (const PendingSend& p : list) send_now(p.to, p.data.data(), static_cast<uint32_t>(p.data.size()), p.reliable);
@@ -519,20 +524,21 @@ void flush_pending() {
 bool send(uint64_t to, const void* data, uint32_t size, bool reliable) {
     if (!g_net || !to) return false;
     g_accepted.insert(to);
-    if (steamguard_closed() || !g_pending.empty()) {
-        if (g_pending.size() < 4096) {
-            const auto* bytes = static_cast<const uint8_t*>(data);
-            g_pending.push_back({to, std::vector<uint8_t>(bytes, bytes + size), reliable});
-        }
-        flush_pending();
-        return true;
+    static int64_t last = 0;
+    const bool go = steamguard_frame_call(&last);
+    if (go && g_pending.empty()) return send_now(to, data, size, reliable);
+    if (g_pending.size() < 4096) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        g_pending.push_back({to, std::vector<uint8_t>(bytes, bytes + size), reliable});
     }
-    return send_now(to, data, size, reliable);
+    if (go) flush_pending();
+    return true;
 }
 
 void poll(const std::function<void(uint64_t, const uint8_t*, uint32_t)>& fn) {
     if (!g_net) return;
-    if (steamguard_closed()) return;  // the packets wait in Steam for the next frame
+    static int64_t last = 0;
+    if (!steamguard_frame_call(&last)) return;  // the packets wait in Steam for the next quick moment
     flush_pending();
     static std::vector<uint8_t> buf(64 * 1024);
     uint32_t size = 0;

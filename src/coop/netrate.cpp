@@ -686,7 +686,9 @@ void set_dynamic(bool on) { g_dynamic = on; }
 int smoothing_ms(uint32_t manip) {
     if (!g_receiving || !manip) return -1;
     const Track* t = track(manip, false);
-    if (!t || g_clock - t->last > 3.0) return -1;
+    // Against the real clock: g_clock moves only when some update comes in, so a host whose only copy is a guest
+    // standing still kept showing that guest's smoothing.
+    if (!t || clock_now() - t->last > 3.0) return -1;
     return static_cast<int>(t->smooth * 1000.0 + 0.5);
 }
 

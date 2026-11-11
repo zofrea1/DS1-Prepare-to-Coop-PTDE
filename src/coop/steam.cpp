@@ -17,6 +17,8 @@
 
 namespace coop::steam {
 
+void queue_accept(uint64_t peer);  // below (the network thread's queue)
+
 namespace {
 
 using Accessor = void*(__cdecl*)();
@@ -246,7 +248,7 @@ void register_callbacks() {
             if (++lines <= 40) LOG_INFO("[coop] Steam: %s's session accepted (in our lobby)", persona(peer).c_str());
         }
         if (g_accepted.count(peer)) {
-            g_net->AcceptP2PSessionWithUser(CSteamID(peer));
+            queue_accept(peer);  // in order with our closes (the network thread)
         } else if (++lines <= 40) {
             LOG_INFO("[coop] Steam: a session request from %s not accepted yet (not in our lobby)", persona(peer).c_str());
         }
@@ -399,6 +401,9 @@ bool ready() {
     g_friends = g_api.friends ? static_cast<ISteamFriends014*>(g_api.friends()) : nullptr;
     g_utils = g_api.utils ? static_cast<ISteamUtils006*>(g_api.utils()) : nullptr;
     if (!g_mm || !g_net || !g_user) return false;
+    // The game's own P2P sends (its session traffic, every frame) go through SteamPauseGuard's queue; ours are on the
+    // network thread below and call Steam's methods directly.
+    steamguard_wrap_networking(g_net);
     if (!g_net_wake) g_net_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!g_net_thread && g_net_wake) g_net_thread = CreateThread(nullptr, 0, net_thread, nullptr, 0, nullptr);
     if (!g_net_thread) {
@@ -538,7 +543,20 @@ void set_accept_check(std::function<bool(uint64_t)> fn) { g_accept_check = std::
 
 // Sends what the game thread queued (in order, at once when woken) and reads what arrived (every 4 ms, about as
 // often as the game thread did at 225 FPS). A Steam pause holds this thread, not a frame.
+using NetSendFn = bool(__fastcall*)(void*, void*, uint64_t, const void*, uint32_t, int, int);
+using NetPeerFn = bool(__fastcall*)(void*, void*, uint64_t);
+using NetChannelFn = bool(__fastcall*)(void*, void*, uint64_t, int);
+
+// Steam's own networking methods: the ones SteamPauseGuard keeps when it puts its queue in, else the object's.
+void* net_method(int slot) {
+    void* m = steamguard_networking_original(slot);
+    return m ? m : (*reinterpret_cast<void***>(g_net))[slot];
+}
+
 DWORD WINAPI net_thread(void*) {
+    const auto send_p2p = reinterpret_cast<NetSendFn>(net_method(0));
+    const auto accept_p2p = reinterpret_cast<NetPeerFn>(net_method(3));
+    const auto close_channel = reinterpret_cast<NetChannelFn>(net_method(5));
     std::vector<NetCmd> cmds;
     std::vector<NetIn> got;
     std::vector<uint8_t> buf(64 * 1024);
@@ -572,8 +590,8 @@ DWORD WINAPI net_thread(void*) {
         for (const NetCmd& c : cmds) {
             const CSteamID peer(c.peer);
             if (c.kind == NetCmd::kSend) {
-                if (!g_net->SendP2PPacket(peer, c.data.data(), static_cast<uint32_t>(c.data.size()),
-                                          c.reliable ? k_EP2PSendReliable : k_EP2PSendUnreliableNoDelay, kChannel) &&
+                if (!send_p2p(g_net, nullptr, c.peer, c.data.data(), static_cast<uint32_t>(c.data.size()),
+                              c.reliable ? k_EP2PSendReliable : k_EP2PSendUnreliableNoDelay, kChannel) &&
                     ++failures <= 20) {
                     LOG_ERROR("[coop] Steam did not take a packet for %016llx (%u bytes)",
                               static_cast<unsigned long long>(c.peer), static_cast<unsigned>(c.data.size()));
@@ -583,9 +601,9 @@ DWORD WINAPI net_thread(void*) {
                 send_sum += d;
                 send_max = d > send_max ? d : send_max;
             } else if (c.kind == NetCmd::kAccept) {
-                g_net->AcceptP2PSessionWithUser(peer);
+                accept_p2p(g_net, nullptr, c.peer);
             } else {
-                g_net->CloseP2PChannelWithUser(peer, kChannel);
+                close_channel(g_net, nullptr, c.peer, kChannel);
             }
         }
         cmds.clear();
@@ -657,6 +675,10 @@ void accept(uint64_t peer) {
     if (!peer) return;
     g_accepted.insert(peer);
     if (g_net) net_queue({NetCmd::kAccept, false, peer, {}});
+}
+
+void queue_accept(uint64_t peer) {
+    if (g_net && peer) net_queue({NetCmd::kAccept, false, peer, {}});
 }
 
 void close(uint64_t peer) {

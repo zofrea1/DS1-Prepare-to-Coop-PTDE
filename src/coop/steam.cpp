@@ -46,8 +46,9 @@ void (*g_tick)() = nullptr;
 bool g_ready = false;
 bool g_in_tick = false;
 
-// The game's own lobbies (its sessions, signs, invasions, messages) are limited to players with the same
-// co-op password: every lobby the game tags gets our tag too, and every search the game makes asks for it.
+// The game's own lobbies (its connections to other players for ghosts, messages and bloodstains, and its signs and
+// invasions, which vanillamp.cpp turns off) are limited to Prepare to Co-op players: every lobby the game tags gets
+// our tag too, and every search the game makes asks for it (session::game_tag; up to 1.8.0 it was the password's).
 std::string g_game_tag;
 bool g_bypass = false;  // our own lobby calls skip the game filter
 void** g_mm_vtable_copy = nullptr;
@@ -285,16 +286,98 @@ bool patch_import(const char* name, void* hook, void** orig) {
     return false;
 }
 
+// ------------------------------------------------------------------ the game's own lobby calls, for the log
+// (GameNetLog: which searches the game makes for the players it connects to, and which lobbies it makes, joins and
+// tags). The first few of each kind are logged.
+bool g_net_diag = false;
+using StrFilterFn = void(__fastcall*)(void*, void*, const char*, const char*, int);
+using NumFilterFn = void(__fastcall*)(void*, void*, const char*, int, int);
+using NearFilterFn = void(__fastcall*)(void*, void*, const char*, int);
+using IntArgFn = void(__fastcall*)(void*, void*, int);
+using CreateLobbyFn = SteamAPICall_t(__fastcall*)(void*, void*, int, int);
+using LobbyIdFn = SteamAPICall_t(__fastcall*)(void*, void*, uint64_t);
+using LeaveLobbyFn = void(__fastcall*)(void*, void*, uint64_t);
+StrFilterFn g_str_filter_orig = nullptr;
+NumFilterFn g_num_filter_orig = nullptr;
+NearFilterFn g_near_filter_orig = nullptr;
+IntArgFn g_slots_filter_orig = nullptr, g_count_filter_orig = nullptr;
+CreateLobbyFn g_create_orig = nullptr;
+LobbyIdFn g_join_orig = nullptr;
+LeaveLobbyFn g_leave_orig = nullptr;
+std::string g_search;  // the filters of the game's search being built
+std::map<std::string, int> g_lobby_log_counts;
+
+bool lobby_log_once(const std::string& kind) { return g_lobby_log_counts.size() < 200 && ++g_lobby_log_counts[kind] <= 3; }
+
+void __fastcall hk_str_filter(void* self, void*, const char* key, const char* value, int cmp) {
+    if (g_net_diag && !g_bypass) {
+        char b[160];
+        std::snprintf(b, sizeof(b), " %s%s\"%.40s\"", key ? key : "?", cmp == 0 ? "==" : cmp == 3 ? "!=" : "~", value ? value : "");
+        g_search += b;
+    }
+    g_str_filter_orig(self, nullptr, key, value, cmp);
+}
+void __fastcall hk_num_filter(void* self, void*, const char* key, int value, int cmp) {
+    if (g_net_diag && !g_bypass) {
+        char b[96];
+        std::snprintf(b, sizeof(b), " %s(cmp %d)%d", key ? key : "?", cmp, value);
+        g_search += b;
+    }
+    g_num_filter_orig(self, nullptr, key, value, cmp);
+}
+void __fastcall hk_near_filter(void* self, void*, const char* key, int value) {
+    if (g_net_diag && !g_bypass) {
+        char b[96];
+        std::snprintf(b, sizeof(b), " %s near %d", key ? key : "?", value);
+        g_search += b;
+    }
+    g_near_filter_orig(self, nullptr, key, value);
+}
+void __fastcall hk_slots_filter(void* self, void*, int n) {
+    if (g_net_diag && !g_bypass) g_search += " slots>=" + std::to_string(n);
+    g_slots_filter_orig(self, nullptr, n);
+}
+void __fastcall hk_count_filter(void* self, void*, int n) {
+    if (g_net_diag && !g_bypass) g_search += " max " + std::to_string(n);
+    g_count_filter_orig(self, nullptr, n);
+}
+SteamAPICall_t __fastcall hk_create_lobby(void* self, void*, int type, int max_members) {
+    if (g_net_diag && !g_bypass && lobby_log_once("create")) {
+        LOG_INFO("[coop] Game lobby: CreateLobby(type %d, max %d)", type, max_members);
+    }
+    return g_create_orig(self, nullptr, type, max_members);
+}
+SteamAPICall_t __fastcall hk_join_lobby(void* self, void*, uint64_t lobby) {
+    if (g_net_diag && !g_bypass && lobby_log_once("join")) {
+        LOG_INFO("[coop] Game lobby: JoinLobby(%016llx)", static_cast<unsigned long long>(lobby));
+    }
+    return g_join_orig(self, nullptr, lobby);
+}
+void __fastcall hk_leave_lobby(void* self, void*, uint64_t lobby) {
+    if (g_net_diag && !g_bypass && lobby_log_once("leave")) {
+        LOG_INFO("[coop] Game lobby: LeaveLobby(%016llx)", static_cast<unsigned long long>(lobby));
+    }
+    g_leave_orig(self, nullptr, lobby);
+}
+
 SteamAPICall_t __fastcall hk_request_lobby_list(void* self, void*) {
     steamguard_before_lobby_request(self);  // the distance filter the game set (SteamPauseGuard keeps it until now)
     if (!g_bypass && !g_game_tag.empty()) {
         static_cast<ISteamMatchmaking009*>(self)->AddRequestLobbyListStringFilter("ptdesc_game", g_game_tag.c_str(),
                                                                                   k_ELobbyComparisonEqual);
     }
+    if (g_net_diag && !g_bypass) {
+        if (lobby_log_once("search:" + g_search)) LOG_INFO("[coop] Game lobby search:%s", g_search.c_str());
+        g_search.clear();
+    }
     return g_request_orig(self, nullptr);
 }
 
 bool __fastcall hk_set_lobby_data(void* self, void*, uint64_t lobby, const char* key, const char* value) {
+    if (g_net_diag && !g_bypass && lobby_log_once(std::string("data:") + (key ? key : "?"))) {
+        LOG_INFO("[coop] Game lobby %016llx data %s = \"%.60s\"", static_cast<unsigned long long>(lobby),
+                 key ? key : "?", value ? value : "");
+    }
     const bool ok = g_set_data_orig(self, nullptr, lobby, key, value);
     if (!g_bypass && !g_game_tag.empty() && !g_tagged.count(lobby)) {
         g_tagged.insert(lobby);
@@ -317,9 +400,28 @@ void hook_matchmaking_instance(void* mm) {
     g_set_data_orig = reinterpret_cast<SetLobbyDataFn>(vt[20]);
     g_mm_vtable_copy[4] = reinterpret_cast<void*>(&hk_request_lobby_list);
     g_mm_vtable_copy[20] = reinterpret_cast<void*>(&hk_set_lobby_data);
+    g_str_filter_orig = reinterpret_cast<StrFilterFn>(vt[5]);
+    g_num_filter_orig = reinterpret_cast<NumFilterFn>(vt[6]);
+    g_near_filter_orig = reinterpret_cast<NearFilterFn>(vt[7]);
+    g_slots_filter_orig = reinterpret_cast<IntArgFn>(vt[8]);
+    g_count_filter_orig = reinterpret_cast<IntArgFn>(vt[10]);
+    g_create_orig = reinterpret_cast<CreateLobbyFn>(vt[13]);
+    g_join_orig = reinterpret_cast<LobbyIdFn>(vt[14]);
+    g_leave_orig = reinterpret_cast<LeaveLobbyFn>(vt[15]);
+    g_mm_vtable_copy[5] = reinterpret_cast<void*>(&hk_str_filter);
+    g_mm_vtable_copy[6] = reinterpret_cast<void*>(&hk_num_filter);
+    g_mm_vtable_copy[7] = reinterpret_cast<void*>(&hk_near_filter);
+    g_mm_vtable_copy[8] = reinterpret_cast<void*>(&hk_slots_filter);
+    g_mm_vtable_copy[10] = reinterpret_cast<void*>(&hk_count_filter);
+    g_mm_vtable_copy[13] = reinterpret_cast<void*>(&hk_create_lobby);
+    g_mm_vtable_copy[14] = reinterpret_cast<void*>(&hk_join_lobby);
+    g_mm_vtable_copy[15] = reinterpret_cast<void*>(&hk_leave_lobby);
     steamguard_take_distance_filter(g_mm_vtable_copy);
     *static_cast<void***>(mm) = g_mm_vtable_copy;
-    if (!g_game_tag.empty()) LOG_INFO("[coop] The game's own lobbies are limited to players with the same password");
+    if (!g_game_tag.empty()) {
+        LOG_INFO("[coop] The game's own lobbies (ghosts, messages, bloodstains) are shared by every Prepare to Co-op "
+                 "player, whatever the password");
+    }
 }
 
 void* __cdecl hk_matchmaking() {
@@ -352,7 +454,57 @@ void __cdecl hk_run_callbacks() {
 
 }  // namespace
 
-bool install_early(uint32_t app_id, void (*tick)(), const std::string& game_tag) {
+namespace {
+
+// ------------------------------------------------------------------ the game's own network log (diagnostics)
+// The game's network layer (DLNRD: lobbies, P2P, sessions) writes its decisions through 0x707470 (cdecl: category,
+// wide format, va_list), which formats them only when a log sink ([0x136304C]) is set, and none is in the release
+// game. With GameNetLog, while the sink is empty, the function is replaced by one that writes to our log: the first
+// few of each message, then 600 lines in all.
+constexpr uint32_t kGameNetLog = 0x00707470;
+constexpr uint32_t kGameNetLogSink = 0x0136304C;
+SRWLOCK g_netlog_lock = SRWLOCK_INIT;
+std::map<const wchar_t*, int> g_netlog_counts;
+int g_netlog_lines = 0;
+
+void __cdecl hk_game_net_log(int category, const wchar_t* fmt, va_list args) {
+    if (!fmt) return;
+    AcquireSRWLockExclusive(&g_netlog_lock);
+    const bool go = g_netlog_lines < 600 && ++g_netlog_counts[fmt] <= 6;
+    if (go) ++g_netlog_lines;
+    ReleaseSRWLockExclusive(&g_netlog_lock);
+    if (!go) return;
+    wchar_t w[512];
+    __try {
+        if (_vsnwprintf_s(w, _countof(w), _TRUNCATE, fmt, args) < 0) w[_countof(w) - 2] = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    char u[1024];
+    if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof(u), nullptr, nullptr)) return;
+    LOG_INFO("[coop] game net %08X: %s", static_cast<unsigned>(category), u);
+}
+
+void install_game_net_log() {
+    static const uint8_t kExpect[] = {0x6A, 0xFF, 0x68, 0x90, 0x83, 0x03, 0x01};  // push -1; push 1038390h
+    auto* site = reinterpret_cast<uint8_t*>(kGameNetLog);
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0 || *reinterpret_cast<void**>(kGameNetLogSink) != nullptr) {
+        return;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old)) return;
+    site[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_game_net_log) - (kGameNetLog + 5));
+    std::memcpy(site + 1, &rel, 4);
+    VirtualProtect(site, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+}
+
+}  // namespace
+
+bool install_early(uint32_t app_id, void (*tick)(), const std::string& game_tag, bool game_net_log) {
+    g_net_diag = game_net_log;
+    if (game_net_log) install_game_net_log();
     g_app_id = app_id;
     g_game_tag = game_tag;
     g_tick = tick;

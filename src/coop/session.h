@@ -88,8 +88,8 @@ struct PeerInfo {
 };
 
 void configure(const Config& cfg);
-// The tag that keeps the game's own lobbies among players with this password.
-std::string game_tag(const std::string& password);
+// The tag that keeps the game's own lobbies (ghosts, messages, bloodstains) among Prepare to Co-op players.
+std::string game_tag();
 void tick();
 
 // Requests (items, hotkeys). Each does nothing (and says why in the log) when it does not apply.

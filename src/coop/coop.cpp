@@ -22,6 +22,7 @@
 #include "talk.h"
 #include "text.h"
 #include "updates.h"
+#include "vanillamp.h"
 #include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -147,6 +148,13 @@ int can_use(int32_t id) {
 bool use_item(int32_t id) {
     using namespace coop;
     if (knell::swallow_use(id)) return true;
+    // The game's own summoning and invading are off (vanillamp.cpp): the soapstone or orb answers with a note and
+    // keeps its effect (and a Cracked Red Eye Orb is not used up: the game's UseGoods, which takes it, is not run).
+    if (const wchar_t* note = vanillamp::item_note(id)) {
+        LOG_INFO("[coop] Vanilla multiplayer item %d used: refused (the co-op items take its place)", id);
+        text::show(note);
+        return true;
+    }
     switch (id) {
         case items::kHost: session::host(); return true;
         case items::kJoin: session::join(); return true;
@@ -371,8 +379,8 @@ void coop_install_early(const CoopConfig& config) {
     coop::crterror::install();
     // Before the game makes its session and character managers.
     coop::players::install_early(g_cfg.max_players);
-    g_steam_hooked = coop::steam::install_early(static_cast<uint32_t>(g_cfg.app_id), &tick,
-                                                coop::session::game_tag(g_cfg.password));
+    g_steam_hooked = coop::steam::install_early(static_cast<uint32_t>(g_cfg.app_id), &tick, coop::session::game_tag(),
+                                                g_cfg.game_net_log);
 }
 
 void coop_install(const CoopConfig& config) {
@@ -426,6 +434,7 @@ void coop_install(const CoopConfig& config) {
     coop::world::set_before_rest_handler(&before_rest);
     g_miracle = coop::world::set_homeward_state_handler(&homeward_state);
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
+    coop::vanillamp::install();
     coop::netrate::set_smoothing(g_cfg.net_smoothing);
     coop::netrate::set_dynamic(g_cfg.dynamic_smoothing);
     coop::world::set_blossom_counter(&blossom_count);

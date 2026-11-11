@@ -18,7 +18,7 @@ constexpr int kChannel = 9;  // the game reads channels 0 and 1
 // Before the game initialises Steam (DllMain): run as `app_id`, and get a per-frame tick on the game thread
 // (right after the game's SteamAPI_RunCallbacks). A non-empty `game_tag` limits the game's own lobbies
 // (sessions, signs, invasions, messages) to players with the same tag.
-bool install_early(uint32_t app_id, void (*tick)(), const std::string& game_tag);
+bool install_early(uint32_t app_id, void (*tick)(), const std::string& game_tag, bool game_net_log);
 // After SteamAPI_Init: interfaces and callbacks. Safe to call every frame; true once ready.
 bool ready();
 uint32_t app_id();

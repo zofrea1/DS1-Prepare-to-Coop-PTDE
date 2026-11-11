@@ -7345,7 +7345,11 @@ void set_callbacks() {
 
 }  // namespace
 
-std::string game_tag(const std::string& password) { return "g" + password_key(password); }
+// 1.9.0: one tag for every Prepare to Co-op player, whatever the password: the game's own lobbies carry its ghosts,
+// messages and bloodstains, which every player of the mod now shares. Its summon signs and invasions, which ride on
+// the same lobbies, are off (vanillamp.cpp). Up to 1.8.0 the tag was "g" + the password's key, so those builds and
+// this one never share these lobbies (no older build can summon or invade a newer one through the game's own way).
+std::string game_tag() { return "open1"; }
 
 void configure(const Config& cfg) {
     g_cfg = cfg;

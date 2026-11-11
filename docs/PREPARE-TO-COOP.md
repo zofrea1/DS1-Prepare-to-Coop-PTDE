@@ -65,8 +65,17 @@ joining, invading, dying, resting, bosses, NPCs, area changes, cutscene travel, 
 
 **Steam.** The game runs as Steam's Spacewar (app 480) while Prepare to Co-op is on. PTDE's own app (211420)
 has had its Steam lobbies switched off since 2022, and Spacewar is the long-standing community route for PTDE
-multiplayer. The game's own online features (messages, bloodstains, signs, vanilla invasions, the ghosts of
-other players) still work, but only between players with the same password. ds1sc has no
+multiplayer. The game's own online features ride on its own Steam lobbies: each game keeps one, finds
+others in it and connects to a few of them, and the messages, bloodstains, ghosts, summon signs and invasions
+travel over those connections. Up to 1.8.0 the mod tagged those lobbies with the password, so all of it worked
+between players with the same password. From 1.9.0 the tag is one for every Prepare to Co-op player
+(`session::game_tag`, coop/steam.cpp), so messages, bloodstains and ghosts are shared by all of them, and the
+game's own summon signs and invasions (and the covenants' summons, which are signs too) are off
+(coop/vanillamp.cpp): the summoner's game opens no session for a player's sign (`0xDB3613`) and the sign
+owner's game never joins one from the game's invitation (`0xDB481C`); the soapstones and orbs answer with a
+note and are not used up. NPC signs and NPC invaders are not touched. The two tags never meet: 1.8.0 and 1.9.0
+players do not see each other's ghosts or messages (co-op sessions are unaffected). `GameNetLog = true` puts the
+game's own network messages (its DLNRD log, normally discarded) and its lobby calls in the log. ds1sc has no
 such features (Remastered's online play needs FromSoftware's servers, which that mod replaces).
 
 **Title screen.** While Prepare to Co-op is on, the title screen reads PREPARE TO CO-OP EDITION instead of
@@ -1374,7 +1383,7 @@ is not in the table.
 - **Invasion rewards:** the Remastered mod's covenant reward for a winning invader is not reproduced; the side that
   wins an invasion gets Humanity instead (`InvasionRewards`).
 - **Item descriptions** are written for the port; names, one-line infos and icons are the original's.
-- Ghosts, messages and bloodstains of players with the same password still appear (ds1sc has none).
+- Ghosts, messages and bloodstains of every Prepare to Co-op player appear, whatever the password (ds1sc has none); the game's own summoning and invading are off.
 - The Remastered mod's GitHub ban list is not used.
 - **Teams** ("allies in teams") put the host against the guests; the Remastered mod's exact team split could
   not be reproduced with PTDE's team table.

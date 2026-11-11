@@ -30,3 +30,4 @@ src\coop\itemshare.cpp
 src\coop\crterror.cpp
 src\coop\knell.cpp
 src\coop\logupload.cpp
+src\coop\vanillamp.cpp

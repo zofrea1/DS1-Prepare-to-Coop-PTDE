@@ -130,16 +130,28 @@ private:
     LONGLONG t0_;
 };
 
-// The Steam client's regular pause (SteamPauseGuard, the FPS Unlock's steamguard.h): our every-frame Steam calls go
-// only right after a quick answer from Steam. Packets sent meanwhile wait here and go out, in order, at the next such
-// moment (within ~10 ms); packet reads wait for it; the Steam id and app id are asked once; the lobby member list keeps
-// its last answer while Steam is in a pause.
-struct PendingSend {
-    uint64_t to;
-    std::vector<uint8_t> data;
+// The Steam client's regular pause (SteamPauseGuard, the FPS Unlock's steamguard.h): every Steam call waits while the
+// Windows Steam client pauses. Co-op's packets go through Steam on a thread of their own (net_thread below), where that
+// wait holds back packets, not the game's frame; the game thread only fills and empties two queues. The Steam id and
+// app id are asked once; the lobby member list keeps its last answer while Steam is in a pause.
+struct NetCmd {
+    enum Kind : uint8_t { kSend, kAccept, kClose } kind;
     bool reliable;
+    uint64_t peer;
+    std::vector<uint8_t> data;
 };
-std::vector<PendingSend> g_pending;
+struct NetIn {
+    uint64_t from;
+    std::vector<uint8_t> data;
+};
+SRWLOCK g_net_lock = SRWLOCK_INIT;
+std::vector<NetCmd> g_net_out;  // game thread -> network thread, in order
+std::vector<NetIn> g_net_in;    // network thread -> game thread
+HANDLE g_net_wake = nullptr;
+HANDLE g_net_thread = nullptr;
+constexpr size_t kNetQueueMax = 20000;   // commands queued for sending (a stuck Steam would otherwise grow it)
+constexpr size_t kNetInHold = 4000;      // received packets waiting for the game thread: beyond this they stay in
+                                         // Steam (a long load), never dropped
 uint64_t g_self_id = 0;
 uint32_t g_app_id_seen = 0;
 std::map<uint64_t, std::vector<uint64_t>> g_members_seen;
@@ -368,6 +380,8 @@ bool install_early(uint32_t app_id, void (*tick)(), const std::string& game_tag)
     return ok;
 }
 
+DWORD WINAPI net_thread(void*);  // below
+
 bool ready() {
     if (g_ready) return true;
     if (!g_api.matchmaking || !g_api.networking || !g_api.user || !g_api.register_callback) return false;
@@ -378,6 +392,13 @@ bool ready() {
     g_friends = g_api.friends ? static_cast<ISteamFriends014*>(g_api.friends()) : nullptr;
     g_utils = g_api.utils ? static_cast<ISteamUtils006*>(g_api.utils()) : nullptr;
     if (!g_mm || !g_net || !g_user) return false;
+    if (!g_net_wake) g_net_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!g_net_thread && g_net_wake) g_net_thread = CreateThread(nullptr, 0, net_thread, nullptr, 0, nullptr);
+    if (!g_net_thread) {
+        LOG_ERROR("[coop] Could not start the network thread");
+        return false;
+    }
+    SetThreadPriority(g_net_thread, THREAD_PRIORITY_ABOVE_NORMAL);
     register_callbacks();
     g_ready = true;
     LOG_INFO("[coop] Steam ready: app %u, user %016llx (%s)", app_id(), static_cast<unsigned long long>(self()),
@@ -508,63 +529,88 @@ void on_lobby_member(std::function<void(uint64_t, uint64_t, bool)> fn) { g_membe
 void on_p2p_failed(std::function<void(uint64_t, int)> fn) { g_fail_fn = std::move(fn); }
 void set_accept_check(std::function<bool(uint64_t)> fn) { g_accept_check = std::move(fn); }
 
-bool send_now(uint64_t to, const void* data, uint32_t size, bool reliable) {
-    Timed timed("SendP2PPacket");
-    return g_net->SendP2PPacket(CSteamID(to), data, size, reliable ? k_EP2PSendReliable : k_EP2PSendUnreliableNoDelay,
-                                kChannel);
+// Sends what the game thread queued (in order, at once when woken) and reads what arrived (every 4 ms, about as
+// often as the game thread did at 225 FPS). A Steam pause holds this thread, not a frame.
+DWORD WINAPI net_thread(void*) {
+    std::vector<NetCmd> cmds;
+    std::vector<NetIn> got;
+    std::vector<uint8_t> buf(64 * 1024);
+    int failures = 0;
+    for (;;) {
+        WaitForSingleObject(g_net_wake, 4);
+        AcquireSRWLockExclusive(&g_net_lock);
+        cmds.swap(g_net_out);
+        ReleaseSRWLockExclusive(&g_net_lock);
+        for (const NetCmd& c : cmds) {
+            const CSteamID peer(c.peer);
+            if (c.kind == NetCmd::kSend) {
+                if (!g_net->SendP2PPacket(peer, c.data.data(), static_cast<uint32_t>(c.data.size()),
+                                          c.reliable ? k_EP2PSendReliable : k_EP2PSendUnreliableNoDelay, kChannel) &&
+                    ++failures <= 20) {
+                    LOG_ERROR("[coop] Steam did not take a packet for %016llx (%u bytes)",
+                              static_cast<unsigned long long>(c.peer), static_cast<unsigned>(c.data.size()));
+                }
+            } else if (c.kind == NetCmd::kAccept) {
+                g_net->AcceptP2PSessionWithUser(peer);
+            } else {
+                g_net->CloseP2PChannelWithUser(peer, kChannel);
+            }
+        }
+        cmds.clear();
+        AcquireSRWLockShared(&g_net_lock);
+        const bool room = g_net_in.size() < kNetInHold;
+        ReleaseSRWLockShared(&g_net_lock);
+        uint32_t size = 0;
+        for (int guard = 0; room && guard < 256 && g_net->IsP2PPacketAvailable(&size, kChannel); ++guard) {
+            if (size > buf.size()) buf.resize(size);
+            CSteamID from;
+            uint32_t n = 0;
+            if (!g_net->ReadP2PPacket(buf.data(), static_cast<uint32_t>(buf.size()), &n, &from, kChannel)) break;
+            got.push_back({from.ConvertToUint64(), std::vector<uint8_t>(buf.begin(), buf.begin() + n)});
+        }
+        if (!got.empty()) {
+            AcquireSRWLockExclusive(&g_net_lock);
+            for (NetIn& p : got) g_net_in.push_back(std::move(p));
+            ReleaseSRWLockExclusive(&g_net_lock);
+            got.clear();
+        }
+    }
 }
 
-void flush_pending() {  // call only when an every-frame call may go ahead
-    if (g_pending.empty() || !g_net) return;
-    std::vector<PendingSend> list;
-    list.swap(g_pending);
-    for (const PendingSend& p : list) send_now(p.to, p.data.data(), static_cast<uint32_t>(p.data.size()), p.reliable);
+void net_queue(NetCmd&& c) {
+    AcquireSRWLockExclusive(&g_net_lock);
+    if (g_net_out.size() < kNetQueueMax) g_net_out.push_back(std::move(c));
+    ReleaseSRWLockExclusive(&g_net_lock);
+    if (g_net_wake) SetEvent(g_net_wake);
 }
 
 bool send(uint64_t to, const void* data, uint32_t size, bool reliable) {
     if (!g_net || !to) return false;
     g_accepted.insert(to);
-    static int64_t last = 0;
-    const bool go = steamguard_frame_call(&last);
-    if (go && g_pending.empty()) return send_now(to, data, size, reliable);
-    if (g_pending.size() < 4096) {
-        const auto* bytes = static_cast<const uint8_t*>(data);
-        g_pending.push_back({to, std::vector<uint8_t>(bytes, bytes + size), reliable});
-    }
-    if (go) flush_pending();
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    net_queue({NetCmd::kSend, reliable, to, std::vector<uint8_t>(bytes, bytes + size)});
     return true;
 }
 
 void poll(const std::function<void(uint64_t, const uint8_t*, uint32_t)>& fn) {
     if (!g_net) return;
-    static int64_t last = 0;
-    if (!steamguard_frame_call(&last)) return;  // the packets wait in Steam for the next quick moment
-    flush_pending();
-    static std::vector<uint8_t> buf(64 * 1024);
-    uint32_t size = 0;
-    int guard = 0;
-    for (;;) {
-        {
-            Timed timed("IsP2PPacketAvailable");
-            if (!g_net->IsP2PPacketAvailable(&size, kChannel) || guard++ >= 256) break;
-        }
-        if (size > buf.size()) buf.resize(size);
-        CSteamID from;
-        uint32_t got = 0;
-        if (!g_net->ReadP2PPacket(buf.data(), static_cast<uint32_t>(buf.size()), &got, &from, kChannel)) break;
-        fn(from.ConvertToUint64(), buf.data(), got);
-    }
+    static std::vector<NetIn> got;
+    AcquireSRWLockExclusive(&g_net_lock);
+    got.swap(g_net_in);
+    ReleaseSRWLockExclusive(&g_net_lock);
+    for (const NetIn& p : got) fn(p.from, p.data.data(), static_cast<uint32_t>(p.data.size()));
+    got.clear();
 }
 
 void accept(uint64_t peer) {
     if (!peer) return;
     g_accepted.insert(peer);
-    if (g_net) g_net->AcceptP2PSessionWithUser(CSteamID(peer));
+    if (g_net) net_queue({NetCmd::kAccept, false, peer, {}});
 }
 
 void close(uint64_t peer) {
     g_accepted.erase(peer);
-    if (g_net && peer) g_net->CloseP2PChannelWithUser(CSteamID(peer), kChannel);
+    if (g_net && peer) net_queue({NetCmd::kClose, false, peer, {}});
 }
 
 }  // namespace coop::steam

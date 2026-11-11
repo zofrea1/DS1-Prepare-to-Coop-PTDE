@@ -3,7 +3,7 @@
 #include "steam.h"
 
 #include "log.h"
-#include "profile.h"  // the FPS Unlock's profiler (Profile = true)
+#include "steamguard.h"  // the FPS Unlock's SteamPauseGuard
 #include "steam_abi.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -11,7 +11,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <set>
+#include <vector>
 
 namespace coop::steam {
 
@@ -59,7 +61,7 @@ std::set<uint64_t> g_tagged;
 // 30 FPS fit in the frame but at 200+ FPS shows. Calls over 4 ms are logged (the first ones each, later a summary a
 // minute) so a hitch in the [spike] lines can be tied to Steam.
 constexpr double kSlowMs = 4.0;
-int g_slow_logged_each = 12;  // 40 with Profile = true
+constexpr int kSlowLoggedEach = 12;
 SRWLOCK g_slow_lock = SRWLOCK_INIT;
 LONGLONG g_qpf = 0;
 struct Slow {
@@ -86,6 +88,7 @@ void note_call(const char* what, LONGLONG t0) {
     }
     const double ms = 1000.0 * static_cast<double>(t1 - t0) / static_cast<double>(g_qpf);
     if (ms < kSlowMs) return;
+    steamguard_note(ms, t1);
     char line[256] = "";
     AcquireSRWLockExclusive(&g_slow_lock);
     const double since = g_slow.last ? static_cast<double>(t1 - g_slow.last) / static_cast<double>(g_qpf) : 0.0;
@@ -96,7 +99,7 @@ void note_call(const char* what, LONGLONG t0) {
         g_slow.window_worst = ms;
         g_slow.window_what = what;
     }
-    if (g_slow.logged < g_slow_logged_each) {
+    if (g_slow.logged < kSlowLoggedEach) {
         ++g_slow.logged;
         std::snprintf(line, sizeof(line), "[coop] Steam answered slowly: %s took %.1f ms (%.2f s after the last slow "
                       "one; thread %lu)", what, ms, since, GetCurrentThreadId());
@@ -127,18 +130,18 @@ private:
     LONGLONG t0_;
 };
 
-// With Profile = true: a background thread asks Steam a trivial question (the server time) 20 times a second and
-// logs the slow answers like the game thread's. Slow answers on both at the same moments mean steam.exe itself was
-// busy (every call waits, whichever thread makes it); slow ones only on the game thread mean one call is slow.
-DWORD WINAPI busy_probe(void*) {
-    for (;;) {
-        Sleep(50);
-        ISteamUtils006* utils = g_utils;
-        if (!utils) continue;
-        Timed timed("GetServerRealTime from the background probe");
-        utils->GetServerRealTime();
-    }
-}
+// The Steam client's regular pause (SteamPauseGuard, the FPS Unlock's steamguard.h): while its gate is closed the game
+// thread makes no Steam calls of ours. Packets sent meanwhile wait here and go out, in order, once it opens; packet
+// reads wait for the next frame; the Steam id and app id are asked once; the lobby member list keeps its last answer.
+struct PendingSend {
+    uint64_t to;
+    std::vector<uint8_t> data;
+    bool reliable;
+};
+std::vector<PendingSend> g_pending;
+uint64_t g_self_id = 0;
+uint32_t g_app_id_seen = 0;
+std::map<uint64_t, std::vector<uint64_t>> g_members_seen;
 
 std::function<void(uint64_t, uint64_t, bool)> g_member_fn;
 std::function<void(uint64_t, int)> g_fail_fn;
@@ -311,7 +314,7 @@ bool __cdecl hk_restart(uint32_t) {
 }
 
 void __cdecl hk_run_callbacks() {
-    {
+    if (!steamguard_closed()) {  // closed: Steam keeps the callbacks for the next frame
         Timed timed("the game's SteamAPI_RunCallbacks");
         g_api.run_callbacks();
     }
@@ -372,29 +375,28 @@ bool ready() {
     if (!g_mm || !g_net || !g_user) return false;
     register_callbacks();
     g_ready = true;
-    if (profile_enabled() && g_utils) {
-        g_slow_logged_each = 40;
-        if (HANDLE t = CreateThread(nullptr, 0, busy_probe, nullptr, 0, nullptr)) {
-            CloseHandle(t);
-            LOG_INFO("[coop] Profile: a background thread times Steam's answers 20 times a second");
-        }
-    }
     LOG_INFO("[coop] Steam ready: app %u, user %016llx (%s)", app_id(), static_cast<unsigned long long>(self()),
              persona(self()).c_str());
     return true;
 }
 
 uint32_t app_id() {
+    if (g_app_id_seen) return g_app_id_seen;
     Timed timed("GetAppID");
-    return g_utils ? g_utils->GetAppID() : g_app_id;
+    if (!g_utils) return g_app_id;
+    g_app_id_seen = g_utils->GetAppID();
+    return g_app_id_seen;
 }
 uint32_t server_time() {
     Timed timed("GetServerRealTime");
     return g_utils ? g_utils->GetServerRealTime() : 0;
 }
 uint64_t self() {
+    if (g_self_id) return g_self_id;
     Timed timed("GetSteamID");
-    return g_user ? g_user->GetSteamID().ConvertToUint64() : 0;
+    if (!g_user) return 0;
+    g_self_id = g_user->GetSteamID().ConvertToUint64();
+    return g_self_id;
 }
 
 std::string persona(uint64_t id) {
@@ -472,11 +474,17 @@ uint64_t lobby_owner(uint64_t lobby) {
 }
 
 std::vector<uint64_t> lobby_members(uint64_t lobby) {
-    Timed timed("lobby members");
     std::vector<uint64_t> out;
     if (!g_mm || !lobby) return out;
+    if (steamguard_closed()) {
+        auto it = g_members_seen.find(lobby);
+        if (it != g_members_seen.end()) return it->second;
+    }
+    Timed timed("lobby members");
     const int n = g_mm->GetNumLobbyMembers(CSteamID(lobby));
     for (int i = 0; i < n; ++i) out.push_back(g_mm->GetLobbyMemberByIndex(CSteamID(lobby), i).ConvertToUint64());
+    if (g_members_seen.size() > 64) g_members_seen.clear();
+    g_members_seen[lobby] = out;
     return out;
 }
 
@@ -495,16 +503,37 @@ void on_lobby_member(std::function<void(uint64_t, uint64_t, bool)> fn) { g_membe
 void on_p2p_failed(std::function<void(uint64_t, int)> fn) { g_fail_fn = std::move(fn); }
 void set_accept_check(std::function<bool(uint64_t)> fn) { g_accept_check = std::move(fn); }
 
-bool send(uint64_t to, const void* data, uint32_t size, bool reliable) {
+bool send_now(uint64_t to, const void* data, uint32_t size, bool reliable) {
     Timed timed("SendP2PPacket");
-    if (!g_net || !to) return false;
-    g_accepted.insert(to);
     return g_net->SendP2PPacket(CSteamID(to), data, size, reliable ? k_EP2PSendReliable : k_EP2PSendUnreliableNoDelay,
                                 kChannel);
 }
 
+void flush_pending() {
+    if (g_pending.empty() || steamguard_closed() || !g_net) return;
+    std::vector<PendingSend> list;
+    list.swap(g_pending);
+    for (const PendingSend& p : list) send_now(p.to, p.data.data(), static_cast<uint32_t>(p.data.size()), p.reliable);
+}
+
+bool send(uint64_t to, const void* data, uint32_t size, bool reliable) {
+    if (!g_net || !to) return false;
+    g_accepted.insert(to);
+    if (steamguard_closed() || !g_pending.empty()) {
+        if (g_pending.size() < 4096) {
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            g_pending.push_back({to, std::vector<uint8_t>(bytes, bytes + size), reliable});
+        }
+        flush_pending();
+        return true;
+    }
+    return send_now(to, data, size, reliable);
+}
+
 void poll(const std::function<void(uint64_t, const uint8_t*, uint32_t)>& fn) {
     if (!g_net) return;
+    if (steamguard_closed()) return;  // the packets wait in Steam for the next frame
+    flush_pending();
     static std::vector<uint8_t> buf(64 * 1024);
     uint32_t size = 0;
     int guard = 0;

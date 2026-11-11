@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cstdio>
 #include <cstring>
 #include <set>
 
@@ -50,6 +51,80 @@ using SetLobbyDataFn = bool(__fastcall*)(void*, void*, uint64_t, const char*, co
 RequestLobbyListFn g_request_orig = nullptr;
 SetLobbyDataFn g_set_data_orig = nullptr;
 std::set<uint64_t> g_tagged;
+
+// ------------------------------------------------------------------ slow calls
+// Every Steam call waits for the Steam client (steam.exe) to answer it. The game thread makes several a frame (the
+// game's SteamAPI_RunCallbacks, our packet reads); when steam.exe is slow to answer, that frame waits: a hitch, which at
+// 30 FPS fit in the frame but at 200+ FPS shows. Calls over 4 ms are logged (the first ones each, later a summary a
+// minute) so a hitch in the [spike] lines can be tied to Steam.
+constexpr double kSlowMs = 4.0;
+constexpr int kSlowLoggedEach = 12;
+SRWLOCK g_slow_lock = SRWLOCK_INIT;
+LONGLONG g_qpf = 0;
+struct Slow {
+    int logged = 0;
+    LONGLONG last = 0;           // the last slow call's end
+    int window_n = 0;            // since the last summary
+    double window_worst = 0.0;
+    const char* window_what = "";
+    LONGLONG window_start = 0;
+} g_slow;
+
+LONGLONG qpc_now() {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+void note_call(const char* what, LONGLONG t0) {
+    const LONGLONG t1 = qpc_now();
+    if (!g_qpf) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        g_qpf = f.QuadPart;
+    }
+    const double ms = 1000.0 * static_cast<double>(t1 - t0) / static_cast<double>(g_qpf);
+    if (ms < kSlowMs) return;
+    char line[256] = "";
+    AcquireSRWLockExclusive(&g_slow_lock);
+    const double since = g_slow.last ? static_cast<double>(t1 - g_slow.last) / static_cast<double>(g_qpf) : 0.0;
+    g_slow.last = t1;
+    if (!g_slow.window_start) g_slow.window_start = t1;
+    ++g_slow.window_n;
+    if (ms > g_slow.window_worst) {
+        g_slow.window_worst = ms;
+        g_slow.window_what = what;
+    }
+    if (g_slow.logged < kSlowLoggedEach) {
+        ++g_slow.logged;
+        std::snprintf(line, sizeof(line), "[coop] Steam answered slowly: %s took %.1f ms (%.2f s after the last slow "
+                      "one; thread %lu)", what, ms, since, GetCurrentThreadId());
+        g_slow.window_n = 0;
+        g_slow.window_worst = 0.0;
+        g_slow.window_start = t1;
+    } else if (static_cast<double>(t1 - g_slow.window_start) / static_cast<double>(g_qpf) >= 60.0) {
+        std::snprintf(line, sizeof(line), "[coop] Steam answered slowly %d times in %.0f s (over %.0f ms; longest "
+                      "%.1f ms, %s)", g_slow.window_n, static_cast<double>(t1 - g_slow.window_start) /
+                      static_cast<double>(g_qpf), kSlowMs, g_slow.window_worst, g_slow.window_what);
+        g_slow.window_n = 0;
+        g_slow.window_worst = 0.0;
+        g_slow.window_start = t1;
+    }
+    ReleaseSRWLockExclusive(&g_slow_lock);
+    if (line[0]) LOG_INFO("%s", line);
+}
+
+class Timed {
+public:
+    explicit Timed(const char* what) : what_(what), t0_(qpc_now()) {}
+    ~Timed() { note_call(what_, t0_); }
+    Timed(const Timed&) = delete;
+    Timed& operator=(const Timed&) = delete;
+
+private:
+    const char* what_;
+    LONGLONG t0_;
+};
 
 std::function<void(uint64_t, uint64_t, bool)> g_member_fn;
 std::function<void(uint64_t, int)> g_fail_fn;
@@ -222,7 +297,10 @@ bool __cdecl hk_restart(uint32_t) {
 }
 
 void __cdecl hk_run_callbacks() {
-    g_api.run_callbacks();
+    {
+        Timed timed("the game's SteamAPI_RunCallbacks");
+        g_api.run_callbacks();
+    }
     if (g_in_tick) return;
     g_in_tick = true;
     if (g_tick) g_tick();
@@ -285,11 +363,21 @@ bool ready() {
     return true;
 }
 
-uint32_t app_id() { return g_utils ? g_utils->GetAppID() : g_app_id; }
-uint32_t server_time() { return g_utils ? g_utils->GetServerRealTime() : 0; }
-uint64_t self() { return g_user ? g_user->GetSteamID().ConvertToUint64() : 0; }
+uint32_t app_id() {
+    Timed timed("GetAppID");
+    return g_utils ? g_utils->GetAppID() : g_app_id;
+}
+uint32_t server_time() {
+    Timed timed("GetServerRealTime");
+    return g_utils ? g_utils->GetServerRealTime() : 0;
+}
+uint64_t self() {
+    Timed timed("GetSteamID");
+    return g_user ? g_user->GetSteamID().ConvertToUint64() : 0;
+}
 
 std::string persona(uint64_t id) {
+    Timed timed("persona name");
     if (!g_friends) return "?";
     const char* n = id == self() ? g_friends->GetPersonaName() : g_friends->GetFriendPersonaName(CSteamID(id));
     return n ? n : "?";
@@ -342,11 +430,13 @@ void leave_lobby(uint64_t lobby) {
 }
 
 bool set_lobby_data(uint64_t lobby, const char* key, const char* value) {
+    Timed timed("SetLobbyData");
     Bypass bypass;
     return g_mm && lobby && g_mm->SetLobbyData(CSteamID(lobby), key, value);
 }
 
 std::string lobby_data(uint64_t lobby, const char* key) {
+    Timed timed("GetLobbyData");
     if (!g_mm || !lobby) return {};
     const char* v = g_mm->GetLobbyData(CSteamID(lobby), key);
     return v ? v : "";
@@ -361,6 +451,7 @@ uint64_t lobby_owner(uint64_t lobby) {
 }
 
 std::vector<uint64_t> lobby_members(uint64_t lobby) {
+    Timed timed("lobby members");
     std::vector<uint64_t> out;
     if (!g_mm || !lobby) return out;
     const int n = g_mm->GetNumLobbyMembers(CSteamID(lobby));
@@ -384,6 +475,7 @@ void on_p2p_failed(std::function<void(uint64_t, int)> fn) { g_fail_fn = std::mov
 void set_accept_check(std::function<bool(uint64_t)> fn) { g_accept_check = std::move(fn); }
 
 bool send(uint64_t to, const void* data, uint32_t size, bool reliable) {
+    Timed timed("SendP2PPacket");
     if (!g_net || !to) return false;
     g_accepted.insert(to);
     return g_net->SendP2PPacket(CSteamID(to), data, size, reliable ? k_EP2PSendReliable : k_EP2PSendUnreliableNoDelay,
@@ -395,7 +487,11 @@ void poll(const std::function<void(uint64_t, const uint8_t*, uint32_t)>& fn) {
     static std::vector<uint8_t> buf(64 * 1024);
     uint32_t size = 0;
     int guard = 0;
-    while (g_net->IsP2PPacketAvailable(&size, kChannel) && guard++ < 256) {
+    for (;;) {
+        {
+            Timed timed("IsP2PPacketAvailable");
+            if (!g_net->IsP2PPacketAvailable(&size, kChannel) || guard++ >= 256) break;
+        }
         if (size > buf.size()) buf.resize(size);
         CSteamID from;
         uint32_t got = 0;

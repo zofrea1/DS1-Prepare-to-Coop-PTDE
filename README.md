@@ -20,7 +20,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 ## What's new in 1.8.0
 
-- **Includes the DS1 PTDE FPS Unlock 2.2.0**: higher frame rates where the game's draw thread was the limit (Blighttown, Darkroot Garden, the Undead Burg), the same picture with less of its overhead; no more slowdown while standing still with fewer than four controllers; G-SYNC / FreeSync under DXVK. With Windows HDR on, NVIDIA's RTX HDR applies to the game only under DXVK and crushes the shadows: turn it off for the game in the NVIDIA app for the same picture as Direct3D 9.
+- **Includes the DS1 PTDE FPS Unlock 2.2.0**: higher frame rates where the game's draw thread was the limit (Blighttown, Darkroot Garden, the Undead Burg), the same picture with less of its overhead; no more slowdown while standing still with fewer than four controllers; G-SYNC / FreeSync under DXVK while Windows HDR is off. With Windows HDR on, NVIDIA's RTX HDR applies to the game only under DXVK and crushes the shadows: turn it off for the game in the NVIDIA app for the same picture as Direct3D 9.
 - **The Parchment of Deliverance is retired**: no longer given at a bonfire, and one you carry is taken out of your inventory (one in the Bottomless Box goes when you take it out).
 - **Plays with 1.5.0 to 1.7.0** (the same co-op protocol).
 

@@ -20,8 +20,11 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 ## What's new in 1.8.0
 
-- **Includes the DS1 PTDE FPS Unlock 2.2.0**: higher frame rates where the game's draw thread was the limit (Blighttown, Darkroot Garden, the Undead Burg), the same picture with less of its overhead; no more slowdown while standing still with fewer than four controllers; no more hitch every 5 seconds (the Windows Steam client pauses to check Wi-Fi; the game's and co-op's Steam calls now wait it out); G-SYNC / FreeSync under DXVK while Windows HDR is off. With Windows HDR on, NVIDIA's RTX HDR applies to the game only under DXVK and crushes the shadows: turn it off for the game in the NVIDIA app for the same picture as Direct3D 9.
+- **Includes the DS1 PTDE FPS Unlock 2.2.0**: higher frame rates where the game's draw thread was the limit (Blighttown, Darkroot Garden, the Undead Burg) with the same picture; no more slowdown while standing still with fewer than four controllers; G-SYNC / FreeSync under DXVK while Windows HDR is off.
+- **No more hitch every 5 seconds**: the Windows Steam client checks Wi-Fi every 5 s, and every Steam call meanwhile waits. The game's every-frame Steam calls now wait for a quick moment, and the game's and co-op's packets go through Steam on threads of their own.
+- **A winning invader goes home 8 seconds after the victory** (or when the host's world starts reloading), instead of meeting the team again at its bonfire.
 - **The Parchment of Deliverance is retired**: no longer given at a bonfire, and one you carry is taken out of your inventory (one in the Bottomless Box goes when you take it out).
+- **A clearer INI**: the settings you are likely to change first, the rest below a line.
 - **Plays with 1.5.0 to 1.7.0** (the same co-op protocol).
 
 The full list is in the [1.8.0 release notes](release-notes/v1.8.0.md).
@@ -138,7 +141,7 @@ Prepare to Co-op 1.5.0 changes the co-op protocol: its players play only with pl
 
 ## Settings
 
-In the `[PrepareToCoop]` section of `PTDE-Coop-FPS-Unlock.ini` (the FPS Unlock's settings follow it in the same file; see [its README](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered#readme)).
+In `PTDE-Coop-FPS-Unlock.ini`, which also holds the FPS Unlock's settings (see [its README](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered#readme)). The file starts with the settings you are likely to change (the password, your world's rules and difficulty, the network rate, the frame rate and display); the rest follow below a line (`[PrepareToCoopDetails]` and the FPS Unlock's fixes and speed-ups). Every setting is read wherever it stands.
 
 | Key | Default | What it does |
 | --- | --- | --- |

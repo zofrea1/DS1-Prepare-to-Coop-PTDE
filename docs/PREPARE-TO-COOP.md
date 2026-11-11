@@ -3,7 +3,7 @@
 Play all of Dark Souls together with up to three friends, from the Undead Asylum to the Kiln, without the
 limits of the game's own co-op. A mod for Dark Souls: Prepare to Die Edition built on the DS1 FPS Unlock,
 which it includes: its `xinput1_3.dll` is the FPS Unlock plus the co-op, switched on by
-`[PrepareToCoop] PrepareToCoop` in `PTDE-Coop-FPS-Unlock.ini` (or the older `PTDE-FPS-Unlock.ini`). The co-op works with the FPS unlock on or off.
+`PrepareToCoop` in `PTDE-Coop-FPS-Unlock.ini` (or the older `PTDE-FPS-Unlock.ini`). The co-op works with the FPS unlock on or off.
 
 It is inspired by Yui's **Seamless Co-op** mod for Dark Souls Remastered (`ds1sc.dll`, called ds1sc
 below), which only exists for Remastered. Nothing of that mod is used: its behaviour was studied by reverse engineering and written again

@@ -139,11 +139,18 @@ struct NetCmd {
     bool reliable;
     uint64_t peer;
     std::vector<uint8_t> data;
+    LONGLONG queued = 0;  // qpc
 };
 struct NetIn {
     uint64_t from;
     std::vector<uint8_t> data;
+    LONGLONG read = 0;  // qpc
 };
+// For a line a minute while packets flow: queued to sent, arrived to handled (under g_net_lock).
+struct NetStats {
+    int sent = 0, received = 0;
+    double send_sum = 0, send_max = 0, recv_sum = 0, recv_max = 0;
+} g_net_stats;
 SRWLOCK g_net_lock = SRWLOCK_INIT;
 std::vector<NetCmd> g_net_out;  // game thread -> network thread, in order
 std::vector<NetIn> g_net_in;    // network thread -> game thread
@@ -536,11 +543,32 @@ DWORD WINAPI net_thread(void*) {
     std::vector<NetIn> got;
     std::vector<uint8_t> buf(64 * 1024);
     int failures = 0;
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    const double ms_per_tick = 1000.0 / static_cast<double>(f.QuadPart);
+    LONGLONG next_line = qpc_now() + f.QuadPart * 60;
     for (;;) {
         WaitForSingleObject(g_net_wake, 4);
+        const LONGLONG now = qpc_now();
+        if (now >= next_line) {
+            next_line = now + f.QuadPart * 60;
+            NetStats st;
+            AcquireSRWLockExclusive(&g_net_lock);
+            st = g_net_stats;
+            g_net_stats = NetStats{};
+            ReleaseSRWLockExclusive(&g_net_lock);
+            if (st.sent + st.received > 0) {
+                LOG_INFO("[coop] Network thread, last minute: %d packets sent (queued to sent: average %.1f ms, longest "
+                         "%.1f ms), %d received (arrived to handled: average %.1f ms, longest %.1f ms)",
+                         st.sent, st.sent ? st.send_sum / st.sent : 0.0, st.send_max, st.received,
+                         st.received ? st.recv_sum / st.received : 0.0, st.recv_max);
+            }
+        }
         AcquireSRWLockExclusive(&g_net_lock);
         cmds.swap(g_net_out);
         ReleaseSRWLockExclusive(&g_net_lock);
+        int sent = 0;
+        double send_sum = 0, send_max = 0;
         for (const NetCmd& c : cmds) {
             const CSteamID peer(c.peer);
             if (c.kind == NetCmd::kSend) {
@@ -550,6 +578,10 @@ DWORD WINAPI net_thread(void*) {
                     LOG_ERROR("[coop] Steam did not take a packet for %016llx (%u bytes)",
                               static_cast<unsigned long long>(c.peer), static_cast<unsigned>(c.data.size()));
                 }
+                const double d = static_cast<double>(qpc_now() - c.queued) * ms_per_tick;
+                ++sent;
+                send_sum += d;
+                send_max = d > send_max ? d : send_max;
             } else if (c.kind == NetCmd::kAccept) {
                 g_net->AcceptP2PSessionWithUser(peer);
             } else {
@@ -566,11 +598,14 @@ DWORD WINAPI net_thread(void*) {
             CSteamID from;
             uint32_t n = 0;
             if (!g_net->ReadP2PPacket(buf.data(), static_cast<uint32_t>(buf.size()), &n, &from, kChannel)) break;
-            got.push_back({from.ConvertToUint64(), std::vector<uint8_t>(buf.begin(), buf.begin() + n)});
+            got.push_back({from.ConvertToUint64(), std::vector<uint8_t>(buf.begin(), buf.begin() + n), qpc_now()});
         }
-        if (!got.empty()) {
+        if (!got.empty() || sent) {
             AcquireSRWLockExclusive(&g_net_lock);
             for (NetIn& p : got) g_net_in.push_back(std::move(p));
+            g_net_stats.sent += sent;
+            g_net_stats.send_sum += send_sum;
+            g_net_stats.send_max = send_max > g_net_stats.send_max ? send_max : g_net_stats.send_max;
             ReleaseSRWLockExclusive(&g_net_lock);
             got.clear();
         }
@@ -578,6 +613,7 @@ DWORD WINAPI net_thread(void*) {
 }
 
 void net_queue(NetCmd&& c) {
+    c.queued = qpc_now();
     AcquireSRWLockExclusive(&g_net_lock);
     if (g_net_out.size() < kNetQueueMax) g_net_out.push_back(std::move(c));
     ReleaseSRWLockExclusive(&g_net_lock);
@@ -598,7 +634,22 @@ void poll(const std::function<void(uint64_t, const uint8_t*, uint32_t)>& fn) {
     AcquireSRWLockExclusive(&g_net_lock);
     got.swap(g_net_in);
     ReleaseSRWLockExclusive(&g_net_lock);
+    if (got.empty()) return;
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    const LONGLONG now = qpc_now();
+    double sum = 0, mx = 0;
+    for (const NetIn& p : got) {
+        const double d = 1000.0 * static_cast<double>(now - p.read) / static_cast<double>(f.QuadPart);
+        sum += d;
+        mx = d > mx ? d : mx;
+    }
     for (const NetIn& p : got) fn(p.from, p.data.data(), static_cast<uint32_t>(p.data.size()));
+    AcquireSRWLockExclusive(&g_net_lock);
+    g_net_stats.received += static_cast<int>(got.size());
+    g_net_stats.recv_sum += sum;
+    g_net_stats.recv_max = mx > g_net_stats.recv_max ? mx : g_net_stats.recv_max;
+    ReleaseSRWLockExclusive(&g_net_lock);
     got.clear();
 }
 

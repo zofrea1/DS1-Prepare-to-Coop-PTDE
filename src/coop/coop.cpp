@@ -85,52 +85,6 @@ bool area_allows(int32_t id) {
     return true;
 }
 
-// Souls needed to reach the next soul level (the Parchment of Deliverance costs one level's worth).
-int level_up_cost(int level) {
-    static const int kLow[] = {673, 690, 707, 724, 741, 758, 775, 793, 811, 829};  // to reach levels 2..11
-    const int next = level + 1;
-    if (next < 2) return kLow[0];
-    if (next <= 11) return kLow[next - 2];
-    const double x = next;
-    return static_cast<int>(0.02 * x * x * x + 3.06 * x * x + 105.6 * x - 895.0 + 0.5);
-}
-
-wchar_t g_dialog[256];
-const wchar_t* parchment_dialog() {
-    swprintf_s(g_dialog, L"Spend %d souls to revive certain fallen allies of the world?\nYou return to your last bonfire.",
-               level_up_cost(coop::game::soul_level()));
-    return g_dialog;
-}
-
-// The Parchment of Deliverance (Remastered Seamless Co-op's NPC repair): pay a level's worth of souls, then
-// flag 755 on and the flags of NPCs that can be lost while visiting other worlds off, in the player's own world
-// (and in the host's world for a guest), and return to the last bonfire.
-void parchment() {
-    using namespace coop;
-    const int cost = level_up_cost(game::soul_level());
-    const int held = game::souls();
-    if (held < cost) {
-        text::show(L"Nothing interesting happens");
-        LOG_INFO("[coop] Parchment: %d souls needed, %d held", cost, held);
-        return;
-    }
-    game::set_souls(held - cost);
-    static const int kOn[] = {755};
-    static const int kOff[] = {1322, 1402, 11010520, 11010521, 11010523, 11010524, 11010526, 11010527};
-    const bool away = !game::own_world();
-    for (int id : kOn) {
-        game::set_own_world_flag(id, true);
-        if (away) game::set_flag(id, true);
-    }
-    for (int id : kOff) {
-        game::set_own_world_flag(id, false);
-        if (away) game::set_flag(id, false);
-    }
-    const int bonfire = game::last_bonfire();
-    LOG_INFO("[coop] Parchment: paid %d souls, NPC flags repaired, back to bonfire %d", cost, bonfire);
-    if (bonfire >= 0) world::warp_now(game::bonfire_map(bonfire), -1);
-}
-
 // Remastered Seamless Co-op's rules for when an item can be used (it replaces the game's check for these ids).
 int can_use(int32_t id) {
     using namespace coop;
@@ -143,7 +97,6 @@ int can_use(int32_t id) {
             return (!in_session || session::group_invade_open()) && area_allows(id) ? 1 : 0;
         case items::kHost:
         case items::kJoin:
-        case items::kParchment:
             return !in_session && area_allows(id) ? 1 : 0;
         case items::kLeave:  // an invader goes home with it too; the others not while an invader is in the world
             return in_session && (invader || !invader_present) ? 1 : 0;
@@ -154,6 +107,7 @@ int can_use(int32_t id) {
             return (host || !session::active()) && game::own_world() && area_allows(id) ? 1 : 0;
         case items::kBlossom:
         case items::kBloody:
+        case items::kParchment:  // retired in 1.8.0 (items.cpp, retired_tick)
             return 0;
         case items::kKnell:  // in a session, standing, out of a boss fight, with a teammate (an invader: a target) standing
             return knell::can_use() ? 1 : 0;
@@ -201,7 +155,6 @@ bool use_item(int32_t id) {
         case items::kRules: session::cycle_rules(); return true;
         case items::kTaunt: session::taunt(); return true;
         case items::kInfection: session::curse_world(); return true;
-        case items::kParchment: parchment(); return true;
         case items::kKnell: knell::use(); return true;
         case items::kVigil: {
             // The soapstone's animation and effect play, and our summon sign goes where we stand (session.cpp), free.
@@ -470,7 +423,6 @@ void coop_install(const CoopConfig& config) {
     coop::knell::set_soul_level_price(g_cfg.knell_soul_level);
     coop::items::set_use_handler(&use_item);
     coop::items::set_can_use(&can_use);
-    coop::items::set_dialog_text(&parchment_dialog);
     coop::world::set_before_rest_handler(&before_rest);
     g_miracle = coop::world::set_homeward_state_handler(&homeward_state);
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");

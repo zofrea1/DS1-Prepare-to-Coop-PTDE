@@ -23,7 +23,7 @@ enum Id : int32_t {
     kTaunt = 389005,      // Dried Fingers: host taunts invaders into joining
     kInfection = 389006,  // Cursed Pendant: curses one's own world (offline or hosting)
     kBlossom = 389007,    // Crimson Blossom: death debuff counter (key item, never used)
-    kParchment = 389008,  // Parchment of Deliverance: revive certain NPCs
+    kParchment = 389008,  // Parchment of Deliverance: retired (see retired_tick); its row stays for saves holding one
     kKnell = 389009,      // Death Knell (1.5.0): go to another co-op player, for a soul level (knell.cpp)
     kBloody = 389010,     // Bloody Mary (1.5.0): the session's deaths strengthen its enemies (key item, never used)
     kVigil = 389011,      // Vigil Soapstone (1.5.0): a summon sign where one stands, for the others' Death Knells
@@ -31,7 +31,7 @@ enum Id : int32_t {
     kLast = kVigil,
 };
 
-// The Parchment's yes/no dialog (event text FMG id), answered with the soul cost.
+// The Parchment's yes/no dialog (event text FMG id), kept in its row; the item is no longer usable.
 constexpr uint32_t kParchmentDialog = 93129700;
 
 bool install();
@@ -80,10 +80,11 @@ int take(int32_t goods_id, int n);
 // A spell's "usable in multiplayer" (MagicParam enable_multi, which the game's spell check 0xEAD7C0 reads). Lives in
 // the loaded params only: the game's own value comes back with the next start. False when the row is not found.
 bool set_magic_multi(int32_t magic_id, bool on);
-// A bonfire rest: every co-op item except the Crimson Blossom that is not in the inventory (one each). Checked
-// at every rest, so a character brought over from an earlier save gets them too.
+// A bonfire rest: every co-op item except the Crimson Blossom, the Bloody Mary and the retired Parchment that is not
+// in the inventory (one each). Checked at every rest, so a character brought over from an earlier save gets them too.
 void grant_missing();
-// Per frame, game thread: once the player stands in the world again, shows what announce() was given.
+// Per frame, game thread: once the player stands in the world again, shows what announce() was given; and takes the
+// retired Parchment of Deliverance out of the carried inventory (retired_tick).
 void tick();
 
 // Decides use for the local player: -1 the game's own rules, 0 refused, 1 allowed, 2 allowed if the game's

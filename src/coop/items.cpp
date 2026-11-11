@@ -118,9 +118,11 @@ const Def kDefs[kCount] = {
     {0, 0, 2033, L"Crimson Blossom", L"Accrues curse",
      L"A blood-red flower rooted in the Darksign, feeding\non its bearer.\n\nOne blooms with each death and saps "
      L"the bearer's\nmaximum HP. They wither when anyone rests at a\nbonfire, or when the whole party has fallen."},
-    {-93, 0, 2067, L"Parchment of Deliverance", L"Revives world allies",
-     L"A parchment that calls back certain allies of the\nworld who have fallen.\n\nCosts souls, and returns you "
-     L"to your last bonfire."},
+    // Retired (1.8.0): no longer given or usable, and taken out of the carried inventory (retired_tick). The row stays so
+    // that one kept in the Bottomless Box or an old save is still an item the game knows.
+    {-93, 0, 2067, L"Parchment of Deliverance", L"No longer used",
+     L"A parchment that once called back certain allies of\nthe world who had fallen.\n\nIts words have faded. It "
+     L"crumbles to dust once\ncarried."},
     // Prepare to Co-op's own (1.5.0): the Blessed Eye Orb's animation and effect (sfx 40); icon 2159, a cell of the atlas
     // Icon21 that the game leaves empty, painted at run time (knell.cpp).
     {-92, 40, 2159, L"Death Knell", L"Summon yourself to a co-operator",
@@ -600,7 +602,31 @@ void announce(uint32_t category, int32_t id, int n) {
     g_free_since = 0;
 }
 
+// The Parchment of Deliverance (Remastered Seamless Co-op's NPC flag repair), retired in 1.8.0: an NPC lost while
+// visiting other worlds never came up in play. Any carried one goes once the player stands in the world with no menu
+// or dialog open, through the game's own RemoveItem (count 0: every slot of it, with its quick-bar cleanup). One in
+// the Bottomless Box stays there, an item the game still knows (its row is kept), and goes when taken out.
+static void retired_tick() {
+    static ULONGLONG last = 0;
+    const ULONGLONG t = GetTickCount64();
+    if (t - last < 1000) return;
+    last = t;
+    if (!in_control()) return;
+    const int held = count(kParchment);
+    if (held <= 0) return;
+    __try {
+        using Fn = uint8_t(__stdcall*)(uint32_t, int32_t, int32_t);
+        reinterpret_cast<Fn>(kRemoveItem)(kGoodsCategory, kParchment, 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("[coop] Removing the retired Parchment of Deliverance failed");
+        return;
+    }
+    LOG_INFO("[coop] The Parchment of Deliverance is retired: taken out of the inventory (%d held, %d left)", held,
+             count(kParchment));
+}
+
 void tick() {
+    retired_tick();
     if (g_announce.empty()) return;
     if (!game::player_game_data()) {
         g_announce.clear();
@@ -832,7 +858,7 @@ void grant_missing() {
     if (!game::in_game()) return;
     int given = 0;
     for (int32_t id = kFirst; id <= kLast; ++id) {
-        if (id == kBlossom || id == kBloody || count(id) > 0) continue;
+        if (id == kBlossom || id == kBloody || id == kParchment || count(id) > 0) continue;
         give(id, 1);
         if (count(id) <= 0) continue;
         LOG_INFO("[coop] Gave co-op item %d", id);

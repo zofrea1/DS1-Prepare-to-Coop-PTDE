@@ -902,11 +902,13 @@ bool g_close_forced = false;  // a guest was still in the game session when it w
 // defeat. Or we fell first (g_invade_lost): a wipe reported a moment later is no victory.
 bool g_invade_won = false;
 double g_invade_won_at = 0;  // when the co-op team's wipe won the invasion (now())
-// After a won invasion the invader leaves this long after the victory. The game's own HostDead sends an invader home
-// only when its script's timer runs out (21 s on 2026-11-11), and a co-op team's wipe keeps the session: the host and
+bool g_won_host_seen = false;  // the host's character was here at the victory
+// After a won invasion the invader leaves this long after the victory, or as soon as the host's character (here at the
+// victory) is gone, which is the host's world starting its reload. The game's own HostDead sends an invader home only
+// when its script's timer runs out (21 s on 2026-11-11), and a co-op team's wipe keeps the session: the host and
 // guests reload together and stood at their bonfire again 15 s after the last fall, with the invader still in their
-// world and able to hit them. 4 s shows "Invasion success!" and lets the game's own victory run first.
-constexpr double kWonLeaveAfter = 4.0;
+// world and able to hit them. 8 s leaves time to take in the win before the team is back.
+constexpr double kWonLeaveAfter = 8.0;
 bool g_invade_lost = false;
 bool g_team_fell = false;  // we invade and fell while another invader stood: our outcome is the team's
 // Invasion rewards (InvasionRewards): Humanity for the side that won, given once we stand in the world again, an
@@ -1491,6 +1493,7 @@ void invasion_won() {
     LOG_INFO("[coop] Every co-op player of this world has fallen: invasion victory%s", fallen ? " (we had fallen)" : "");
     g_invade_won = true;
     g_invade_won_at = now();
+    g_won_host_seen = g_host && chr_of_peer(g_host) != 0;
     say(kMsgBreakInSuccess);
     if (!fallen) game::call_lua("HostDead");  // the game's own invader victory
     if (g_cfg.invasion_rewards) {  // one per co-op player defeated, as "Defeat {} players" counted them
@@ -1895,6 +1898,7 @@ void finish(const std::wstring& why) {
     g_close_forced = false;
     g_invade_won = false;
     g_invade_won_at = 0;
+    g_won_host_seen = false;
     g_invade_lost = false;
     g_team_fell = false;
     g_respawn_waiting = false;
@@ -3859,11 +3863,15 @@ void guest_tick() {
         case Step::InWorld:
             // A won invasion: home now, not on the game's own (much later) timer. A fallen invader is taken home by
             // their held death instead (invasion_won).
-            if (g_invade && g_invade_won && g_invade_won_at > 0 && now() - g_invade_won_at >= kWonLeaveAfter &&
-                !world::local_dead()) {
-                g_invade_won_at = 0;
-                guest_go_home(L"", "the invasion was won: every co-op player of this world fell");
-                break;
+            if (g_invade && g_invade_won && g_invade_won_at > 0 && !world::local_dead()) {
+                const double since = now() - g_invade_won_at;
+                const bool reloading = g_won_host_seen && since >= 1.0 && !chr_of_peer(g_host);
+                if (since >= kWonLeaveAfter || reloading) {
+                    g_invade_won_at = 0;
+                    guest_go_home(L"", reloading ? "the invasion was won and the host's world is reloading"
+                                                 : "the invasion was won: every co-op player of this world fell");
+                    break;
+                }
             }
             if (!g_invade && now() - g_keys_polled >= 2.0 && !game::loading() && game::in_game()) {
                 g_keys_polled = now();

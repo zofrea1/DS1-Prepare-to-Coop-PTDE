@@ -901,6 +901,12 @@ bool g_close_forced = false;  // a guest was still in the game session when it w
 // We invade and the co-op team fell: the invasion is won, and our own death a moment later (both fell) is no
 // defeat. Or we fell first (g_invade_lost): a wipe reported a moment later is no victory.
 bool g_invade_won = false;
+double g_invade_won_at = 0;  // when the co-op team's wipe won the invasion (now())
+// After a won invasion the invader leaves this long after the victory. The game's own HostDead sends an invader home
+// only when its script's timer runs out (21 s on 2026-11-11), and a co-op team's wipe keeps the session: the host and
+// guests reload together and stood at their bonfire again 15 s after the last fall, with the invader still in their
+// world and able to hit them. 4 s shows "Invasion success!" and lets the game's own victory run first.
+constexpr double kWonLeaveAfter = 4.0;
 bool g_invade_lost = false;
 bool g_team_fell = false;  // we invade and fell while another invader stood: our outcome is the team's
 // Invasion rewards (InvasionRewards): Humanity for the side that won, given once we stand in the world again, an
@@ -1484,6 +1490,7 @@ void invasion_won() {
     if (fallen && !g_team_fell) return;
     LOG_INFO("[coop] Every co-op player of this world has fallen: invasion victory%s", fallen ? " (we had fallen)" : "");
     g_invade_won = true;
+    g_invade_won_at = now();
     say(kMsgBreakInSuccess);
     if (!fallen) game::call_lua("HostDead");  // the game's own invader victory
     if (g_cfg.invasion_rewards) {  // one per co-op player defeated, as "Defeat {} players" counted them
@@ -1887,6 +1894,7 @@ void finish(const std::wstring& why) {
     g_close_left = false;
     g_close_forced = false;
     g_invade_won = false;
+    g_invade_won_at = 0;
     g_invade_lost = false;
     g_team_fell = false;
     g_respawn_waiting = false;
@@ -3849,6 +3857,14 @@ void guest_tick() {
             }
             break;
         case Step::InWorld:
+            // A won invasion: home now, not on the game's own (much later) timer. A fallen invader is taken home by
+            // their held death instead (invasion_won).
+            if (g_invade && g_invade_won && g_invade_won_at > 0 && now() - g_invade_won_at >= kWonLeaveAfter &&
+                !world::local_dead()) {
+                g_invade_won_at = 0;
+                guest_go_home(L"", "the invasion was won: every co-op player of this world fell");
+                break;
+            }
             if (!g_invade && now() - g_keys_polled >= 2.0 && !game::loading() && game::in_game()) {
                 g_keys_polled = now();
                 const std::vector<int32_t> k = items::key_items();

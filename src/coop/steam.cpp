@@ -3,6 +3,7 @@
 #include "steam.h"
 
 #include "log.h"
+#include "profile.h"  // the FPS Unlock's profiler (Profile = true)
 #include "steam_abi.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -58,7 +59,7 @@ std::set<uint64_t> g_tagged;
 // 30 FPS fit in the frame but at 200+ FPS shows. Calls over 4 ms are logged (the first ones each, later a summary a
 // minute) so a hitch in the [spike] lines can be tied to Steam.
 constexpr double kSlowMs = 4.0;
-constexpr int kSlowLoggedEach = 12;
+int g_slow_logged_each = 12;  // 40 with Profile = true
 SRWLOCK g_slow_lock = SRWLOCK_INIT;
 LONGLONG g_qpf = 0;
 struct Slow {
@@ -95,7 +96,7 @@ void note_call(const char* what, LONGLONG t0) {
         g_slow.window_worst = ms;
         g_slow.window_what = what;
     }
-    if (g_slow.logged < kSlowLoggedEach) {
+    if (g_slow.logged < g_slow_logged_each) {
         ++g_slow.logged;
         std::snprintf(line, sizeof(line), "[coop] Steam answered slowly: %s took %.1f ms (%.2f s after the last slow "
                       "one; thread %lu)", what, ms, since, GetCurrentThreadId());
@@ -125,6 +126,19 @@ private:
     const char* what_;
     LONGLONG t0_;
 };
+
+// With Profile = true: a background thread asks Steam a trivial question (the server time) 20 times a second and
+// logs the slow answers like the game thread's. Slow answers on both at the same moments mean steam.exe itself was
+// busy (every call waits, whichever thread makes it); slow ones only on the game thread mean one call is slow.
+DWORD WINAPI busy_probe(void*) {
+    for (;;) {
+        Sleep(50);
+        ISteamUtils006* utils = g_utils;
+        if (!utils) continue;
+        Timed timed("GetServerRealTime from the background probe");
+        utils->GetServerRealTime();
+    }
+}
 
 std::function<void(uint64_t, uint64_t, bool)> g_member_fn;
 std::function<void(uint64_t, int)> g_fail_fn;
@@ -358,6 +372,13 @@ bool ready() {
     if (!g_mm || !g_net || !g_user) return false;
     register_callbacks();
     g_ready = true;
+    if (profile_enabled() && g_utils) {
+        g_slow_logged_each = 40;
+        if (HANDLE t = CreateThread(nullptr, 0, busy_probe, nullptr, 0, nullptr)) {
+            CloseHandle(t);
+            LOG_INFO("[coop] Profile: a background thread times Steam's answers 20 times a second");
+        }
+    }
     LOG_INFO("[coop] Steam ready: app %u, user %016llx (%s)", app_id(), static_cast<unsigned long long>(self()),
              persona(self()).c_str());
     return true;

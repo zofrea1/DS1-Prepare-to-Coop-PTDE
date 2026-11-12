@@ -38,6 +38,10 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.guest_world_events = settings_parse_bool(val);
         } else if (key == "bonfireanimations") {
             c.bonfire_animations = settings_parse_bool(val);
+        } else if (key == "jollycooperation") {
+            c.jolly_cooperation = settings_parse_bool(val);
+        } else if (key == "jollytest") {
+            c.jolly_test = settings_parse_bool(val);
         } else if (key == "spectatestreaming") {
             c.spectate_streaming = settings_parse_bool(val);
         } else if (key == "deathknellsoullevel") {

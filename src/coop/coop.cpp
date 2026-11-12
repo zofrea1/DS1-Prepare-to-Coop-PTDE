@@ -8,6 +8,7 @@
 #include "game.h"
 #include "hook.h"
 #include "items.h"
+#include "jolly.h"
 #include "knell.h"
 #include "log.h"
 #include "motion.h"
@@ -426,6 +427,10 @@ void coop_install(const CoopConfig& config) {
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     coop::spectate::set_streaming(g_cfg.spectate_streaming);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");
+    coop::jolly::set_enabled(g_cfg.jolly_cooperation);
+    coop::jolly::set_test(g_cfg.jolly_test);
+    LOG_INFO("[coop] Jolly cooperation (Praise the Sun together): %s%s", g_cfg.jolly_cooperation ? "on" : "off",
+             g_cfg.jolly_test ? " (JollyTest: Beckon alone counts)" : "");
     g_items = coop::items::install();
     if (g_items) coop::knell::install();
     coop::knell::set_soul_level_price(g_cfg.knell_soul_level);

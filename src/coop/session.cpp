@@ -7,6 +7,7 @@
 #include "game.h"
 #include "hook.h"
 #include "items.h"
+#include "jolly.h"
 #include "knell.h"
 #include "log.h"
 #include "motion.h"
@@ -160,6 +161,8 @@ enum MsgType : uint8_t {
     kGroupHere = 51,     // a player of the group -> its host, until back in the host's world: still out, keep sending
     kGroupComing = 52,   // 1.7.0, host -> its co-op guests: a group of `value` invaders is coming in (kMsgGroupComing)
     kKnellSpy = 53,      // 1.7.0, an invader -> the host (-> that guest): my Death Knell watches you (KnellSpyMsg)
+    kPraise = 54,        // 1.9.0, co-op player -> co-op players (through the host): I began Praise the Sun (PraiseMsg;
+                         // jolly.cpp)
 };
 // Older games ignore message types they do not know: a 1.1.0 host never answers a travel request (the guest is
 // told after kTravelWait), and a 1.1.0 guest neither gets the host's keys nor asks to travel.
@@ -510,6 +513,10 @@ struct KnellSpyMsg {
     Header h;
     uint64_t target;
     uint64_t watcher;  // the invader (the host passes it on as it came)
+};
+struct PraiseMsg {
+    Header h;
+    uint64_t who;  // the player who began the gesture (the host passes it on as it came)
 };
 struct GroupAnswerMsg {
     Header h;
@@ -6416,6 +6423,19 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             }
             break;
         }
+        case kPraise: {
+            PraiseMsg m{};
+            if (!as(&m) || g_invade || m.who == steam::self()) return;
+            if (g_role == Role::Host) {
+                if (m.who != from || peer_is_invader(from) || !admitted(from)) return;
+                broadcast_coop(m, from);
+            } else if (g_role != Role::Guest || from != g_host || g_step != Step::InWorld) {
+                return;
+            }
+            const PeerInfo* p = peer(m.who);
+            jolly::remote_praise(m.who, chr_of_peer(m.who), p ? shown_name(*p) : std::wstring());
+            break;
+        }
         case kGroupComing: {
             Simple m{};
             if (!as(&m) || g_role != Role::Guest || g_invade || from != g_host || g_step != Step::InWorld) return;
@@ -7510,6 +7530,17 @@ void tick() {
         rules::set_peer_spots(spots);
     }
     lift_driver_tick();
+    // Jolly cooperation: our Praise the Sun goes to the co-op players (jolly.cpp).
+    if (jolly::tick() && g_role != Role::None && g_lobby && !g_invade) {
+        PraiseMsg m{};
+        fill_header(&m, kPraise);
+        m.who = steam::self();
+        if (g_role == Role::Host) {
+            broadcast_coop(m);
+        } else if (g_host && g_step == Step::InWorld) {
+            send_to(g_host, m);
+        }
+    }
     if (g_role != Role::None && g_anim_log) anim_sync_log();
     // Motion sync: our gait and event animations out; the others' gaits onto their characters here.
     {

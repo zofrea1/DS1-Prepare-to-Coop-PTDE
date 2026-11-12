@@ -141,4 +141,8 @@ bool set_homeward_state_handler(bool (*fn)());
 void warp_now(int map, int point);
 void bypass_limbo(bool on);
 
+// Puts SpEffectParam row `id` on a character as this game's own effect (not sent to the other players; see apply in
+// world.cpp). False when the game refused it.
+bool apply_own_effect(uint32_t chr, int id);
+
 }  // namespace coop::world

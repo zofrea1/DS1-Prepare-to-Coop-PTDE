@@ -2953,4 +2953,6 @@ void set_bloody(int count) {
 
 int bloody() { return g_bloody; }
 
+bool apply_own_effect(uint32_t chr, int id) { return apply(chr, id); }
+
 }  // namespace coop::world

@@ -38,6 +38,10 @@ struct CoopConfig {
     bool guest_world_events = true;
     // The other players see your bonfire animations (sitting, kindling, Reverse Hollowing).
     bool bonfire_animations = true;
+    // 1.9.0: two co-op players who Praise the Sun together, side by side, each get Replenishment's warmth (jolly.cpp).
+    bool jolly_cooperation = true;
+    // Hidden test key JollyTest: Beckon counts as Praise the Sun and as a teammate's too (one game, no session).
+    bool jolly_test = false;
     // 1.5.0: spectating a teammate (after our death, or with the Death Knell) loads their map when our game has not, and
     // draws the world and the characters around them as if we stood there.
     bool spectate_streaming = true;

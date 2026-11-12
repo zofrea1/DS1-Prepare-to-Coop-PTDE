@@ -24,8 +24,8 @@ namespace {
 // The gesture a character is making: its controller's (+0x28) +0x370 holds the gesture's animation while the gesture
 // plays (-1 otherwise). The gestures are animations 6800-6830 of c0000 (found 2026-11-12 by making each one through
 // the gesture menu and reading the controller): Beckon 6800, Point up 6802, Point down 6803, Point forward 6805, Bow
-// 6810, Wave 6815, Joy 6825. Praise the Sun is 6801, its arms-up pose seen when 6801 was played on the character
-// (the gesture itself was not unlocked on the test character).
+// 6810, Wave 6815, Joy 6825, Praise the Sun 6801 (made from the menu after putting it in the equipped list:
+// PlayerGameData+0x334 -> GestureEquipData, 8 slots at +8, (id << 1) | display << 16; Praise the Sun is id 15).
 constexpr uint32_t kCtrl = 0x28;
 constexpr uint32_t kCtrlGesture = 0x370;
 constexpr int kPraiseTheSun = 6801;

@@ -8,6 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 1.9.0 | DS1 PTDE FPS Unlock 2.3.0 |
 | Prepare to Co-op Edition 1.8.0 | DS1 PTDE FPS Unlock 2.2.0 |
 | Prepare to Co-op Edition 1.7.0 | DS1 PTDE FPS Unlock 2.1.0 |
 | Prepare to Co-op Edition 1.6.0 | DS1 PTDE FPS Unlock 2.0.0 |
@@ -17,6 +18,20 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.2.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
+
+## What's new in 1.9.0
+
+- **Includes the DS1 PTDE FPS Unlock 2.3.0**: the game at your resolution, with its depth of field, glows, fog, colour and shadows redone to look the way they were made to look; DSfix optional (still supported, `YieldToDSFix`); DXVK by default with HDR and G-SYNC / FreeSync together; ultrawide screens and HUD scale; faster again where the draw thread is the limit.
+- **Invaders go home to where they stood** when the invasion was accepted, however it ends, instead of at their last bonfire.
+- **Group invasions: the guests come back to where they stood** in the host's world, and the host goes home to where they stood.
+- **Invaders stay through area changes** (another part of the map, the game's own matching check).
+- **Every Prepare to Co-op player's ghosts, messages and bloodstains**, whatever their password; the game's own summoning and invading are off.
+- **Jolly cooperation**: two co-op players who Praise the Sun together each get Replenishment's warmth.
+- **Fixed**: a crash when a player's copy stood on ground that had unloaded; the Death Knell closing on every tick of poison or toxic.
+- **Steam Deck: keep the game's anti-aliasing off** (black specks on grass and other fine detail, not solved yet).
+- **Plays with 1.5.0 to 1.8.0** (the same co-op protocol); the shared traces and Jolly cooperation need 1.9.0.
+
+The full list is in the [1.9.0 release notes](release-notes/v1.9.0.md).
 
 ## What's new in 1.8.0
 
@@ -68,11 +83,11 @@ The full list is in the [1.5.0 release notes](release-notes/v1.5.0.md). 1.4.0 br
 - Dark Souls: Prepare to Die Edition, the current Steam build (the same check as the FPS Unlock's).
 - Steam running. While Prepare to Co-op is on, the game runs as Steam's Spacewar (app 480): Prepare to Die Edition's own Steam lobbies were switched off in 2022, and Spacewar is the long-standing community route for its multiplayer. Steam shows you as playing Spacewar.
 - Everyone in a session uses the same `Password`, and Prepare to Co-op 1.5.0 or later: 1.5.0 changed the co-op protocol, and players of 1.0.0 to 1.4.0 are told to update when they try to join or invade a 1.5.0 world. Update together. 1.6.0 plays with 1.5.0; its group invasions need 1.6.0 for everyone in the group and for the world they invade.
-- Works with DSfix (set `unlockFPS 0` in `DSfix.ini` if the FPS unlock is on).
+- DSfix is optional and works alongside (set `unlockFPS 0` in `DSfix.ini` if the FPS unlock is on). The FPS Unlock draws the game at your resolution itself; `YieldToDSFix = true` lets DSfix decide its own picture settings instead (see the FPS Unlock's README).
 
 ## Install
 
-1. From the zip on the [Releases](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE/releases) page, copy `xinput1_3.dll` and `PTDE-Coop-FPS-Unlock.ini` next to `DARKSOULS.exe` (`dxvk_d3d9.dll` too, only for the FPS Unlock's experimental DXVK). If the FPS Unlock or an older Prepare to Co-op is already installed, these replace its files; set your settings again in the new INI, which has all of them.
+1. From the zip on the [Releases](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE/releases) page, copy `xinput1_3.dll`, `PTDE-Coop-FPS-Unlock.ini` and `dxvk_d3d9.dll` (the FPS Unlock's DXVK, on by default) next to `DARKSOULS.exe`. If the FPS Unlock or an older Prepare to Co-op is already installed, these replace its files; set your settings again in the new INI, which has all of them.
 2. In `PTDE-Coop-FPS-Unlock.ini`, set the same `Password` as your friends. `PrepareToCoop = true` is already set. (The older name `PTDE-FPS-Unlock.ini` is still read when there is no `PTDE-Coop-FPS-Unlock.ini`; if both are there, the one with Coop in its name is used and the other is ignored. File names are not case sensitive.)
 3. Steam Deck and Linux: add the launch option `WINEDLLOVERRIDES="xinput1_3=n,b" %command%` so Proton loads the DLL (the same as for the FPS Unlock).
 4. Your save: with Prepare to Co-op on, the game uses `DRAKS0005.co2` (`SaveFileExtension`) next to `DRAKS0005.sl2` in `Documents\NBGI\DarkSouls`. To play an existing character, copy `DRAKS0005.sl2` to `DRAKS0005.co2` before starting. Back up your saves.
@@ -162,6 +177,7 @@ In `PTDE-Coop-FPS-Unlock.ini`, which also holds the FPS Unlock's settings (see [
 | `DeathKnellSoulLevel` | `false` | `true`: the Death Knell to a co-operator takes one soul level instead of every soul and all humanity (the Crimson Blossom and the Bloody Mary are its price either way). |
 | `ShareDroppedItems` | `true` | An item a co-op player drops lies on every co-op player's floor, and the first to pick it up has it. The host's setting decides for the session. |
 | `MaxPlayers` | `8` | How many players a session holds, the host, guests and invaders together, 2 to 8 (NPC summons do not count; 4 is the game's own number). A host lets a fifth player in only when every game in the session, the joiner's too, runs 1.4.0 and is set high enough. See [docs/MORE-PLAYERS.md](docs/MORE-PLAYERS.md). |
+| `JollyCooperation` | `true` | Two co-op players who Praise the Sun together (started within 3 seconds of each other, no more than 10 m apart) each get the warmth of Replenishment (10 HP a second for a minute), once every 3 minutes each. Invaders are left out. Both players need it on (and 1.9.0). |
 | `OverheadPlayerDisplay` | `5` | Another player's health bar: their character's name, with 0 nothing more, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul level, ping and "lerp" (the smoothing their character is drawn with in your game; see `DynamicSmoothing`). The ping is your own round trip to that player, measured four times a second. |
 | `NetworkTickRate` | `30` | How many times a second every game of your session sends where its player is (and the enemies it moves): 6, the game's own, up to 60. 30 is the default and a big improvement over the game's 6; 60 is viable and recommended when everyone in the session has a low-latency or excellent connection. Higher draws the others closer to where they really are, for more upload (about 2 KB a second to each other player at 30, twice that at 60). On an uneven connection raise `NetworkSmoothing` rather than lowering this. The host's setting is used by the whole session (players of 1.2.0 or older still send 6). |
 | `NetworkSmoothing` | `33` | Above 6 updates a second, how many ms other players' characters (and enemies other games move) stay behind their updates, as a margin for late ones: they are drawn about one update interval plus this behind, plus the ping (about 66 ms at 30 a second, 50 ms at 60, 100 ms at 15; 6 a second stays the game's 200 ms). 33 ms is about one frame at 30 FPS or two at 60 FPS, enough to hide most ping spikes. Each player's own, 0 to 200; raise it if others move in jerks. With `DynamicSmoothing` on, this is only where each character's smoothing starts. |
@@ -206,7 +222,7 @@ build.bat
 
 - Yui, for Seamless Co-op for Dark Souls Remastered, the mod this one follows.
 - The [DS1 FPS Unlock](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered) (MIT license), included; its own acknowledgements are in its README.
-- [DXVK](https://github.com/doitsujin/dxvk) by Philip Rebohle and contributors (zlib/libpng license), included unmodified as `dxvk_d3d9.dll` for the FPS Unlock's optional DXVK.
+- [DXVK](https://github.com/doitsujin/dxvk) by Philip Rebohle and contributors (zlib/libpng license), included unmodified as `dxvk_d3d9.dll` for the FPS Unlock's DXVK.
 
 ## License
 

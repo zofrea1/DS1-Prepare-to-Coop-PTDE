@@ -26,10 +26,9 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 - **Group invasions: the guests come back to where they stood** in the host's world, and the host goes home to where they stood.
 - **Invaders stay through area changes** (another part of the map, the game's own matching check).
 - **Every Prepare to Co-op player's ghosts, messages and bloodstains**, whatever their password; the game's own summoning and invading are off.
-- **Jolly cooperation**: two co-op players who Praise the Sun together each get Replenishment's warmth.
 - **Fixed**: a crash when a player's copy stood on ground that had unloaded; the Death Knell closing on every tick of poison or toxic.
 - **Steam Deck: keep the game's anti-aliasing off** (black specks on grass and other fine detail, not solved yet).
-- **Plays with 1.5.0 to 1.8.0** (the same co-op protocol); the shared traces and Jolly cooperation need 1.9.0.
+- **Plays with 1.5.0 to 1.8.0** (the same co-op protocol); the shared ghosts, messages and bloodstains need 1.9.0.
 
 The full list is in the [1.9.0 release notes](release-notes/v1.9.0.md).
 
@@ -177,7 +176,6 @@ In `PTDE-Coop-FPS-Unlock.ini`, which also holds the FPS Unlock's settings (see [
 | `DeathKnellSoulLevel` | `false` | `true`: the Death Knell to a co-operator takes one soul level instead of every soul and all humanity (the Crimson Blossom and the Bloody Mary are its price either way). |
 | `ShareDroppedItems` | `true` | An item a co-op player drops lies on every co-op player's floor, and the first to pick it up has it. The host's setting decides for the session. |
 | `MaxPlayers` | `8` | How many players a session holds, the host, guests and invaders together, 2 to 8 (NPC summons do not count; 4 is the game's own number). A host lets a fifth player in only when every game in the session, the joiner's too, runs 1.4.0 and is set high enough. See [docs/MORE-PLAYERS.md](docs/MORE-PLAYERS.md). |
-| `JollyCooperation` | `true` | Two co-op players who Praise the Sun together (started within 3 seconds of each other, no more than 10 m apart) each get the warmth of Replenishment (10 HP a second for a minute), once every 3 minutes each. Invaders are left out. Both players need it on (and 1.9.0). |
 | `OverheadPlayerDisplay` | `5` | Another player's health bar: their character's name, with 0 nothing more, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul level, ping and "lerp" (the smoothing their character is drawn with in your game; see `DynamicSmoothing`). The ping is your own round trip to that player, measured four times a second. |
 | `NetworkTickRate` | `30` | How many times a second every game of your session sends where its player is (and the enemies it moves): 6, the game's own, up to 60. 30 is the default and a big improvement over the game's 6; 60 is viable and recommended when everyone in the session has a low-latency or excellent connection. Higher draws the others closer to where they really are, for more upload (about 2 KB a second to each other player at 30, twice that at 60). On an uneven connection raise `NetworkSmoothing` rather than lowering this. The host's setting is used by the whole session (players of 1.2.0 or older still send 6). |
 | `NetworkSmoothing` | `33` | Above 6 updates a second, how many ms other players' characters (and enemies other games move) stay behind their updates, as a margin for late ones: they are drawn about one update interval plus this behind, plus the ping (about 66 ms at 30 a second, 50 ms at 60, 100 ms at 15; 6 a second stays the game's 200 ms). 33 ms is about one frame at 30 FPS or two at 60 FPS, enough to hide most ping spikes. Each player's own, 0 to 200; raise it if others move in jerks. With `DynamicSmoothing` on, this is only where each character's smoothing starts. |

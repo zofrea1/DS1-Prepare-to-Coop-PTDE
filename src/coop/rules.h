@@ -128,6 +128,8 @@ void place_next_load_at(int map, float x, float y, float z, float angle);
 // The same for the way home (1.9.0, session.cpp): where an invader stood when its invasion was accepted. Not a load of
 // the invasion (the Death Knell's keeps the session's leaves away for its load; this one must not).
 void place_next_load_home(int map, float x, float y, float z, float angle);
+// Loads that reached their placement step (the player is put in the loaded map) since the game started.
+int placements();
 
 // A boss with a health bar whose fight began in this game since its last load and that still lives (its entity),
 // else 0. After a rest it means the fight was lost: only a load puts it back to sleep (world.cpp).

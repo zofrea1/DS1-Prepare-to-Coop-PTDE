@@ -775,7 +775,10 @@ int place_at_destination(uint32_t step) {
     return kPlaceAsGame;
 }
 
+volatile LONG g_placements = 0;  // loads that reached their placement step (placements())
+
 int __stdcall place_choice(uint32_t step) {
+    InterlockedIncrement(&g_placements);
     if (g_knell_armed) {
         g_knell_armed = false;
         uint32_t map = 0;
@@ -7425,6 +7428,8 @@ void tick() {
 }
 
 void place_next_load_at(int map, float x, float y, float z, float angle) { arm_knell_place(map, x, y, z, angle); }
+
+int placements() { return static_cast<int>(g_placements); }
 
 void place_next_load_home(int map, float x, float y, float z, float angle) {
     arm_knell_place(map, x, y, z, angle);

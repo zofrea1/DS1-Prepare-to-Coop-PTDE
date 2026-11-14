@@ -839,9 +839,15 @@ struct Stand {
     game::Vec3 pos{};
     float angle = 0;
     bool armed = false;     // the way home's load is aimed here (logged once)
+    int loads_at = 0;       // rules::placements() when the way home began
+    double trip_at = 0;     // when it began
     bool second = false;    // one more load was made to get here
     double second_at = 0;
 };
+// The game takes a finished invader out of the session a moment before its own load home starts, and the world counts
+// as ours again at once: the way home waits for a load to reach its placement, up to this long without one. One more
+// load made before that one (open48) ran on top of the game's own and sent both players to the title screen.
+constexpr double kHomeLoadWait = 8.0;
 Stand g_home_stand;   // ours, in our own world: an invader's
 Stand g_group_stand;  // in the group's host's world (g_group.leader): a guest of a group invasion's
 bool take_stand(Stand* s, const char* what);
@@ -3567,6 +3573,8 @@ void arm_home_stand(const char* why) {
                                 g_home_stand.angle);
     if (!g_home_stand.armed) {
         g_home_stand.armed = true;
+        g_home_stand.loads_at = rules::placements();
+        g_home_stand.trip_at = now();
         LOG_INFO("[coop] The way home goes to where we stood (%s)", why);
     }
 }
@@ -3576,7 +3584,13 @@ void arm_home_stand(const char* why) {
 bool home_stand_pending() {
     Stand& s = g_home_stand;
     if (!s.valid) return false;
+    if (!s.armed) arm_home_stand("home");
     if (s.second && (game::loading() || now() - s.second_at < 3.0)) return true;  // that load is on its way
+    // The way home's own load first (see kHomeLoadWait): no look at where we are before one has placed us.
+    if (!s.second && rules::placements() == s.loads_at) {
+        if (now() - s.trip_at < kHomeLoadWait) return true;
+        LOG_INFO("[coop] No load home in %.0f s since the way home began", kHomeLoadWait);
+    }
     game::Vec3 at{};
     float angle = 0;
     const int map = static_cast<int>(static_cast<uint32_t>(game::map_id()) & 0xFFFF0000u);

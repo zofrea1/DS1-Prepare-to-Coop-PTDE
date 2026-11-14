@@ -193,6 +193,9 @@ void note_guest_rest(int object_id);
 // The same, with an id that is already a respawn bonfire (the host's, on join or when following a Homeward Bone).
 void note_guest_respawn(int bonfire);
 int guest_respawn_bonfire();
+// The game is taking an invader out of the session (its own leave, rules.cpp): the way home is aimed at where we stood
+// when the invasion was accepted (1.9.0). Only once we are in the invaded world.
+void invader_leaving();
 
 // A team wipe (every co-op player has fallen): the respawn warps wait for each other, so that every game reloads
 // its world at once. Asked when our respawn warp starts while we are dead: true holds the warp (world.cpp). Then

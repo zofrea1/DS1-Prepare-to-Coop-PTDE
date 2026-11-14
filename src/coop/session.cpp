@@ -829,6 +829,23 @@ double g_cut_follow_at = 0;
 double g_cut_busy_at = 0;
 bool g_cut_end_told = false;  // the end of our cutscene was logged for this follow
 constexpr double kCutMoveGrace = 20.0;
+// Where an invader stood when its invasion was accepted, and where a group invasion's guest stood in its host's world
+// when the group went (1.9.0): the way back puts them there instead of at a bonfire, as the game's own summons go back
+// to their sign, so invading does not cost the progress through an area (the user's design). Only a spot on a floor,
+// alive, out of a load; otherwise the bonfire, as before.
+struct Stand {
+    bool valid = false;
+    int map = -1;  // area << 24 | block << 16
+    game::Vec3 pos{};
+    float angle = 0;
+    bool armed = false;     // the way home's load is aimed here (logged once)
+    bool second = false;    // one more load was made to get here
+    double second_at = 0;
+};
+Stand g_home_stand;   // ours, in our own world: an invader's
+Stand g_group_stand;  // in the group's host's world (g_group.leader): a guest of a group invasion's
+bool take_stand(Stand* s, const char* what);
+void arm_home_stand(const char* why);
 // Guest bookkeeping.
 int g_home_bonfire = -1;
 int g_guest_bonfire = -1;  // respawn id while we are a guest (-1 none)
@@ -3479,19 +3496,37 @@ void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
     g_host_coop_players = w.coop_players ? w.coop_players : 1;
     g_home_bonfire = game::last_bonfire();
     g_home_map = game::map_id();
+    if (g_invade) {
+        take_stand(&g_home_stand, "Invading");
+    } else {
+        g_home_stand = Stand{};
+    }
     g_host_map = w.map;
     st.host_map = w.map;
     g_host_bonfire = w.bonfire;
     // Until the guest rests, a death uses the host's bonfire. Set before the join: the reload can run inside it.
     if (w.bonfire >= 0 && !g_invade) g_guest_bonfire = w.bonfire;
-    const game::Vec3 pos{w.pos[0], w.pos[1], w.pos[2]};
+    game::Vec3 pos{w.pos[0], w.pos[1], w.pos[2]};
+    int join_map = w.map;
+    float join_angle = w.angle;
+    if (!g_invade && g_group_stand.valid && g_group.phase == GroupPhase::Rejoining && g_host == g_group.leader) {
+        // A group invasion's guest coming back: where we stood in this world when the group went, not the host's
+        // bonfire (1.9.0).
+        join_map = g_group_stand.map;
+        pos = g_group_stand.pos;
+        join_angle = g_group_stand.angle;
+        LOG_INFO("[coop] Group invasion: back in %s's world where we stood when the group went (%.2f, %.2f, %.2f) in "
+                 "map %08X, not at the host's bonfire", steam::persona(g_host).c_str(), pos.x, pos.y, pos.z,
+                 static_cast<uint32_t>(join_map));
+    }
+    if (!g_invade) g_group_stand = Stand{};  // once
     // The lone-member timer of the session we left last (game::kSessIdleTimer) would end this join 10 s after that
     // leave, before its load: stopped first.
     if (const float left = game::stop_idle_timer()) {
         LOG_INFO("[coop] The game's timer from our last session had %.1f s left (it would have ended this join): "
                  "stopped", left);
     }
-    if (!game::join_from_invitation(w.invitation, w.invitation_size, w.map, pos, w.angle)) {
+    if (!game::join_from_invitation(w.invitation, w.invitation_size, join_map, pos, join_angle)) {
         finish(kMsgConnectTimeout);
         return;
     }
@@ -3504,14 +3539,86 @@ void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
              steam::persona(g_host).c_str(), w.map, w.bonfire, type, g_home_bonfire);
 }
 
+// Where we stand now, if it is a spot to come back to: on a floor, alive, out of a load. `what` names it in the log.
+bool take_stand(Stand* s, const char* what) {
+    *s = Stand{};
+    const uint32_t me = game::player();
+    uint32_t floor = 0;
+    game::Vec3 at{};
+    float angle = 0;
+    if (!me || game::loading() || world::local_dead() || !read32(me + 0x29C, &floor) || !floor ||
+        !game::position(&at, &angle)) {
+        LOG_INFO("[coop] %s: we stand on no floor now; the way back goes to the bonfire", what);
+        return false;
+    }
+    s->valid = true;
+    s->map = static_cast<int>(static_cast<uint32_t>(game::map_id()) & 0xFFFF0000u);
+    s->pos = at;
+    s->angle = angle;
+    LOG_INFO("[coop] %s: we stand at (%.2f, %.2f, %.2f) in map %08X; the way back comes here", what, at.x, at.y, at.z,
+             static_cast<uint32_t>(s->map));
+    return true;
+}
+
+// The next load into the spot's map stands us there (rules::place_next_load_home).
+void arm_home_stand(const char* why) {
+    if (!g_home_stand.valid) return;
+    rules::place_next_load_home(g_home_stand.map, g_home_stand.pos.x, g_home_stand.pos.y, g_home_stand.pos.z,
+                                g_home_stand.angle);
+    if (!g_home_stand.armed) {
+        g_home_stand.armed = true;
+        LOG_INFO("[coop] The way home goes to where we stood (%s)", why);
+    }
+}
+
+// Home again: true while we are still on the way to where we stood. The game's own way home (its victory's or death's
+// load) goes to our bonfire's map; when the spot lies in another block, one more load takes us there.
+bool home_stand_pending() {
+    Stand& s = g_home_stand;
+    if (!s.valid) return false;
+    if (s.second && (game::loading() || now() - s.second_at < 3.0)) return true;  // that load is on its way
+    game::Vec3 at{};
+    float angle = 0;
+    const int map = static_cast<int>(static_cast<uint32_t>(game::map_id()) & 0xFFFF0000u);
+    const bool have = game::position(&at, &angle);
+    const float dx = at.x - s.pos.x, dy = at.y - s.pos.y, dz = at.z - s.pos.z;
+    const float away = have ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0f;
+    if ((map == s.map && have && away < 3.0f) || s.second) {
+        if (map == s.map && have && away < 3.0f) {
+            LOG_INFO("[coop] Home where we stood (%.1f m from it)", away);
+        } else {
+            LOG_INFO("[coop] Home in map %08X, %.1f m from where we stood in map %08X, after one more load: left so",
+                     static_cast<uint32_t>(map), away, static_cast<uint32_t>(s.map));
+        }
+        s = Stand{};
+        return false;
+    }
+    s.second = true;
+    s.second_at = now();
+    LOG_INFO("[coop] Home in map %08X, %.1f m from where we stood in map %08X: one more load there",
+             static_cast<uint32_t>(map), away, static_cast<uint32_t>(s.map));
+    arm_home_stand("one more load");
+    world::warp_now(s.map, -1);
+    return true;
+}
+
 void warp_home() {
     g_home_warp_sent = true;
     const uint32_t gm = game::game_man();
-    LOG_INFO("[coop] Warping home (bonfire %d, map %08X)", g_home_bonfire, g_home_map);
-    if (g_home_bonfire >= 0) {
+    if (g_home_stand.valid) {
+        // An invader: where we stood when the invasion was accepted (1.9.0); our last bonfire stays our respawn.
+        LOG_INFO("[coop] Warping home to where we stood (%.2f, %.2f, %.2f) in map %08X (bonfire %d stays our last)",
+                 g_home_stand.pos.x, g_home_stand.pos.y, g_home_stand.pos.z, static_cast<uint32_t>(g_home_stand.map),
+                 g_home_bonfire);
+        if (g_home_bonfire >= 0) *ptr<int>(gm + game::kGmLastBonfire) = g_home_bonfire;
+        arm_home_stand("our own warp home");
+        world::warp_now(g_home_stand.map, -1);
+    } else if (g_home_bonfire >= 0) {
+        LOG_INFO("[coop] Warping home (bonfire %d, map %08X)", g_home_bonfire, g_home_map);
         *ptr<int>(gm + game::kGmLastBonfire) = g_home_bonfire;
         world::warp_now(game::bonfire_map(g_home_bonfire), -1);
     } else {
+        LOG_INFO("[coop] Warping home (bonfire %d, map %08X)", g_home_bonfire, g_home_map);
         world::warp_now(g_home_map, -1);
     }
     const int own = rules::state().own_chr_type;
@@ -3961,6 +4068,7 @@ void guest_tick() {
             }
             if (!g_home_warp_sent && game::in_game() && !game::loading() && !game::own_world()) warp_home();
             if (game::in_game() && game::own_world() && !game::loading()) {
+                if (home_stand_pending()) break;
                 if (rules::state().own_chr_type >= 0 && game::chr_type() != rules::state().own_chr_type) {
                     LOG_INFO("[coop] Home as chr type %d (was %d before joining)", game::chr_type(),
                              rules::state().own_chr_type);
@@ -5336,6 +5444,7 @@ void group_on_go(uint64_t from, const GroupGoMsg& m) {
     LOG_INFO("[coop] Group invasion: our host's group invades another world (lobby %016llx, %s's): %s",
              static_cast<unsigned long long>(m.lobby), m.host ? steam::persona(m.host).c_str() : "?",
              group_names().c_str());
+    take_stand(&g_group_stand, "Group invasion (in our host's world)");
     guest_go_home(kMsgGroupGoMember, "our host's group invades another world");
     // That world's host is accepted on our way home (it accepted us at the ask), for anything of theirs that comes first.
     if (m.host) steam::accept(m.host);
@@ -8200,6 +8309,11 @@ void note_guest_rest(int object_id) {
 }
 
 int guest_respawn_bonfire() { return (g_role == Role::Guest && !g_invade) ? g_guest_bonfire : -1; }
+
+void invader_leaving() {
+    // Not the leaves of the join itself: the join's load into the host's world must keep its invasion point.
+    if (g_invade && (g_step == Step::InWorld || g_step == Step::GoingHome)) arm_home_stand("the game's own way home");
+}
 
 const PeerInfo* host_peer() {
     for (const auto& p : g_peers) {

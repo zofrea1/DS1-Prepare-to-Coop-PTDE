@@ -149,6 +149,9 @@ bool __stdcall allow_leave(uint32_t ret) {
                      "join step %d) %s", ret, game::pending_send_bytes(), game::session_state(), game::join_step(),
                      leave_name(ret));
         }
+        // The game's own way home for an invader (its victory's or its death's WarpNextStageKick, ...): its load is
+        // aimed at where we stood before it starts (session.cpp, 1.9.0).
+        if (g_state.active && g_state.invader) session::invader_leaving();
         return true;
     }
     switch (ret) {
@@ -569,6 +572,7 @@ constexpr uint32_t kPlaceEnd = 0x00EFACD0;
 void* g_place_end = reinterpret_cast<void*>(kPlaceEnd);
 int g_place_kind = kPlaceAsGame;
 bool g_knell_armed = false;
+const char* g_knell_what = "Death Knell";  // whose placement is armed (the log's name)
 int g_knell_map = -1;
 __declspec(align(16)) float g_knell_place[8] = {};
 
@@ -778,11 +782,11 @@ int __stdcall place_choice(uint32_t step) {
         const bool read = read32(step + kStepWarpMap, &map);
         if (!g_place_bonfire && read && (map & 0xFFFF0000u) == (static_cast<uint32_t>(g_knell_map) & 0xFFFF0000u)) {
             g_place_warp = false;
-            LOG_INFO("[coop] Death Knell: placed at (%.2f, %.2f, %.2f) in map %08X", g_knell_place[0], g_knell_place[1],
-                     g_knell_place[2], map);
+            LOG_INFO("[coop] %s: placed at (%.2f, %.2f, %.2f) in map %08X", g_knell_what, g_knell_place[0],
+                     g_knell_place[1], g_knell_place[2], map);
             return kPlaceAtPosition;
         }
-        LOG_INFO("[coop] Death Knell: this load (map %08X%s) is not the knell's (%08X); placed as it would be",
+        LOG_INFO("[coop] %s: this load (map %08X%s) is not the one armed (%08X); placed as it would be", g_knell_what,
                  read ? map : 0, g_place_bonfire ? ", a respawn" : "", static_cast<uint32_t>(g_knell_map));
     }
     if (place_at_bonfire()) return kPlaceOnBonfire;
@@ -855,6 +859,7 @@ __declspec(naked) void hk_place_choice() {
 }
 
 void arm_knell_place(int map, float x, float y, float z, float angle) {
+    g_knell_what = "Death Knell";
     g_knell_map = map;
     g_knell_place[0] = x;
     g_knell_place[1] = y;
@@ -7420,5 +7425,11 @@ void tick() {
 }
 
 void place_next_load_at(int map, float x, float y, float z, float angle) { arm_knell_place(map, x, y, z, angle); }
+
+void place_next_load_home(int map, float x, float y, float z, float angle) {
+    arm_knell_place(map, x, y, z, angle);
+    g_knell_what = "The way home";
+    g_invader_knell_load = false;  // the way out of the invasion, not a load that stays in it
+}
 
 }  // namespace coop::rules

@@ -82,6 +82,18 @@ bool invader_knell_load() {
            GetTickCount64() - g_invader_knell_at < kInvaderKnellLoadFor;
 }
 
+// An invader stays through two of the game's area rules (1.9.0), as a co-op guest does: walking into another map block
+// (kRetMapChange; the multiplayer walls are down for invaders) and the event scripts' matching check. That check is
+// eventCommon's OnMatchingCheck and OnMatchingError (Lua event 4064, slots 3 and 4), the only scripts that call
+// LeaveSession: when a player arrives (AliveMotion_wait, SummonMotion_wait) the host's game asks IsMatchingMultiPlay
+// (0xD5ED80 -> 0xDB0720: the vanilla covenant invasions' rules, Forest Hunters, Darkmoon Blades, the Path of the Dragon,
+// and the host's play region, PlayerIns+0x284 below -9) and, when it fails, tells that player's game to leave. Our
+// invasions are matched by this mod; a Deck invasion of 2026-11-14 ended there 2.5 minutes in. The invader's death,
+// the host's send-home, loads and network failures stay the game's own.
+bool invader_stays(uint32_t ret) {
+    return g_state.active && g_state.invader && !g_state.leaving && (ret == kRetLuaLeave || ret == kRetMapChange);
+}
+
 // A co-op guest's leave_session looks to the host like the whole session ended. These callers then run the
 // title leave when only one member remains. Vanilla phantom leave does not title-kick the host; block these
 // only for the seamless host, in its own world, while the game session is still hosting.
@@ -105,7 +117,8 @@ const char* leave_name(uint32_t ret) {
         case 0x00D2D310: return "OnIrregularLeaveSession: messages piling up for a member (0xD2D2F0)";
         case 0x00D2EF4C: return "OnIrregularLeaveSession: network memory low (0xD2EF0C)";
         case 0x00D2D16B: return "OnBeThxKickOut (0xD2D110)";
-        case 0x00D62919: return "LeaveSession, from an event script (0xD62900)";
+        case 0x00D62919: return "LeaveSession, from an event script (0xD62900: the matching check, Lua event 4064)";
+        case 0x00EFDDE9: return "walked into another map block (0xEFDDE9)";
         case 0x00D62984: return "WarpNextStageKick, an event script sending this player home (0xD62930)";
         default: return "";
     }
@@ -113,6 +126,12 @@ const char* leave_name(uint32_t ret) {
 
 bool __stdcall allow_leave(uint32_t ret) {
     if (host_stays(ret)) return false;
+    if (invader_stays(ret)) {
+        if (++g_blocked_leaves <= 50) {
+            LOG_INFO("[coop] Kept the invasion (leave from %08X skipped) %s", ret, leave_name(ret));
+        }
+        return false;
+    }
     if (invader_knell_load() && (ret == kRetWarpKick || ret == kRetStepEnd || ret == kRetMapChange ||
                                  ret == kRetAfterLoad || ret == kRetWarpRestart)) {
         if (++g_blocked_leaves <= 50) {
@@ -157,6 +176,9 @@ bool __stdcall allow_leave(uint32_t ret) {
 
 bool __stdcall allow_party_reset(uint32_t ret) {
     if (invader_knell_load() && (ret == kRetWarpKickParty || ret == kRetMapChangeParty)) return false;
+    if (invader_stays(ret == kRetLuaLeaveParty ? kRetLuaLeave : ret == kRetMapChangeParty ? kRetMapChange : 0)) {
+        return false;
+    }
     if (!seamless_rules()) return true;
     return ret != kRetLuaLeaveParty && ret != kRetWarpKickParty && ret != kRetMapChangeParty;
 }

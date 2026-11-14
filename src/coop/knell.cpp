@@ -168,6 +168,8 @@ uint64_t g_target_id = 0;  // the teammate the view shows, or the owner of the s
 bool g_target_sign = false;
 uint32_t g_shown_chr = 0;  // the character the camera was given (0: ours)
 int g_view_hp = 0;         // our HP when the view opened (a hit closes it)
+long g_view_ticks = 0;     // rules::tick_loss() at that HP: what poison and the like take since is no hit
+bool hit_since();
 bool g_cancel_down = true; // B or Esc held (only a fresh press closes the view)
 bool g_confirm_down = true; // A held (only a fresh press chooses)
 struct Destination {
@@ -1246,7 +1248,7 @@ void open_view() {
     }
     g_state = State::View;
     g_view_since = now();
-    g_view_hp = chr_int(game::player(), kChrHp);
+    hit_since();  // the health from here on
     g_cancel_down = true;
     g_confirm_down = true;
     InterlockedExchange(&g_mask_dpad, 1);
@@ -1280,10 +1282,28 @@ const char* confirm_pressed() {
     return pressed ? (pad ? "A on the pad" : "Enter") : nullptr;
 }
 
+// Our health fell by more than our lasting effects (poison, toxic, lava...) took since the last look: a hit. The
+// health as it is now, healing included, is what the next look compares with.
+bool hit_since() {
+    const int hp = chr_int(game::player(), kChrHp);
+    const long ticks = rules::tick_loss();
+    const bool hit = hp < g_view_hp - static_cast<int>(ticks - g_view_ticks);
+    if (!hit && ticks != g_view_ticks) {
+        static bool told = false;
+        if (!told) {
+            told = true;
+            LOG_INFO("[coop] Death Knell: health lost to a lasting effect (poison, toxic...) is not a hit");
+        }
+    }
+    g_view_hp = hp;
+    g_view_ticks = ticks;
+    return hit;
+}
+
 void view_tick() {
     const char* why = refusal();
     const uint32_t me = game::player();
-    if (!why && me && chr_int(me, kChrHp) < g_view_hp) why = "we were hit";
+    if (!why && me && hit_since()) why = "we were hit";
     if (!why && now() - g_view_since > kViewLimit) why = "time limit";
     if (!why && cancel_pressed()) why = "B or Esc";
     if (why) {
@@ -1291,7 +1311,6 @@ void view_tick() {
         if (std::strcmp(why, "B or Esc") != 0 && std::strcmp(why, "time limit") != 0) say(L"The Death Knell falls silent");
         return;
     }
-    g_view_hp = std::max(g_view_hp, chr_int(me, kChrHp));  // healing is no hit
     const auto can = choices();
     int at = -1;
     for (size_t i = 0; i < can.size(); ++i) {
@@ -1908,6 +1927,7 @@ void use() {
             g_state = State::Opening;
             g_at = now() + kOpenDelay;
             g_view_hp = chr_int(game::player(), kChrHp);
+            g_view_ticks = rules::tick_loss();
             g_cancel_down = true;
             LOG_INFO("[coop] Death Knell: rung (the view opens in %.1f s)", kOpenDelay);
             start_hold();  // the use is at the bottom of the ring's crouch
@@ -1974,7 +1994,7 @@ void tick() {
         case State::Opening:
             if (world::local_dead() || game::loading() || !game::player()) {
                 close_view("interrupted");
-            } else if (chr_int(game::player(), kChrHp) < g_view_hp) {
+            } else if (hit_since()) {
                 close_view("we were hit");
                 say(L"The Death Knell falls silent");
             } else if (cancel_pressed()) {

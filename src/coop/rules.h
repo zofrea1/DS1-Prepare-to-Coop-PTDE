@@ -172,6 +172,8 @@ const char* give_floor(uint32_t chr, uint32_t hit, bool* changed);
 const char* find_floor(uint32_t chr, bool* changed);
 // The character's floor taken away again (SetFloor(0), as the game does to the party's characters at a map switch).
 void clear_floor(uint32_t chr);
+// The health our character has lost to its lasting effects' ticks (poison, toxic, lava...) since the game started.
+long tick_loss();
 // The collision under a point (x, y, z) of a block in use here, by the same cast; 0 none.
 uint32_t floor_at(const float* pos);
 // A lasting effect of the game's (id: 100 a white summon sign) at a point, held by `handle` (0x18 bytes that must stay

@@ -3550,6 +3550,100 @@ uint32_t loaded_floor(uint32_t chr, const char** why) {
     return 0;
 }
 
+// The ground under a character, as its physics last found it: [[chr+0x28]+0x1C] (the character's physics control)
+// +0x1C8, with its kind at +0x1B8 (0xEBD260 sets both from a ground contact; 0xEC3970 clears them). The character's
+// update (0xE80A00) asks that object every frame (0xE68510: its vtable +8, then its material through the handle at
+// +8). The game never clears the pointer when the collision is unloaded: its own characters are never where the map
+// is not loaded. A co-op player's copy is: it stays in our game while we walk on and its block unloads, its physics
+// finds no ground there, and the pointer it keeps is a destroyed HitIns whose vtable is the base class's, with the
+// runtime's "pure virtual function call" in that slot (R6025; 2026-11-13, an invader who followed two players out of
+// Blighttown: the copy of one of them, 6 s after its block went). Before that call: a HitIns of a block that is not
+// in use here, an object whose slot is the pure call, or one that cannot be read, is forgotten as 0xEC3970 forgets
+// it. The physics sets it again on the next ground contact.
+constexpr uint32_t kGroundAskCall = 0x00E80A75;  // call 0xE68510, edi = the character
+constexpr uint32_t kGroundAsk = 0x00E68510;
+constexpr uint32_t kPureCall = 0x00ABD262;
+constexpr uint32_t kCtrlGround = 0x1C8, kCtrlGroundKind = 0x1B8;
+volatile long g_ground_forgotten = 0;
+void* g_ground_ask = reinterpret_cast<void*>(kGroundAsk);
+
+void __stdcall ground_guard(uint32_t chr) {
+    uint32_t mods = 0, ctrl = 0, obj = 0, vt = 0, fn = 0, n = 0;
+    if (!read32(chr + 0x28, &mods) || !mods || !read32(mods + 0x1C, &ctrl) || !ctrl ||
+        !read32(ctrl + kCtrlGround, &obj) || !obj) {
+        return;
+    }
+    const char* why = nullptr;
+    uint8_t block = 0xFF;
+    if (!read32(obj, &vt)) {
+        why = "it cannot be read";
+    } else if (vt == kHitInsVtable) {
+        const uint32_t wr = world_res();
+        if (!read8(obj + 0xF, &block) || !wr || !read32(wr + kWrBlockCount, &n) || static_cast<int8_t>(block) < 0 ||
+            static_cast<uint32_t>(static_cast<int8_t>(block)) >= n ||
+            block_state(wr, static_cast<int8_t>(block)) != static_cast<int>(kBlockInUse)) {
+            why = "its block is not loaded here";
+        }
+    } else if (!read32(vt + 8, &fn) || fn == kPureCall) {
+        why = "it was destroyed";
+    }
+    if (!why) return;
+    *ptr<uint32_t>(ctrl + kCtrlGround) = 0;
+    *ptr<int32_t>(ctrl + kCtrlGroundKind) = -1;
+    if (InterlockedIncrement(&g_ground_forgotten) <= 20) {
+        LOG_INFO("[coop] Character %08X: the ground its physics last stood on (%08X, block %d) is forgotten: %s", chr, obj,
+                 static_cast<int>(static_cast<int8_t>(block)), why);
+    }
+}
+
+__declspec(naked) void hk_ground_ask() {
+    __asm {
+        pushad
+        push edi
+        call ground_guard
+        popad
+        jmp g_ground_ask  // every register as the game set it
+    }
+}
+
+bool install_ground_guard() {
+    return redirect_call(kGroundAskCall, kGroundAsk, reinterpret_cast<void*>(&hk_ground_ask));
+}
+
+// Health our character loses to its lasting effects (poison, toxic, bleeding out, lava, a curse's drain): the
+// SpEffects' change every tick (0xE72E20, eax = the character) sets the health through this one call of 0xE688E0
+// (stdcall(chr, hp)). The points it takes from the local player are added up, so a reader can tell them from a hit
+// (the Death Knell closes on a hit, and closed on every poison tick).
+constexpr uint32_t kTickHpCall = 0x00E72EF4;  // call 0xE688E0
+constexpr uint32_t kTickSetHp = 0x00E688E0;
+volatile long g_tick_loss = 0;
+void* g_set_hp_fn = reinterpret_cast<void*>(kTickSetHp);
+
+void __stdcall note_tick_hp(uint32_t chr, int hp) {
+    if (!chr || chr != game::player()) return;
+    const int have = *ptr<int32_t>(chr + 0x2D4);
+    if (hp < 0) hp = 0;
+    if (hp >= have) return;
+    if (InterlockedExchangeAdd(&g_tick_loss, have - hp) == 0) {
+        LOG_INFO("[coop] Our health lost to a lasting effect's tick is counted from here on (first: %d points)", have - hp);
+    }
+}
+
+__declspec(naked) void hk_tick_hp() {
+    __asm {
+        pushad
+        push dword ptr [esp + 0x28]  // hp
+        push dword ptr [esp + 0x28]  // chr (one push further down)
+        call note_tick_hp
+        popad
+        jmp g_set_hp_fn  // every register as the game set it
+    }
+}
+
+bool install_tick_loss() {
+    return redirect_call(kTickHpCall, kTickSetHp, reinterpret_cast<void*>(&hk_tick_hp));
+}
+
 // The floor under a character, found as the game finds the local player's when it has none (0xDE8280): a shape cast
 // in the physics world ([0x137D5DC]+0x14, filter 0x28) from 0.5 m above its physics position straight down for 0.5 m
 // into an hkpAllCdPointCollector, the contacts sorted (0x7E0FA0), and the first whose body's owner belongs to a
@@ -4514,6 +4608,8 @@ const char* find_floor(uint32_t chr, bool* changed) {
     *changed = true;
     return nullptr;
 }
+
+long tick_loss() { return g_tick_loss; }
 
 void clear_floor(uint32_t chr) {
     __try {
@@ -6777,6 +6873,8 @@ int install() {
     failed += install_one("member left (no return home for the master of the world)", install_master_left());
     failed += install_one("guest bloodstain position", install_blood_world());
     failed += install_one("one bloodstain per death", install_one_stain());
+    failed += install_one("unloaded ground forgotten (a far player's copy)", install_ground_guard());
+    failed += install_one("health lost to lasting effects counted (Death Knell)", install_tick_loss());
     failed += install_one("bloodstain kept in a co-op party", install_param_party());
     {
         // mov eax, [esi+70h] ; sub eax, edi. The following je stays in place.

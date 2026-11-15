@@ -25,6 +25,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 - **Includes the DS1 PTDE FPS Unlock 2.4.0**: scripted sequences keep the original game's timing (the Undead Burg's barrel thrower no longer dies to his own barrel); water reflections and ripples at your resolution (no more dancing reflections at 4K); the HUD scale holds through menus and shops and covers prompts, item pickups and messages; faster again; the keyboard and mouse read once a frame under Wine (Steam Deck, Linux, phones); better company for DSfix, with DSfix 3.0 by DDTM recommended for quality-of-life features.
 - **Protection against the 2022 remote code execution exploit**: a text in another player's network data too long for the game's buffer is cut short instead of overwriting the game's memory, whether the co-op is on or off.
 - **Invasion searches say whose world was full and why**: the invader's log names every world the search found, with its version, its players against its `MaxPlayers` and `ExtraInvaders`, and what kept it from taking them (full, at its invader limit, invaded recently, a boss fight, invaders off, another version). A co-op search logs the worlds it found too. Worlds of older hosts are named without their numbers.
+- **Fixed**: with the co-op off (`PrepareToCoop = false`), the fix for the hitch every 5 seconds from the Steam client (`SteamPauseGuard`) works too.
 - **Plays with 1.5.0 to 1.9.0** (the same co-op protocol).
 
 The full list is in the [2.0.0 release notes](release-notes/v2.0.0.md).

@@ -83,6 +83,7 @@ The full list is in the [1.5.0 release notes](release-notes/v1.5.0.md). 1.4.0 br
 - Steam running. While Prepare to Co-op is on, the game runs as Steam's Spacewar (app 480): Prepare to Die Edition's own Steam lobbies were switched off in 2022, and Spacewar is the long-standing community route for its multiplayer. Steam shows you as playing Spacewar.
 - Everyone in a session uses the same `Password`, and Prepare to Co-op 1.5.0 or later: 1.5.0 changed the co-op protocol, and players of 1.0.0 to 1.4.0 are told to update when they try to join or invade a 1.5.0 world. Update together. 1.6.0 plays with 1.5.0; its group invasions need 1.6.0 for everyone in the group and for the world they invade.
 - DSfix is optional and works alongside (set `unlockFPS 0` in `DSfix.ini` if the FPS unlock is on). The FPS Unlock draws the game at your resolution itself; `YieldToDSFix = true` lets DSfix decide its own picture settings instead (see the FPS Unlock's README).
+- For quality-of-life features (item sorting, a bonfire map, keyboard and mouse controls and more), [DSfix 3.0](https://www.nexusmods.com/darksouls/mods/1985) by DDTM works alongside: use the settings in the FPS Unlock's README under [DSfix 3.0](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered#dsfix-30), in `PTDE-Coop-FPS-Unlock.ini`. Its features have not been tested in a co-op session yet.
 
 ## Install
 

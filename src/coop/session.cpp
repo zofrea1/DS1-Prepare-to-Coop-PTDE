@@ -2124,15 +2124,95 @@ int invader_places() {
     return std::max(0, std::min(by_limit, by_room));
 }
 
+// Our world's numbers for searches (2.0.0, "ptdesc_counts"): the players in the session (us and everyone admitted),
+// the co-op players (us and the guests), the invaders, the places held for a group on its way, our MaxPlayers, the
+// players the session holds now (MaxPlayers, lowered by any game in it that holds fewer) and ExtraInvaders, as seven
+// numbers. A search names each world it finds with them, and says why one cannot take an invader: until 2.0.0 the
+// invader only learned how many worlds were full (2026-11-15: the user's searches passed over a full world seven times
+// in two days, and nothing told whose it was or why).
+std::string world_counts() {
+    int in_session = 1;
+    const int room = session_room(g_cfg.max_players, 0, &in_session);
+    char b[64];
+    std::snprintf(b, sizeof(b), "%d %d %d %d %d %d %d", in_session, 1 + coop_guest_count(), invaders_here(0),
+                  held_places(0), g_cfg.max_players, room, g_cfg.extra_invaders);
+    return b;
+}
+
 void publish_invader_places() {
     static uint64_t lobby = 0;
     static int last = -1;
+    static std::string last_counts;
     if (!g_lobby) return;
     const int n = invader_places();
-    if (lobby == g_lobby && n == last) return;
+    const std::string counts = world_counts();
+    if (lobby == g_lobby && n == last && counts == last_counts) return;
+    if (lobby != g_lobby || n != last) steam::set_lobby_data(g_lobby, "ptdesc_inv_room", std::to_string(n).c_str());
+    if (lobby != g_lobby || counts != last_counts) steam::set_lobby_data(g_lobby, "ptdesc_counts", counts.c_str());
     lobby = g_lobby;
     last = n;
-    steam::set_lobby_data(g_lobby, "ptdesc_inv_room", std::to_string(n).c_str());
+    last_counts = counts;
+}
+
+// A found world's numbers ("ptdesc_counts"); `known` false for a host of 1.10.0 or older, which publishes none.
+struct WorldCounts {
+    bool known = false;
+    int players = 0, coop = 0, invaders = 0, held = 0, max = 0, room = 0, extra = 0;
+};
+
+WorldCounts lobby_counts(uint64_t lobby) {
+    WorldCounts c;
+    const std::string s = steam::lobby_data(lobby, "ptdesc_counts");
+    c.known = !s.empty() && sscanf_s(s.c_str(), "%d %d %d %d %d %d %d", &c.players, &c.coop, &c.invaders,
+                                        &c.held, &c.max, &c.room, &c.extra) == 7;
+    return c;
+}
+
+// A found world in words for the log: whose, its version, and its numbers.
+std::string describe_world(uint64_t lobby) {
+    std::string name = steam::lobby_data(lobby, "ptdesc_name");
+    if (name.empty()) name = steam::persona(steam::lobby_owner(lobby));
+    const PeerVersion v = lobby_version(lobby);
+    const std::string ver = v.mod.empty() ? "protocol " + std::to_string(v.protocol) : v.mod;
+    const WorldCounts c = lobby_counts(lobby);
+    const std::string held = c.held > 0 ? ", " + std::to_string(c.held) + " place(s) held for a group" : "";
+    char b[320];
+    if (!c.known) {
+        std::snprintf(b, sizeof(b), "%s's world (%s; its numbers are not published before 2.0.0)", name.c_str(),
+                      ver.c_str());
+    } else {
+        std::snprintf(b, sizeof(b),
+                      "%s's world (%s): %d player(s) in it (%d co-op, %d invader(s)%s), MaxPlayers %d (it holds %d "
+                      "now), ExtraInvaders %d",
+                      name.c_str(), ver.c_str(), c.players, c.coop, c.invaders, held.c_str(), c.max, c.room,
+                      c.extra);
+    }
+    return b;
+}
+
+// Why a found world takes no invader now, from its numbers: its invader limit (its co-op players plus ExtraInvaders)
+// or its size (MaxPlayers, or a game in it that holds fewer), or both.
+std::string why_full(uint64_t lobby) {
+    const WorldCounts c = lobby_counts(lobby);
+    if (!c.known) return "no invader places (an older host does not say why)";
+    const int limit = c.coop + std::max(1, c.extra);
+    const bool by_limit = c.invaders + c.held >= limit;
+    const bool by_room = c.players + c.held >= c.room;
+    char b[200];
+    if (by_room && !by_limit) {
+        std::snprintf(b, sizeof(b), "full: %d of the %d players it holds%s", c.players + c.held, c.room,
+                      c.room < c.max ? " (a game in it holds fewer than its MaxPlayers)" : "");
+    } else if (by_limit && !by_room) {
+        std::snprintf(b, sizeof(b), "at its invader limit: %d invader(s)%s, the limit %d (%d co-op + ExtraInvaders %d)",
+                      c.invaders + c.held, c.held > 0 ? " with the held places" : "", limit, c.coop,
+                      std::max(1, c.extra));
+    } else if (by_limit && by_room) {
+        std::snprintf(b, sizeof(b), "full (%d of %d players) and at its invader limit (%d of %d)", c.players + c.held,
+                      c.room, c.invaders + c.held, limit);
+    } else {
+        std::snprintf(b, sizeof(b), "no invader places (its numbers had room a moment ago)");
+    }
+    return b;
 }
 
 // The soul levels of our world's co-op players, ours first, for invaders' level matching (1.7.0, kLevelPull):
@@ -3313,6 +3393,9 @@ void join_world(uint64_t pick) {
     });
 }
 
+// The most worlds of one search named in the log (a search returns up to 50).
+constexpr int kWorldsLogged = 12;
+
 void issue_search() {
     const int gen = ++g_search_gen;
     ++g_search_waves;
@@ -3333,8 +3416,19 @@ void issue_search() {
         found.erase(std::remove_if(found.begin(), found.end(),
                                    [me](uint64_t l) { return steam::lobby_owner(l) == me; }),
                     found.end());
+        // Every world found, in the log (2.0.0): whose, its version and numbers, and what became of it here.
+        int described = 0;
+        auto note_world = [&described](uint64_t l, const std::string& what) {
+            if (++described > kWorldsLogged) return;
+            LOG_INFO("[coop] World found: %s: %s", describe_world(l).c_str(), what.c_str());
+        };
         // A world that takes no invaders at all (AllowInvaders off, or an older host's boss fight) is left out.
         if (g_invade) {
+            for (uint64_t l : found) {
+                if (steam::lobby_data(l, "ptdesc_invade") != "1" && steam::lobby_data(l, "ptdesc_boss") != "1") {
+                    note_world(l, "takes no invaders (AllowInvaders off)");
+                }
+            }
             found.erase(std::remove_if(found.begin(), found.end(),
                                        [](uint64_t l) {
                                            return steam::lobby_data(l, "ptdesc_invade") != "1" &&
@@ -3350,7 +3444,11 @@ void issue_search() {
         // when nothing else was found, reported.
         std::vector<uint64_t> other;
         for (uint64_t l : found) {
-            if (!same_version(lobby_version(l))) other.push_back(l);
+            if (!same_version(lobby_version(l))) {
+                other.push_back(l);
+                note_world(l, "another version (its protocol " + std::to_string(lobby_version(l).protocol) +
+                                  ", ours " + std::to_string(g_protocol) + ")");
+            }
         }
         found.erase(std::remove_if(found.begin(), found.end(),
                                    [](uint64_t l) { return !same_version(lobby_version(l)); }),
@@ -3382,14 +3480,19 @@ void issue_search() {
                 if (t && until > t) {
                     note_refusal(kCooldown, until - t);
                     ++cooling;
+                    note_world(l, "invaded recently (takes invaders again in " + std::to_string(until - t) + " s)");
                 } else if (steam::lobby_data(l, "ptdesc_invade") != "1") {
                     note_refusal(kBossFight, 0);
                     ++fighting;
+                    note_world(l, "in a boss fight");
                 } else if (steam::lobby_data(l, "ptdesc_inv_room") == "0") {
                     note_refusal(kFull, 0);
                     ++full;
+                    note_world(l, why_full(l));
                 } else {
                     open.push_back(l);
+                    const std::string places = steam::lobby_data(l, "ptdesc_inv_room");
+                    note_world(l, places.empty() ? std::string("open") : "open (" + places + " invader place(s))");
                 }
             }
             if (cooling || fighting || full) {
@@ -3401,6 +3504,8 @@ void issue_search() {
                 return;
             }
             found.swap(open);
+        } else {
+            for (uint64_t l : found) note_world(l, l == found.front() ? "we knock here" : "found");
         }
         const uint64_t pick = g_invade ? pick_invade_world(found) : found.front();
         g_worlds = found;

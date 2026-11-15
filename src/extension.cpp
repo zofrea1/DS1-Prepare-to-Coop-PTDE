@@ -50,8 +50,12 @@ void device_created(IDirect3DDevice9* device) {
     coop::overlay::attach(device);
 }
 
+// The co-op hooks the game's Steam imports itself only while it is on (coop_install_early); with it off the FPS
+// Unlock's SteamPauseGuard hooks them as it does on its own (review 2026-11-15: off, nothing hooked them).
+bool hooks_steam_imports() { return g_config.enabled; }
+
 const PtdeExtension kExtension = {"Prepare to Co-op Edition v" PREPARE_TO_COOP_VERSION, &attach, &start,
-                                  &wants_device, &device_created};
+                                  &wants_device, &device_created, &hooks_steam_imports};
 
 }  // namespace
 

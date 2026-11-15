@@ -32,3 +32,4 @@ src\coop\knell.cpp
 src\coop\logupload.cpp
 src\coop\vanillamp.cpp
 src\coop\jolly.cpp
+src\coop\netsafe.cpp

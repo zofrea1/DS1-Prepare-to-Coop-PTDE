@@ -13,6 +13,7 @@
 #include "log.h"
 #include "motion.h"
 #include "netrate.h"
+#include "netsafe.h"
 #include "players.h"
 #include "rules.h"
 #include "session.h"
@@ -375,6 +376,8 @@ void tick() {
 void coop_install_early(const CoopConfig& config) {
     g_cfg = config;
     g_enabled = g_cfg.enabled;
+    // The game's own network code is guarded whether co-op is on or off, before any traffic.
+    coop::netsafe::install();
     if (!g_enabled) return;
     patch_save_extension(g_cfg.save_extension);
     coop::crterror::install();
@@ -385,6 +388,7 @@ void coop_install_early(const CoopConfig& config) {
 }
 
 void coop_install(const CoopConfig& config) {
+    coop::netsafe::report();
     if (!config.enabled) {
         LOG_INFO("[coop] Prepare to Co-op: off");
         return;

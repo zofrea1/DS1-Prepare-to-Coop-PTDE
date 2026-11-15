@@ -220,6 +220,7 @@ build.bat
 
 - Yui, for Seamless Co-op for Dark Souls Remastered, the mod this one follows.
 - The [DS1 FPS Unlock](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered) (MIT license), included; its own acknowledgements are in its README.
+- DDTM, for [DSfix 3.0](https://www.nexusmods.com/darksouls/mods/1985), where the FPS Unlock's slide contact, slide steering, cutscene camera and soul counter fixes were first published (the FPS Unlock's code for them was written separately).
 - [DXVK](https://github.com/doitsujin/dxvk) by Philip Rebohle and contributors (zlib/libpng license), included unmodified as `dxvk_d3d9.dll` for the FPS Unlock's DXVK.
 
 ## License

@@ -1920,6 +1920,12 @@ bool reset_window(ULONGLONG ms) {
     return g_world_reset_at && GetTickCount64() - g_world_reset_at < ms;
 }
 
+// When the load we are in (or the last one) began (tick); 0 none yet.
+ULONGLONG g_load_began_at = 0;
+
+// A world reset (a rest) came since the current load began: the host's list of the dead it applies is from before it.
+bool rest_during_load() { return g_load_began_at && g_world_reset_at && g_world_reset_at >= g_load_began_at; }
+
 // The host's own scripted NPC deaths (2004[04] Force Character Death: 0xD799E0 sets the souls bit at chr+0x200 and
 // calls SetHP(chr, 0)) wait while another player stands at the NPC. Oscar dies once he has been talked to and the
 // player is in the hall or the corridor (11810530: talk flag 11810590-592 and 10000 in 1812121 / 1812990): the player
@@ -2011,13 +2017,17 @@ int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
     // anyway (the kill 0xE6B4E0 from 0xE8077A, 2 to 4 s after the reset) and paid the guest the souls again. The
     // host's copies, moved by the guest's game, died with it, and paid the host too: "they respawn but die
     // instantly". A guest that joined during the host's rest got the same from the host's list of its dead
-    // (kRetHostDeadList, 21:42: the list was built before the rest). After a rest every enemy is back; one that is
-    // still dead comes back dead by its own map events in every game (Force Character Death, another caller). So for
-    // kStaleDeathWindow after a world reset a guest keeps the health of a living enemy that the host's report or list
-    // would kill; the host's next report is its health after the rest.
+    // (kRetHostDeadList, 21:42: the list was built before the rest, and the load that applies it ended 5 s after).
+    // After a rest every enemy is back; one that is to stay dead (a Black Knight, Capra's second pair of dogs) is
+    // disabled and killed again by its own map event in every game (Force Character Death, another caller), before
+    // any of this arrives. So a guest keeps the health of a living enemy that the host's report would kill within
+    // kStaleReportWindow after a world reset (those reports came 0.0 to 0.6 s after it; the host's next one, its
+    // health after the rest, 1.4 s after), and that the host's list would kill in a load a rest came during.
     if (team != 8 && team != 9) {
-        constexpr ULONGLONG kStaleDeathWindow = 6000;
-        if (team < 6 || (ret != kRetHpSync && ret != kRetHostDeadList) || !reset_window(kStaleDeathWindow)) return hp;
+        constexpr ULONGLONG kStaleReportWindow = 2000;
+        const bool stale = (ret == kRetHpSync && reset_window(kStaleReportWindow)) ||
+                           (ret == kRetHostDeadList && rest_during_load());
+        if (team < 6 || !stale) return hp;
         static int lines = 0;
         if (++lines <= 30) {
             uint32_t entity = 0;
@@ -7491,6 +7501,10 @@ void npc_sign_watch() {
 
 void tick() {
     g_main_thread = GetCurrentThreadId();
+    static bool was_loading = false;
+    const bool loading_now = game::loading();
+    if (loading_now && !was_loading) g_load_began_at = GetTickCount64();
+    was_loading = loading_now;
     npc_sign_watch();
     // A co-op guest's loot and items follow the host's (single player) rules for as long as it is a guest, also
     // while it leaves (the area unload on the way home must clean up the same way the items were made).

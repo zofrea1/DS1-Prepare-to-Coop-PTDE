@@ -1358,6 +1358,8 @@ void watch_hands(uint32_t chr) {
              where ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0f, rules::bid_for(chr));
 }
 
+bool group_active(uint32_t chr);
+
 // `was_up`: we saw it with more than 1 HP at the last look. One already dead when we first saw it (the dead of a load,
 // inactive here: rate -1) is not watched: in the 2026-11-01 test such enemies used up each game's 20 lines.
 void watch_low_hp(uint32_t chr, int h, int m, bool was_up) {
@@ -1381,20 +1383,112 @@ void watch_low_hp(uint32_t chr, int h, int m, bool was_up) {
     if (w.told || t - w.since < 4.0 || !(acting || no_death) || g_low_hp_lines >= 20) return;
     w.told = true;
     ++g_low_hp_lines;
-    uint32_t entity = 0, f1fc = 0, rate = 0, current = 0, own = 0, team = 0;
+    uint32_t entity = 0, f1fc = 0, rate = 0, current = 0, own = 0, net = 0, team = 0, manip = 0, death = 0xFFFFFFFF;
     uint8_t ai = 0;
     read32(chr + 0x208, &entity);
     read32(chr + 0x1FC, &f1fc);
     read32(chr + 0xF4, &rate);
     read32(chr + 0x2C, &current);
     read32(chr + 0x410, &own);
+    read32(chr + 0x414, &net);
     read32(chr + 0x74, &team);
     if (ctrl) read8(ctrl + 0xC0, &ai);
+    if (ctrl && read32(ctrl + 0x2C, &manip) && manip) read32(manip + 0x1C4, &death);  // 2: a death asked (0xE80790)
     LOG_INFO("[coop] Enemy %08X (entity %d, team %u): its health has read %d/%d for %.0f s but it %s (animation %d, "
-             "moved by %s, AI %s, host's report %d, flags 1FC %08X, rate %d)", chr, static_cast<int>(entity), team, h, m,
-             t - w.since, acting ? "still attacks" : "has not begun to die", w.action,
-             current && current == own ? "this game" : "another game", (ai & 1) ? "on" : "off",
-             session::guest() ? rules::host_hp_report(chr) : -2, f1fc, static_cast<int>(rate));
+             "moved by %s, AI %s, host's report %d, flags 1FC %08X, rate %d, death state %d, group %s)", chr,
+             static_cast<int>(entity), team, h, m, t - w.since, acting ? "still attacks" : "has not begun to die",
+             w.action, !current ? "nothing" : current == own ? "this game" : current == net ? "another game" : "neither",
+             (ai & 1) ? "on" : "off", session::guest() ? rules::host_hp_report(chr) : -2, f1fc, static_cast<int>(rate),
+             static_cast<int>(death), group_active(chr) ? "active" : "inactive");
+}
+
+// An enemy at 0 HP that lives on. The 2026-11-15 test: Burg hollows near the guest stood at 0 HP for minutes (one
+// idle, 0 HP, moved by the host's own AI, its death never begun there), and the host's rests brought them back where
+// they stood, where they died at once and paid their souls ("they respawn but die instantly"); the 2026-11-01 report,
+// an enemy that "never died and was there until a rest", was the same. A character's death (0xE80790, esi = the
+// character, 0x1FF bit 5 set first, as the game's damage receiver 0xE413B0 does it) is only a request to its
+// manipulator (ChrCtrl+0x2C, +0x1C4 = 2), dropped when its map part's group is inactive here, and the health that
+// takes an enemy to 0 can come without one: the host's HP report sets it with no death test, and a damage packet for
+// an enemy whose group is inactive here sets it with none either. Such enemies had changed hands between the games
+// every few seconds as they died ("changed hands 6 times in 30 s"), each change a new manipulator. An enemy (team 6,
+// no boss) that our own AI moves, that this game updates, whose group is active, whose death has not begun here (its
+// souls not given: 0x1FF bit 7) and that has read 0 HP for kZombieWait gets the game's own death here; the other
+// games' copies follow the game that moves it. One whose death began (a Catacombs skeleton that falls apart and gets
+// up again) is left alone.
+constexpr uint32_t kChrDeath = 0x00E80790;  // esi = the character
+constexpr double kZombieWait = 3.0;
+std::map<uint32_t, double> g_zero_since;  // an enemy reading 0 HP with no death begun -> since when (cleared on loads)
+std::set<uint32_t> g_zombie_done;
+int g_zombie_lines = 0;
+double g_reset_seen = -100;  // the last world reset (a rest) seen in progress here
+
+bool group_active(uint32_t chr) {
+    uint32_t part = 0, group = 0;
+    uint8_t f = 0;
+    if (!read32(chr + 0xC, &part) || !part) return false;
+    return !(read32(part + 0x1C, &group) && group && read8(group + 0x14, &f) && (f & 1));
+}
+
+bool request_death(uint32_t chr) {
+    __try {
+        *ptr<uint8_t>(chr + 0x1FF) |= 0x20;
+        __asm {
+            push esi
+            mov esi, chr
+            mov eax, kChrDeath
+            call eax
+            pop esi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+void zombie_check(uint32_t chr, int h, int m, bool was_up) {
+    if (h > 0 || m <= 0 || !was_up || !g_active || g_invader) {
+        g_zero_since.erase(chr);
+        if (h > 0) g_zombie_done.erase(chr);  // alive again (a rest): watched anew
+        return;
+    }
+    if (g_zombie_done.count(chr)) return;
+    uint32_t wcm = 0, reset = 0;
+    if (read32(kWorldChrManVar, &wcm) && wcm && read32(wcm + kWorldReset, &reset) && reset != 0) g_reset_seen = now();
+    uint8_t f1ff = 0;
+    uint32_t team = 0, current = 0, own = 0;
+    if (!read8(chr + 0x1FF, &f1ff) || (f1ff & 0xA0) || !read32(chr + 0x74, &team) || team != 6 ||
+        !read32(chr + 0x2C, &current) || !read32(chr + 0x410, &own) || !current || current != own ||
+        !runs_here(chr) || !group_active(chr) || now() - g_reset_seen < 3.0 || game::loading()) {
+        g_zero_since.erase(chr);
+        return;
+    }
+    // Only one that acts alive: standing, walking (animations under 1000) or attacking (3000-4999). A fall, a
+    // knock-down or a pile of bones (2000s), a death and an event animation are left as they are.
+    uint32_t ctrl = 0, anim = 0xFFFFFFFF;
+    if (read32(chr + 0x28, &ctrl) && ctrl) read32(ctrl + 0x350, &anim);
+    const int a = static_cast<int>(anim);
+    if (!(a < 1000 || (a >= 3000 && a < 5000))) {
+        g_zero_since.erase(chr);
+        return;
+    }
+    const double t = now();
+    const auto it = g_zero_since.emplace(chr, t).first;
+    if (t - it->second < kZombieWait) return;
+    std::vector<uint32_t> bosses;
+    rules::gauge_boss_chrs(&bosses);
+    if (std::find(bosses.begin(), bosses.end(), chr) != bosses.end()) return;
+    g_zero_since.erase(it);
+    if (g_zombie_done.size() < 4096) g_zombie_done.insert(chr);
+    uint32_t entity = 0;
+    read32(chr + 0x208, &entity);
+    const bool ok = request_death(chr);
+    if (++g_zombie_lines <= 30) {
+        game::Vec3 at{};
+        game::chr_position(chr, &at);
+        LOG_INFO("[coop] Enemy %08X (entity %d) stood at 0 HP for %.0f s with no death, moved by this game (animation "
+                 "%d, 1FF %02X, at %.1f, %.1f, %.1f): its death %s", chr, static_cast<int>(entity), kZombieWait,
+                 static_cast<int>(anim), f1ff, at.x, at.y, at.z, ok ? "runs now" : "faulted");
+    }
 }
 
 // The copies of enemies other games move, near us, every 30 s: their updates, stalls (an update that came after the copy
@@ -1542,6 +1636,7 @@ void enemy_hp_tick() {
         const bool was_up = g_seen_up.count(chr) > 0;
         if (h > 1 && g_seen_up.size() < 4096) g_seen_up.insert(chr);
         watch_low_hp(chr, h, m, was_up);
+        zombie_check(chr, h, m, was_up);
         watch_hands(chr);
         watch_spot(chr);
         if (h <= 0) {
@@ -2702,6 +2797,8 @@ void tick() {
         g_regrow.clear();
         g_low_hp.clear();
         g_seen_up.clear();
+        g_zero_since.clear();
+        g_zombie_done.clear();
         g_hands.clear();
         g_spot_watch.clear();
         g_forced_max.clear();

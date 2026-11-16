@@ -8,6 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 2.0.1 | DS1 PTDE FPS Unlock 2.4.1 |
 | Prepare to Co-op Edition 2.0.0 | DS1 PTDE FPS Unlock 2.4.0 |
 | Prepare to Co-op Edition 1.9.0 | DS1 PTDE FPS Unlock 2.3.0 |
 | Prepare to Co-op Edition 1.8.0 | DS1 PTDE FPS Unlock 2.2.0 |
@@ -19,6 +20,13 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.2.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
+
+## What's new in 2.0.1
+
+- **Includes the DS1 PTDE FPS Unlock 2.4.1: preliminary support for RTX Remix.** With the Dark Souls PTDE RTX mod installed beside the game, the FPS Unlock leaves the picture to it (`YieldToRtxRemix = auto`), keeps the frame rate, every gameplay fix and the controller fix, and gives Remix's fullscreen mode your display's refresh rate. Turn the RTX mod's own frame rate unlock off (`[FPSUnlock] Enabled=0` in its `rtx_comp\settings\remix-comp-proxy.ini`). With the RTX mod, start the game directly or turn Steam Input off for it: launched through Steam with Steam Input on, the game found no controller.
+- **Plays with 1.5.0 to 2.0.0** (the same co-op protocol). Nothing else changes.
+
+The details are in the [2.0.1 release notes](release-notes/v2.0.1.md).
 
 ## What's new in 2.0.0
 

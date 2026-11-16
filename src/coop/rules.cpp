@@ -2038,7 +2038,47 @@ int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
 constexpr uint32_t kKillChr = 0x00E6B4E0;
 void* g_kill_orig = nullptr;
 
-bool __stdcall kill_allowed(uint32_t chr, uint32_t ret) { return set_hp_value(chr, 0, ret) == 0; }
+// The 2026-11-15 tests: Burg hollows that had died before the host's rest came back with it and died again 2 to 3 s
+// later, in both games, their souls paid again. Which call takes them back to 0 is not known yet: for 15 s after a
+// world reset (ours or another player's), every HP change and direct kill that takes a character other than a
+// player (team 6 and up) from above 0 to 0, or brings one at 0 back, is logged with its caller.
+int g_reset_trace_lines = 0;
+
+void reset_trace(uint32_t chr, int result, uint32_t ret, const char* what) {
+    if (g_reset_trace_lines >= 80 || !chr || !g_state.active || !reset_window(15000)) return;
+    uint32_t cur = 0, max_hp = 0, team = 0, entity = 0, rate = 0, current = 0, own = 0, net = 0;
+    if (!read32(chr + 0x2D4, &cur) || !read32(chr + 0x74, &team) || team < 6) return;
+    const bool down = result <= 0 && static_cast<int>(cur) > 0;
+    const bool up = result > 0 && static_cast<int>(cur) <= 0;
+    if (!down && !up) return;
+    ++g_reset_trace_lines;
+    read32(chr + 0x2D8, &max_hp);
+    read32(chr + 0x208, &entity);
+    read32(chr + 0xF4, &rate);
+    read32(chr + 0x2C, &current);
+    read32(chr + 0x410, &own);
+    read32(chr + 0x414, &net);
+    uint32_t wcm = 0, state = 0;
+    if (read32(kWorldChrManAddr, &wcm) && wcm) read32(wcm + kWorldResetField, &state);
+    LOG_INFO("[coop] Reset trace: %08X (entity %d, team %u) HP %d/%d -> %d by %s from %08X (reset %s, %.1f s after; "
+             "moved by %s, rate %d)", chr, static_cast<int>(entity), team, static_cast<int>(cur),
+             static_cast<int>(max_hp), result, what, ret, state ? "running" : "done",
+             (GetTickCount64() - g_world_reset_at) / 1000.0,
+             !current ? "nothing" : current == own ? "this game" : current == net ? "another game" : "neither",
+             static_cast<int>(rate));
+}
+
+bool __stdcall kill_allowed(uint32_t chr, uint32_t ret) {
+    const int result = set_hp_value(chr, 0, ret);
+    reset_trace(chr, result, ret, "kill");
+    return result == 0;
+}
+
+int __stdcall set_hp_traced(uint32_t chr, int hp, uint32_t ret) {
+    const int result = set_hp_value(chr, hp, ret);
+    reset_trace(chr, result, ret, "SetHP");
+    return result;
+}
 
 // Our stack: [esp] = return address, [esp+4] = chr. ecx and edx are kept for the original.
 __declspec(naked) void hk_kill_chr() {
@@ -2252,7 +2292,7 @@ __declspec(naked) void hk_set_hp() {
         push dword ptr [esp + 8]     // the return address
         push dword ptr [esp + 0x14]  // hp (one push later)
         push dword ptr [esp + 0x14]  // chr (two pushes later)
-        call set_hp_value
+        call set_hp_traced
         mov [esp + 0x10], eax        // the hp argument
         pop edx
         pop ecx

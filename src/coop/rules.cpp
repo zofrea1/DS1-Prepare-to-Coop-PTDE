@@ -1023,6 +1023,27 @@ bool personal_flag(int id) {
 // a co-op guest keeps them in their own world (see hk_flag_store).
 bool player_flag_group(int id) { return (id >= 50000000 && id < 60000000) || (id >= 70000000 && id < 80000000); }
 
+// The talk scripts' own map flags: each NPC's memory of a talk kept in its map's flags (a merchant's "greeted on this
+// visit", most in a map's 6100s, a few in its 5000 block), set and read by the talk scripts and used by no map event
+// (every flag a talk script sets, against every map's and the common events; from Remastered's scripts, 2026-11-15).
+// A talk script reads them together with the conversation flags (7xxxxxxx), which are each player's own
+// (player_flag_group), and some of its states expect the two to agree. The Undead Merchant in the Burg (t101623)
+// greets a player he has not met (71010070 off) only while 11016100 (greeted this visit) is off: his greeting sets
+// both, and no state of his starts a talk with 11016100 on and 71010070 off. Shared, the host's greeting set 11016100
+// in the game of a guest who had not met him at home, and the guest could neither talk to him nor trade (a player's
+// report; reproduced 2026-11-15, host 5800X3D, guest Steam Deck). These flags belong to each player now: they are not
+// shared, and a co-op guest's talk scripts read them in its own world (guest_flag_answer), where its own talks have
+// kept them (after_set_flag), beside its own conversation flags.
+constexpr int kTalkFlags[] = {
+    11006100, 11015020, 11015021, 11016100, 11016101, 11016102, 11016103, 11016111, 11020593, 11025021, 11025022,
+    11026100, 11026102, 11026103, 11026104, 11026105, 11026106, 11026107, 11026108, 11026109, 11026110, 11026112,
+    11100590, 11200595, 11200597, 11206100, 11206101, 11206102, 11206103, 11206104, 11215200, 11215201, 11215202,
+    11216100, 11216101, 11216102, 11216103, 11305020, 11306100, 11405020, 11405021, 11406100, 11406101, 11406102,
+    11406103, 11406104, 11406106, 11505020, 11506100, 11510591, 11515020, 11516100, 11516101, 11516102, 11606100,
+    11706100, 11815020, 11816100};
+
+bool talk_flag(int id) { return std::binary_search(std::begin(kTalkFlags), std::end(kTalkFlags), id); }
+
 // A flag the games keep setting against each other is not world progress either: each game works it out from
 // its own player. 11815396 ("the player is in the Asylum Demon's arena", set and cleared by the network-sync-off
 // events 11815394/11815395 from the local player's position) went back and forth about 130 times a second
@@ -1043,10 +1064,11 @@ void note_flag_change(int id) {
     }
 }
 
-// Lua multiplayer state (4000-4999) is per player and never shared, nor are the personal flags above.
+// Lua multiplayer state (4000-4999) is per player and never shared, nor are the personal flags above, nor the talk
+// scripts' own (talk_flag).
 bool shared_flag(int id) {
     return id >= 0 && !(id >= 4000 && id <= 4999) && !personal_flag(id) && !player_flag_group(id) &&
-           !g_contested.count(id);
+           !talk_flag(id) && !g_contested.count(id);
 }
 
 // The map event whose instruction is running: the EMEVD dispatcher (0xBC3AB0, called from the event update
@@ -1459,11 +1481,19 @@ int install_loot() {
 // first encounter unlocks (2026-10-12 test). The lookup takes a co-op guest's group 5 and 7 blocks from their
 // own world's store: their items and conversations are their own, read and kept there.
 constexpr uint32_t kFlagBlockStore = 0x00D388BA;  // mov ecx,[esp+14h] ; mov ecx,[ecx+10Ch]
+// The thread reading a flag of its own world (own_flag): every group of its reads takes the own store here, and no
+// other thread's. The getter (0xD38C40) finds the store only at this site. 0: none.
+volatile LONG g_own_read_thread = 0;
 
 // ecx = the store; edi = the group. eax, edx, ebp, edi are live and kept.
 __declspec(naked) void hk_flag_store() {
     __asm {
         mov ecx, [esp + 0x18]  // EventFlagMan: the caller's [esp+14h], past our return address
+        push eax
+        mov eax, dword ptr fs:[0x24]  // this thread's id
+        cmp eax, dword ptr [g_own_read_thread]
+        pop eax
+        je own
         cmp byte ptr [g_strict], 0
         jne active
         cmp edi, 5
@@ -4252,14 +4282,15 @@ bool disable_item(uint32_t manager, uint32_t handle) {
 }
 
 // Own-world bit, through the get_flag trampoline. game::flag() would re-enter the hook. False when it could
-// not be read.
+// not be read. The store is taken for this thread only (hk_flag_store): switching the active store (+0x10C), as
+// this did until 2.0.1, turned every other thread's flag read or write in that moment to our own world, and the talk
+// scripts read talk_flag()s in every frame.
 bool own_flag(int id, bool* out) {
     const uint32_t efm = game::event_flag_man();
     if (!efm || !g_getflag_orig || id < 0 || g_in_own_flag) return false;
-    uint32_t active = 0;
-    if (!read32(efm + 0x10C, &active)) return false;
+    const LONG me = static_cast<LONG>(GetCurrentThreadId());
+    if (InterlockedCompareExchange(&g_own_read_thread, me, 0) != 0) return false;  // another thread's read
     ++g_in_own_flag;
-    *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
     uint8_t on = 0;
     bool read = true;
     void* fn = g_getflag_orig;
@@ -4274,8 +4305,8 @@ bool own_flag(int id, bool* out) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         read = false;
     }
-    *ptr<uint32_t>(efm + 0x10C) = active;
     --g_in_own_flag;
+    InterlockedExchange(&g_own_read_thread, 0);
     if (read) *out = on != 0;
     return read;
 }
@@ -4310,6 +4341,17 @@ int __stdcall guest_flag_answer(uint32_t ret, int id) {
         if (reported.insert(id * 2 + (on ? 1 : 0)).second && reported.size() <= 40) {
             LOG_INFO("[coop] Bonfire menu: flag %d is %s in our own world (%s)", id, on ? "on" : "off",
                      ret == kRetTalkRow ? "menu row" : "talk check");
+        }
+        return on ? 1 : 2;
+    }
+    // The talk scripts' own flags (talk_flag): the guest's own world's, as its conversation flags.
+    if ((ret == kRetTalkRow || ret == kRetTalkFlag) && talk_flag(id) && seamless_rules()) {
+        bool on = false;
+        if (!own_flag(id, &on)) return 0;
+        static std::set<int> reported;
+        if (reported.size() < 40 && reported.insert(id * 2 + (on ? 1 : 0)).second) {
+            LOG_INFO("[coop] Talk: flag %d is %s in our own world (an NPC's memory of our talks; our copy of the "
+                     "host's world has it %s)", id, on ? "on" : "off", game::flag(id) ? "on" : "off");
         }
         return on ? 1 : 2;
     }

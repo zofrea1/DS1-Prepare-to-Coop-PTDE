@@ -1025,7 +1025,9 @@ bool player_flag_group(int id) { return (id >= 50000000 && id < 60000000) || (id
 
 // The talk scripts' own map flags: each NPC's memory of a talk kept in its map's flags (a merchant's "greeted on this
 // visit", most in a map's 6100s, a few in its 5000 block), set and read by the talk scripts and used by no map event
-// (every flag a talk script sets, against every map's and the common events; from Remastered's scripts, 2026-11-15).
+// (every flag a talk script sets, against every map's and the common events, 2026-11-15: Remastered's scripts, then
+// PTDE's own from its archives, which give the same list: no PTDE event uses one, and every flag a Remastered event
+// uses is used by a PTDE event too).
 // A talk script reads them together with the conversation flags (7xxxxxxx), which are each player's own
 // (player_flag_group), and some of its states expect the two to agree. The Undead Merchant in the Burg (t101623)
 // greets a player he has not met (71010070 off) only while 11016100 (greeted this visit) is off: his greeting sets
@@ -4245,7 +4247,6 @@ void* g_remove_orig = nullptr;
 std::set<int> g_item_flags;
 std::set<int> g_owned_flags;  // own-world bit is on; cached so get_flag does not re-enter every check
 std::set<uint32_t> g_hidden_items;
-int g_in_own_flag = 0;
 
 void clear_guest_item_handles() { g_hidden_items.clear(); }
 
@@ -4281,16 +4282,26 @@ bool disable_item(uint32_t manager, uint32_t handle) {
     return true;
 }
 
+// This thread is reading its own world's flags (own_flag).
+bool in_own_flag() { return g_own_read_thread == static_cast<LONG>(GetCurrentThreadId()); }
+
 // Own-world bit, through the get_flag trampoline. game::flag() would re-enter the hook. False when it could
 // not be read. The store is taken for this thread only (hk_flag_store): switching the active store (+0x10C), as
 // this did until 2.0.1, turned every other thread's flag read or write in that moment to our own world, and the talk
-// scripts read talk_flag()s in every frame.
+// scripts read talk_flag()s in every frame. A thread that comes while another one reads waits for it (one getter
+// call): giving up, as until 2.0.1, answered with the host's world's bit instead, and a treasure the guest had
+// taken at home could come back for the loading thread's check.
 bool own_flag(int id, bool* out) {
     const uint32_t efm = game::event_flag_man();
-    if (!efm || !g_getflag_orig || id < 0 || g_in_own_flag) return false;
+    if (!efm || !g_getflag_orig || id < 0 || in_own_flag()) return false;
     const LONG me = static_cast<LONG>(GetCurrentThreadId());
-    if (InterlockedCompareExchange(&g_own_read_thread, me, 0) != 0) return false;  // another thread's read
-    ++g_in_own_flag;
+    for (int spins = 0; InterlockedCompareExchange(&g_own_read_thread, me, 0) != 0; ++spins) {
+        if (spins < 64) {
+            YieldProcessor();
+        } else {
+            SwitchToThread();  // the reader was preempted
+        }
+    }
     uint8_t on = 0;
     bool read = true;
     void* fn = g_getflag_orig;
@@ -4305,7 +4316,6 @@ bool own_flag(int id, bool* out) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         read = false;
     }
-    --g_in_own_flag;
     InterlockedExchange(&g_own_read_thread, 0);
     if (read) *out = on != 0;
     return read;
@@ -4317,7 +4327,7 @@ bool own_flag_on(int id) {
 }
 
 bool guest_owns_flag(int id) {
-    if (id < 0 || g_in_own_flag) return false;
+    if (id < 0 || in_own_flag()) return false;
     if (g_owned_flags.count(id)) return true;
     if (!g_item_flags.count(id) || !own_flag_on(id)) return false;
     g_owned_flags.insert(id);

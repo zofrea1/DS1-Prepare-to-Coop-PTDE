@@ -2000,8 +2000,33 @@ int __stdcall set_hp_value(uint32_t chr, int hp, uint32_t ret) {
     if (hp > 0 || !chr || !g_state.active || !g_state.guest || g_state.invader) return hp;
     uint32_t cur = 0, team = 0, max_hp = 0;
     if (!read32(chr + 0x2D4, &cur) || static_cast<int>(cur) <= 0 || !read32(chr + 0x74, &team) ||
-        (team != 8 && team != 9) || !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0) {
+        !read32(chr + 0x2D8, &max_hp) || static_cast<int>(max_hp) <= 0) {
         return hp;
+    }
+    // The world's enemies through a rest: the host's word about them from before it. The 2026-11-15 reset trace
+    // (21:46, host resting at the Burg bonfire, guest by the merchant): 0.3 to 0.6 s after the reset, the host's HP
+    // report (kRetHpSync) set the hollows the guest had killed before the rest, back at full health in the guest's
+    // game, to 0 (the host's game had not sent their new health yet; it came 1.4 s after the reset). A copy at 0 HP
+    // begins its death in its next update; the report's full health came in the middle of it, and the death ended
+    // anyway (the kill 0xE6B4E0 from 0xE8077A, 2 to 4 s after the reset) and paid the guest the souls again. The
+    // host's copies, moved by the guest's game, died with it, and paid the host too: "they respawn but die
+    // instantly". A guest that joined during the host's rest got the same from the host's list of its dead
+    // (kRetHostDeadList, 21:42: the list was built before the rest). After a rest every enemy is back; one that is
+    // still dead comes back dead by its own map events in every game (Force Character Death, another caller). So for
+    // kStaleDeathWindow after a world reset a guest keeps the health of a living enemy that the host's report or list
+    // would kill; the host's next report is its health after the rest.
+    if (team != 8 && team != 9) {
+        constexpr ULONGLONG kStaleDeathWindow = 6000;
+        if (team < 6 || (ret != kRetHpSync && ret != kRetHostDeadList) || !reset_window(kStaleDeathWindow)) return hp;
+        static int lines = 0;
+        if (++lines <= 30) {
+            uint32_t entity = 0;
+            read32(chr + 0x208, &entity);
+            LOG_INFO("[coop] Enemy %08X (entity %d, team %u, HP %d/%d): the host's %s from before the rest would kill "
+                     "it; it lives on here", chr, static_cast<int>(entity), team, static_cast<int>(cur),
+                     static_cast<int>(max_hp), ret == kRetHpSync ? "HP report" : "list of the dead");
+        }
+        return static_cast<int>(cur);
     }
     if (reset_window(5000)) {
         if (++g_hp_saves <= 20) {

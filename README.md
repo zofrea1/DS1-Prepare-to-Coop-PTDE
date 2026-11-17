@@ -46,7 +46,6 @@ The full list is in the [2.0.0 release notes](release-notes/v2.0.0.md).
 - **Invaders stay through area changes** (another part of the map, the game's own matching check).
 - **Every Prepare to Co-op player's ghosts, messages and bloodstains**, whatever their password; the game's own summoning and invading are off.
 - **Fixed**: a crash when a player's copy stood on ground that had unloaded; the Death Knell closing on every tick of poison or toxic.
-- **Steam Deck: keep the game's anti-aliasing off** (black specks on grass and other fine detail, not solved yet).
 - **Plays with 1.5.0 to 1.8.0** (the same co-op protocol); the shared ghosts, messages and bloodstains need 1.9.0.
 
 The full list is in the [1.9.0 release notes](release-notes/v1.9.0.md).

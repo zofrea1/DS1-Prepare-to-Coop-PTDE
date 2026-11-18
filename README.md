@@ -29,8 +29,12 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
   - **The game's mutexes without kernel calls** (`FastMutexes`, new): the game thread took them about 200 times a frame, each a call into Windows, and queued behind other threads at every hand-over. In a heavy Blighttown view the slow frames (one in twenty at 7.5 to 10 ms) are gone: the 95th percentile of the frame times went from 7.6 to 3.3 ms at 4K, and at 1280x720 the frame rate from 351 to 495 FPS.
   - **Faster where the effects fill the view**: about 9% more frames in the Demon Ruins at 4K (filter states with anisotropic filtering answered as repeats, the effects' curves and helpers in registers, the bones' matrices with whole-row moves), the same picture.
   - **The keyboard and mouse read once a frame on Windows too** (`CacheInputReads`), about 2% more frames where the game thread is the limit.
-  - **10-bit colour beside DSfix**, unless DSfix's own SMAA runs on the FPS Unlock's picture.
-- **Plays with 1.5.0 to 2.1.0** (the same co-op protocol).
+  - **Better with DSfix 3.0**: the 10-bit colour stays on beside DSfix unless DSfix's own SMAA runs on the FPS Unlock's picture, and `YieldToDSFix = true` leaves the HUD and menus to DSfix too (DSfix 3.0's HUD mod and weapon durability bars find them).
+  - **Characters no longer snap between bright and dark** when you step closer (Quelaag's Domain's egg carriers most of all): `ShadowBias` is gone; it erased real shadows near the camera.
+  - **The controller no longer goes dead under Wine** (phones, Steam Deck, Linux) when Wine puts its own desktop window in front of the game's.
+- **The Death Knell keeps the world's dead dead**: the enemies the knelling player had killed no longer stand again in that player's game after the knell's load.
+- **A trip taken while the host is down** (Homeward Bone, Darksign, Homeward) brings the world's enemies back for the host too, as for everyone else.
+- **Plays with 1.5.0 to 2.1.0** (the same co-op protocol). The fixes work in each player's own game: update together.
 
 The details are in the [2.2.0 release notes](release-notes/v2.2.0.md) and the FPS Unlock's [2.6.0 release notes](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered/releases/tag/v2.6.0-PTDE-DX9).
 

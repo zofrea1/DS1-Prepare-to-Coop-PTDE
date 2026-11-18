@@ -2418,6 +2418,16 @@ constexpr MapWalls kMapWalls[] = {{0x0A000000, 2}, {0x0A010000, 11}, {0x0C000000
                                   {0x0E010000, 7}, {0x0F000000, 1},  {0x0F010000, 1}, {0x10000000, 3},
                                   {0x11000000, 2}, {0x12000000, 1}};
 constexpr int kWallOffsets[] = {1994, 1996, 1998, 1988, 1986, 1984, 1982, 1980, 1978, 1976, 1974};  // the Lua order
+// The one-time fog walls ("Traverse the white light", gone for good once walked through): each map's event 0 starts
+// its template event (area/block 0090, one slot per wall: m10_01 has two, 11010090 slot 0 and 1) with the wall object,
+// its SFX (object + 1) and the two action areas. When the event's flag is on the wall comes down (2005[03] the object,
+// 2006[01] its SFX); otherwise it waits for the action button (3[18], ActionButtonParam 10010403 / 10010407, reaction
+// attribute 48: the world's own player only), plays 7410 and then takes the wall down. An invader can never take
+// that action, and its game answers the wall's flag from what it knows of the world, so a wall the host's party had
+// walked through long ago could stand for the invader alone, for good (2026-11-18: Undead Burg). From Remastered's
+// event scripts (the same ids as Prepare to Die Edition's); m12_01's 11219114 (the Abyss portal's warp) is not one.
+constexpr int kOnceFogs[] = {1001700, 1011700, 1011702, 1101702, 1201700, 1301700, 1311700, 1321700,
+                             1401702, 1501700, 1501702, 1511700, 1511702, 1601700, 1601702, 1701706};
 constexpr uint32_t kObjByEntity = 0x00D6B830;   // eax = entity -> map object or 0 (ecx, edx clobbered)
 constexpr uint32_t kSetColiEnable = 0x00D60090;  // stdcall(entity, on): bit 0x04 of object+0x2E
 constexpr uint32_t kSetDrawEnable = 0x00D600B0;  // stdcall(entity, on)
@@ -2451,8 +2461,14 @@ bool lower_wall(int id) {
     return true;
 }
 
+// The one-time fog walls taken down in this load (their objects; a load makes new ones). Their own state does not
+// show in the object's collision bit as the multiplayer walls' does (a standing one reads 0 there too), so each is
+// taken down once per object: the natives do nothing to a wall that is already down.
+uint32_t g_fogs_down[sizeof(kOnceFogs) / sizeof(kOnceFogs[0])] = {};
+
 // Once a second while we invade: the standing walls of every loaded map come down.
 void invader_walls_tick() {
+    if (game::loading()) std::memset(g_fogs_down, 0, sizeof(g_fogs_down));
     if (!g_state.active || !g_state.invader || g_state.leaving || game::loading() || !game::in_game() ||
         game::own_world()) {
         return;
@@ -2479,6 +2495,23 @@ void invader_walls_tick() {
     if (lowered && g_walls_lines < 20) {
         ++g_walls_lines;
         LOG_INFO("[coop] Multiplayer walls taken down for us (invader): %d (first %d)", lowered, first);
+    }
+    // The one-time fog walls too: an invader cannot walk through them (the wall's own player only), whatever the
+    // world's party has done with them.
+    int fogs = 0, first_fog = 0;
+    for (size_t i = 0; i < sizeof(kOnceFogs) / sizeof(kOnceFogs[0]); ++i) {
+        const int id = kOnceFogs[i];
+        const uint32_t obj = obj_by_entity(id);
+        if (!obj || obj == g_fogs_down[i]) continue;
+        if (lower_wall(id)) {
+            g_fogs_down[i] = obj;
+            if (!fogs) first_fog = id;
+            ++fogs;
+        }
+    }
+    if (fogs && g_walls_lines < 20) {
+        ++g_walls_lines;
+        LOG_INFO("[coop] One-time fog walls taken down for us (invader): %d (first %d)", fogs, first_fog);
     }
 }
 

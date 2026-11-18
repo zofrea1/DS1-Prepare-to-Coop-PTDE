@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "knell.h"
 
+#include "deadlist.h"
 #include "game.h"
 #include "hook.h"
 #include "items.h"
@@ -1605,6 +1606,8 @@ void load_into(int map_id, const float* pos, float angle, const std::wstring& wh
         }
     }
     rules::place_next_load_at(map, pos[0], pos[1], pos[2], angle);
+    // The world's dead stay dead through the load, as in the other games (deadlist.h, keep_for_load).
+    deadlist::keep_for_load(game::own_world(), "Death Knell");
     world::warp_now(map, -1);
     g_state = State::Loading;
     g_load_since = now();

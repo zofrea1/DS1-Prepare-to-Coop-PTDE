@@ -27,6 +27,12 @@ void note_rest();
 // dead, ours merged with the host's (a guest) or the guests' (the host). False when it does not (a rest during our
 // death, or no list): the reload starts the world over.
 bool arm(bool own_world);
+// A load that is neither a death nor a rest (the Death Knell's load to a far teammate or summon sign): the game's
+// warp loads every map fresh, so each character our game had dead stood again in our game alone (2026-11-18: the
+// host knelled to the guest in Firelink by a load, and the hollows the host had killed stood whole for the host,
+// dead for the guest). Our game's list of the world's dead goes with the load, as with a death's reload, and our
+// hurt enemies keep their health. False when there was nothing to give (the load starts the world over).
+bool keep_for_load(bool own_world, const char* why);
 // Per frame, game thread: drops the kept lists once we live again, and a list the load did not take.
 void tick();
 

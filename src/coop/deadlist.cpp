@@ -446,6 +446,40 @@ bool arm(bool own_world) {
     return g_armed;
 }
 
+bool keep_for_load(bool own_world, const char* why) {
+    if (g_armed) return true;  // a death's reload has its list already
+    const std::vector<uint8_t> raw = build();
+    List list;
+    if (!parse(raw.data(), raw.size(), &list)) {
+        LOG_INFO("[coop] %s: our world's dead characters could not be read: the load starts the world over", why);
+        return false;
+    }
+    const uint32_t size = static_cast<uint32_t>(raw.size());
+    if (!call_set(own_world, raw.data(), size) || game_list_size(own_world) != size) {
+        LOG_ERROR("[coop] %s: the list of the world's dead could not be handed to the game", why);
+        return false;
+    }
+    g_ours = std::move(list);
+    g_armed = true;
+    g_armed_own = own_world;
+    g_loading_seen = false;
+    LOG_INFO("[coop] %s: our load keeps %d dead character(s) of this world dead (our own list, the %s copy)", why,
+             dead_count(g_ours), own_world ? "own world's" : "host's");
+    HurtList hurt;
+    const std::vector<uint8_t> h = build_hurt();
+    if (parse_hurt(h.data(), h.size(), &hurt) && !hurt.empty()) {
+        g_hurt_apply = std::move(hurt);
+        g_hurt_own = own_world;
+        g_hurt_armed = true;
+        g_hurt_loaded = false;
+        g_hurt_applied = 0;
+        g_hurt_until = now() + kHurtWindow;
+        LOG_INFO("[coop] %s: our load is to put back the health of %u hurt enemies (our own)", why,
+                 static_cast<unsigned>(g_hurt_apply.size()));
+    }
+    return true;
+}
+
 void tick() {
     const uint32_t me = game::player();
     uint32_t hp = 0;

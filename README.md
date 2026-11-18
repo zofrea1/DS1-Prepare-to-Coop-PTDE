@@ -33,6 +33,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
   - **Characters no longer snap between bright and dark** when you step closer (Quelaag's Domain's egg carriers most of all): `ShadowBias` is gone; it erased real shadows near the camera.
   - **The controller no longer goes dead under Wine** (phones, Steam Deck, Linux) when Wine puts its own desktop window in front of the game's.
 - **The Death Knell keeps the world's dead dead**: the enemies the knelling player had killed no longer stand again in that player's game after the knell's load.
+- **Invaders are no longer stopped by the one-time fog walls** ("Traverse the white light", gone for good once walked through): only the world's own player can walk through them, and an invader's game kept them standing even where the host's party had cleared them. They now come down for invaders, as the multiplayer walls do.
 - **A trip taken while the host is down** (Homeward Bone, Darksign, Homeward) brings the world's enemies back for the host too, as for everyone else.
 - **Plays with 1.5.0 to 2.1.0** (the same co-op protocol). The fixes work in each player's own game: update together.
 

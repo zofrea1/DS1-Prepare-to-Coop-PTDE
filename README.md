@@ -30,6 +30,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
   - **Faster where the effects fill the view**: about 9% more frames in the Demon Ruins at 4K (filter states with anisotropic filtering answered as repeats, the effects' curves and helpers in registers, the bones' matrices with whole-row moves), the same picture.
   - **The keyboard and mouse read once a frame on Windows too** (`CacheInputReads`), about 2% more frames where the game thread is the limit.
   - **Better with DSfix 3.0**: the 10-bit colour stays on beside DSfix unless DSfix's own SMAA runs on the FPS Unlock's picture, and `YieldToDSFix = true` leaves the HUD and menus to DSfix too (DSfix 3.0's HUD mod and weapon durability bars find them).
+  - **No more sudden blur past about 13 m** when soft effects were on screen (as an invader most of all, with the red phantom's glow).
   - **Characters no longer snap between bright and dark** when you step closer (Quelaag's Domain's egg carriers most of all): `ShadowBias` is gone; it erased real shadows near the camera.
   - **The controller no longer goes dead under Wine** (phones, Steam Deck, Linux) when Wine puts its own desktop window in front of the game's.
 - **The Death Knell keeps the world's dead dead**: the enemies the knelling player had killed no longer stand again in that player's game after the knell's load.

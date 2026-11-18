@@ -613,6 +613,12 @@ bool keep_dead_on_reload() {
     } else if (session::wipe_reload(g_fell_at)) {
         LOG_INFO("[coop] Team wipe: our reload starts the world over");
         wither_blossoms("team wipe", false);
+    } else if (g_trip_release) {
+        // A trip (Homeward Bone, Darksign, Homeward) came while we were down, and our death's respawn is our part of
+        // it. Everyone else's trip is the game's warp, which brings the world's enemies back as the game's own bone
+        // does (no list of the dead goes with it): a host that kept its dead here stood apart from every guest, the
+        // enemies they saw standing dead in the host's game (as the Death Knell's load did the other way, 2026-11-18).
+        LOG_INFO("[coop] Our death goes ahead with the trip: our reload brings the world's enemies back, as everyone's");
     } else {
         keep = deadlist::arm(game::own_world());
         if (!keep) wither_blossoms("our reload starts the world over", false);

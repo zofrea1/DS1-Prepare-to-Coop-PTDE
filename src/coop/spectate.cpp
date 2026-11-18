@@ -282,6 +282,54 @@ uint32_t __cdecl camera_chr() {
     return want;
 }
 
+// Diagnostics (2026-11-18, invader depth of field): which floor gives the frame's draw parameters, logged when it
+// changes. 0xEAF340 reads the floor's MSB part (HitIns+8: the map at +8, the part's index at +0xC, the area at +0xE)
+// and its ids at part+0x58 +7..+0xB (lens flare, shadow, depth of field, tone map, tone correction), each made
+// area << 8 | id. With no floor (chr+0x29C = 0) it keeps the last ones. chr+0x2A8 set = the floor is held (an event's
+// SetFloor, 0xD61A00); a new floor whose +0x46 is clear is not taken (SetFloor 0xE6E580).
+uint32_t g_draw_step = 0;  // the in-game step's object (ebx at kDrawChrSite): +0x38 the draw parameters' blends
+
+void note_draw_floor(uint32_t chr) {
+    static int s_lines = 0;
+    static uint32_t s_key[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
+    if (s_lines >= 300) return;
+    uint32_t wcm = 0, own = 0;
+    if (!chr && read32(kWorldChrManVar, &wcm) && wcm) read32(wcm + 0x3C, &own);
+    const uint32_t who = chr ? chr : own;
+    uint32_t floor = 0, map = 0, part = 0, data = 0, count = 0, table = 0, idx32 = 0;
+    uint8_t held = 0, active = 0, area = 0xFF, ids[5] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    if (who) {
+        read32(who + 0x29C, &floor);
+        read8(who + 0x2A8, &held);
+    }
+    if (floor && read8(floor + 0x46, &active) && read8(floor + 0xE, &area) && read32(floor + 8, &map) && map &&
+        read32(floor + 0xC, &idx32) && read32(map + 0x180, &count) && read32(map + 0x188, &table)) {
+        const int idx = static_cast<int16_t>(idx32 & 0xFFFF);
+        if (idx >= 0 && static_cast<uint32_t>(idx) < count && read32(table + idx * 4, &part) && part &&
+            read32(part + 0x58, &data) && data) {
+            for (int i = 0; i < 5; ++i) read8(data + 7 + i, &ids[i]);
+        }
+    }
+    // The depth of field's blend (0x10002F0): +0 the row it comes from, +2 the row it goes to (area << 8 | row).
+    uint32_t blends = 0, dof_blend = 0xFFFFFFFFu;
+    if (g_draw_step && read32(g_draw_step + 0x38, &blends) && blends) read32(blends + 0x150, &dof_blend);
+    const uint32_t key[5] = {who, floor, static_cast<uint32_t>(held) << 8 | area,
+                             static_cast<uint32_t>(ids[2]) | static_cast<uint32_t>(ids[3]) << 8 |
+                                 static_cast<uint32_t>(ids[4]) << 16 | static_cast<uint32_t>(ids[0]) << 24,
+                             dof_blend >> 16};
+    if (std::memcmp(key, s_key, sizeof(key)) == 0) return;
+    std::memcpy(s_key, key, sizeof(key));
+    ++s_lines;
+    LOG_INFO("[coop] Draw parameters from %s %08X's floor %08X%s: area %d, depth of field row %d (lens flare %d, "
+             "shadow %d, tone map %d, tone correction %d), floor held %d, floor active %d; the depth of field "
+             "blends from %d to %d%s",
+             chr ? (chr == own ? "our character" : "the followed character") : "our character", who, floor,
+             floor ? "" : " (none: the last floor's parameters stay)", area == 0xFF ? -1 : area,
+             static_cast<int8_t>(ids[2]), static_cast<int8_t>(ids[0]), static_cast<int8_t>(ids[1]),
+             static_cast<int8_t>(ids[3]), static_cast<int8_t>(ids[4]), held, active,
+             static_cast<int16_t>(dof_blend & 0xFFFF), static_cast<int16_t>(dof_blend >> 16), s_lines == 300 ? " (more changes are not logged)" : "");
+}
+
 // The character whose floor gives the frame's draw parameters (kDrawChrSite): the game's debug choice as before, else
 // the teammate the camera follows while they have a floor, else 0 (the game then takes the local player, as it did).
 uint32_t __cdecl draw_chr(uint32_t debug_chr) {
@@ -304,12 +352,14 @@ uint32_t __cdecl draw_chr(uint32_t debug_chr) {
         s_chr = chr;
         s_area = chr ? area : -1;
     }
+    note_draw_floor(debug_chr ? debug_chr : chr);
     return chr;
 }
 
 // mov eax,[esi+0xEC]
 __declspec(naked) void hk_draw_chr() {
     __asm {
+        mov g_draw_step, ebx
         push ecx
         push edx
         push dword ptr [esi + 0xEC]

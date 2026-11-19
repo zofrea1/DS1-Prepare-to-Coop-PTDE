@@ -8,6 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 2.3.0 | DS1 PTDE FPS Unlock 2.7.0 |
 | Prepare to Co-op Edition 2.2.0 | DS1 PTDE FPS Unlock 2.6.0 |
 | Prepare to Co-op Edition 2.1.0 | DS1 PTDE FPS Unlock 2.5.0 |
 | Prepare to Co-op Edition 2.0.1 | DS1 PTDE FPS Unlock 2.4.1 |
@@ -23,10 +24,17 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
 
-## What's new in 2.3.0 (in testing)
+## What's new in 2.3.0
 
-- **Includes the DS1 PTDE FPS Unlock 2.7.0: foliage sways in the wind, as in Remastered** (`FoliageSway`): the grass, flowers, bushes, ferns, ivy and leaves Remastered made sway now sway here too, with Remastered's wind motion; `FoliageSwayStrength` and `FoliageSwaySpeed` in percent of Remastered's.
+- **Includes the DS1 PTDE FPS Unlock 2.7.0: foliage sways in the wind, as in Remastered.**
+  - **Swaying grass, flowers, bushes, ferns, ivy and leaves** (`FoliageSway`, new, on): the plants Remastered made sway (Firelink, the Undead Burg, Darkroot Garden, Oolacile, Blighttown and more) now sway here too, with Remastered's wind motion, strength and speed, their shadows and reflections with them; `FoliageSwayStrength` and `FoliageSwaySpeed` in percent of Remastered's. About 1% at 4K where foliage fills the view. Each player's own picture: nothing is sent online.
+  - **Ladder slides as fast as in the original game** (`FixLadderSlide`, new, on): at a high frame rate a slide down a ladder went up to 29% faster than at 30 FPS. It now takes as long as at 30 FPS, smoothly.
+  - **No more control during Reverse Hollowing**: the bonfire softlock fix (`BonfireUnstick`) could stand the character up in the middle of Reverse Hollowing when the prompt was answered just as the character sat down. After the Reverse Hollowing or Kindle prompt it now waits until 8 seconds after it; after any other menu it still steps in after a second.
+  - **Shadows further ahead beside DSfix 3.0**: with `ShadowMapResolution` at 4096 or 8192, shadows ahead of the player appeared only up close, at a hard line. Fixed. With `YieldToDSFix = true` the game's own 2048 shadow map stays.
+  - **No flickering surfaces with `DrawMapPieces = adjacent` or `all`**: a detailed piece and its cheaper stand-in were both drawn in the same place in nine maps; the one your room does not show is now hidden.
 - **Plays with 1.5.0 to 2.2.0** (the same co-op protocol).
+
+The details are in the [2.3.0 release notes](release-notes/v2.3.0.md) and the FPS Unlock's [2.7.0 release notes](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered/releases/tag/v2.7.0-PTDE-DX9).
 
 ## What's new in 2.2.0
 

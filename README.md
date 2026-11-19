@@ -33,9 +33,11 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
   - **No more sudden blur past about 13 m** when soft effects were on screen (as an invader most of all, with the red phantom's glow).
   - **Characters no longer snap between bright and dark** when you step closer (Quelaag's Domain's egg carriers most of all): `ShadowBias` is gone; it erased real shadows near the camera.
   - **The controller no longer goes dead under Wine** (phones, Steam Deck, Linux) when Wine puts its own desktop window in front of the game's.
+  - **Draw distance settings** (new, off by default): `DrawMapPieces = adjacent` draws the map pieces seen from the rooms next to yours too (the grass below Firelink's overlook), `EffectLodDistance` keeps the embers of torches and bonfires farther away, `LodDistance` moves the models' simpler versions farther out.
 - **The Death Knell keeps the world's dead dead**: the enemies the knelling player had killed no longer stand again in that player's game after the knell's load.
 - **Invaders are no longer stopped by the one-time fog walls** ("Traverse the white light", gone for good once walked through): only the world's own player can walk through them, and an invader's game kept them standing even where the host's party had cleared them. They now come down for invaders, as the multiplayer walls do.
 - **A trip taken while the host is down** (Homeward Bone, Darksign, Homeward) brings the world's enemies back for the host too, as for everyone else.
+- **60 network updates a second by default** (`NetworkTickRate`, was 30): the others are drawn closest to where they really are, for about 4 KB a second of upload to each other player.
 - **Plays with 1.5.0 to 2.1.0** (the same co-op protocol). The fixes work in each player's own game: update together.
 
 The details are in the [2.2.0 release notes](release-notes/v2.2.0.md) and the FPS Unlock's [2.6.0 release notes](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered/releases/tag/v2.6.0-PTDE-DX9).

@@ -23,6 +23,11 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
 
+## What's new in 2.3.0 (in testing)
+
+- **Includes the DS1 PTDE FPS Unlock 2.7.0: foliage sways in the wind, as in Remastered** (`FoliageSway`): the grass, flowers, bushes, ferns, ivy and leaves Remastered made sway now sway here too, with Remastered's wind motion; `FoliageSwayStrength` and `FoliageSwaySpeed` in percent of Remastered's.
+- **Plays with 1.5.0 to 2.2.0** (the same co-op protocol).
+
 ## What's new in 2.2.0
 
 - **Includes the DS1 PTDE FPS Unlock 2.6.0: smoother and faster, with the same picture.**

@@ -55,7 +55,7 @@ struct CoopConfig {
     // ping and the smoothing their character is drawn with.
     int overhead_display = 5;
     // Host: how many times a second every game of the session sends its player's character and the enemies it moves
-    // (6, the game's own, to 30). Guests and invaders use their host's.
+    // (6, the game's own, to 60). Guests and invaders use their host's.
     int net_rate = 60;
     // Each player's own: above the game's rate, the ms other players' characters (and the enemies other games move)
     // stay behind their updates as a margin for late ones (0 to 200). 33 ms is about a frame at 30 FPS.

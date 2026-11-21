@@ -23,7 +23,15 @@ namespace {
 // ---------------------------------------------------------------- gait
 // NetworkManipulator move (0xE1E6A0): the gait class is in al at 0xE1E935, before the 0.2 s hysteresis
 // (+0x2C0 timer, +0x2C4 current class). The stub keeps the replaced load of the timer and swaps al for the
-// sender's gait when the character moves at all (al != 0) and that player reported one. The class becomes the
+// sender's gait when that player reported one. The hysteresis is one-sided: a class with movement is taken only once
+// 0.2 s have passed since the last change, but a stand (al 0: this frame's step toward the last received position
+// under 0.01 m/s) is taken at once. Until 2026-11-21 the stub left a stand alone, so one frame without a step (the
+// copy at the last received position before the next one came) stood the copy for at least 0.2 s: with a Steam Deck
+// guest walking slowly the host's copy walked in bursts with pauses (user report: on the host's screen, not on the
+// Deck's; the host at a far higher frame rate has many more frames between two of the Deck's updates). Now a frame
+// without a step keeps the gait the sender reports (walk, run or sprint): the step's direction is zero then, so the
+// copy is handed no movement for that frame, but its class stays and the next step moves it at once. Only the
+// sender's own report (stand) stands the copy; a player with no report keeps the game's guess. The class becomes the
 // stick the character is given (0.5 walk, 1.0 run) and, for a sprint, the dash flag +0x1E4: the copy is driven as if
 // its player held the stick and the dash button. Invaders and the players they invade report theirs too (1.4.0; until
 // then invasions were left to the guess). With no gait reported (a player of an older version, or a report gone stale)
@@ -82,11 +90,11 @@ __declspec(naked) void walk_stick_stub() {
 alignas(4) float g_sprint_speed = 4.5f;  // Remastered's fallback threshold (PTDE 6.0)
 alignas(4) float g_run_speed = 2.6f;     // (PTDE 2.0)
 
+volatile LONG g_zero_step_holds = 0;  // frames a step-less copy kept its sender's gait (for the log)
+
 __declspec(naked) void gait_stub() {
     __asm {
         movss xmm0, dword ptr [ecx + 0x2C0]
-        test al, al
-        jz done
         push edx
         push esi
         xor esi, esi
@@ -96,6 +104,12 @@ __declspec(naked) void gait_stub() {
         mov edx, dword ptr [g_gaits + esi * 8 + 4]
         test edx, edx
         js gait_done
+        test al, al
+        jnz take
+        test edx, edx
+        jz gait_done
+        lock inc dword ptr [g_zero_step_holds]
+    take:
         mov al, dl
         jmp gait_done
     skip:
@@ -105,7 +119,6 @@ __declspec(naked) void gait_stub() {
     gait_done:
         pop esi
         pop edx
-    done:
         ret
     }
 }
@@ -475,6 +488,18 @@ void clear_remote_gaits() {
         g_gaits[i].manipulator = 0;
         g_gaits[i].gait = -1;
         g_walk_sticks[i] = 0.5f;
+    }
+    // Every 10 s: how often a copy had no step while its player moved (each one a stand of 0.2 s or more before).
+    static ULONGLONG last = 0;
+    static int lines = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - last >= 10000) {
+        last = now;
+        const LONG n = InterlockedExchange(&g_zero_step_holds, 0);
+        if (n > 0 && ++lines <= 60) {
+            LOG_INFO("[coop] Other players' characters: %ld frame(s) in the last 10 s without a step while their player "
+                     "walked or ran; they kept the gait (the game would have stood them for 0.2 s or more)", n);
+        }
     }
 }
 

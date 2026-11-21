@@ -21,5 +21,7 @@ void tick();
 // From the character activation hook (spectate.cpp's hk_activation), after the game's asks: the other players'
 // entities asked for again where the asks let them go. Returns how many.
 int keep_players_asked();
+// The enemies shown for the other players (farenemies.cpp): their models given every group too, as the players'.
+void set_extra(const uint32_t* chrs, int n);
 
 }  // namespace coop::visible

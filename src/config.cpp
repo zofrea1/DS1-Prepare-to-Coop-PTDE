@@ -44,6 +44,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.jolly_test = settings_parse_bool(val);
         } else if (key == "spectatestreaming") {
             c.spectate_streaming = settings_parse_bool(val);
+        } else if (key == "enemiesnearotherplayers") {
+            c.enemies_near_others = settings_parse_bool(val);
         } else if (key == "deathknellsoullevel") {
             c.knell_soul_level = settings_parse_bool(val);
         } else if (key == "sharedroppeditems") {

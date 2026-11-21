@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "spectate.h"
 
+#include "farenemies.h"
 #include "game.h"
 #include "hook.h"
 #include "log.h"
@@ -696,6 +697,10 @@ uint8_t __stdcall hk_activation(uint32_t wcm) {
     }
     __try {
         visible::keep_players_asked();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    __try {
+        farenemies::ask(wcm);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return ready;

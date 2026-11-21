@@ -26,6 +26,7 @@
 #include "updates.h"
 #include "vanillamp.h"
 #include "visible.h"
+#include "farenemies.h"
 #include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -345,6 +346,7 @@ void tick_body() {
     coop::deathtext::tick();
     coop::spectate::tick();
     coop::visible::tick();
+    coop::farenemies::tick();
     if (g_items) coop::knell::tick();
     coop::netrate::tick(coop::session::net_rate());
     coop::players::tick();
@@ -433,6 +435,7 @@ void coop_install(const CoopConfig& config) {
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     coop::spectate::set_streaming(g_cfg.spectate_streaming);
+    coop::farenemies::set_enabled(g_cfg.enemies_near_others);
     LOG_INFO("[coop] Bonfire animations are shown to the other players: %s", g_cfg.bonfire_animations ? "yes" : "no");
     coop::jolly::set_enabled(g_cfg.jolly_cooperation);
     coop::jolly::set_test(g_cfg.jolly_test);

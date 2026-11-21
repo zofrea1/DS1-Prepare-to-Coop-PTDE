@@ -10,6 +10,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <cstring>
 #include <vector>
 
 namespace coop::visible {
@@ -22,8 +23,11 @@ constexpr uint32_t kModelGroupsCall = 0x00E6AAF3;
 constexpr uint32_t kModelGroups = 0x00468DF0;
 
 constexpr int kMaxOthers = 8;
-uint32_t g_others[kMaxOthers] = {};  // the other players' characters this frame
+constexpr int kMaxExtra = 192;
+// The other players' characters this frame (the first g_count), then the enemies farenemies.cpp shows (to g_total).
+uint32_t g_others[kMaxOthers + kMaxExtra] = {};
 volatile int g_count = 0;
+volatile int g_total = 0;
 uint32_t g_model_groups = kModelGroups;
 bool g_installed = false;
 
@@ -33,7 +37,7 @@ __declspec(naked) void model_groups_stub() {
         push ecx
         xor ecx, ecx
     next:
-        cmp ecx, dword ptr [g_count]
+        cmp ecx, dword ptr [g_total]
         jae done
         cmp esi, dword ptr [g_others + ecx * 4]
         je other
@@ -68,7 +72,19 @@ void tick() {
     for (uint32_t c : others) {
         if (n < kMaxOthers) g_others[n++] = c;
     }
+    // The shown enemies stay after the players (set_extra writes them from g_count on): moved up or down with them.
+    const int extra = g_total - g_count;
+    if (n != g_count && extra > 0) std::memmove(&g_others[n], &g_others[g_count], extra * sizeof(uint32_t));
     g_count = n;
+    g_total = n + (extra > 0 ? extra : 0);
+}
+
+void set_extra(const uint32_t* chrs, int n) {
+    if (n < 0 || !chrs) n = 0;
+    if (n > kMaxExtra) n = kMaxExtra;
+    const int base = g_count;
+    if (n > 0) std::memcpy(&g_others[base], chrs, n * sizeof(uint32_t));
+    g_total = base + n;
 }
 
 int keep_players_asked() {

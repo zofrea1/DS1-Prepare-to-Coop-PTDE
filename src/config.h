@@ -45,6 +45,9 @@ struct CoopConfig {
     // 1.5.0: spectating a teammate (after our death, or with the Death Knell) loads their map when our game has not, and
     // draws the world and the characters around them as if we stood there.
     bool spectate_streaming = true;
+    // 2.3.1: the enemies around another player in our map are moved and drawn here however far from us (their game runs
+    // them; ours only shows them: no bids, no souls for their kills). farenemies.cpp.
+    bool enemies_near_others = true;
     // 1.5.0: the Death Knell to a teammate takes a soul level (its first price) instead of every soul and all humanity;
     // the debuffs (a Crimson Blossom, a Bloody Mary for the session) are its price either way. Off by default.
     bool knell_soul_level = false;

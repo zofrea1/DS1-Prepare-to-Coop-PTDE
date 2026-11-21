@@ -8,6 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 2.4.0 | DS1 PTDE FPS Unlock 2.8.0 |
 | Prepare to Co-op Edition 2.3.0 | DS1 PTDE FPS Unlock 2.7.0 |
 | Prepare to Co-op Edition 2.2.0 | DS1 PTDE FPS Unlock 2.6.0 |
 | Prepare to Co-op Edition 2.1.0 | DS1 PTDE FPS Unlock 2.5.0 |
@@ -23,6 +24,23 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.2.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
+
+## What's new in 2.4.0
+
+- **Enemies near your teammates, however far** (`EnemiesNearOtherPlayers`, new, on): the enemies around another player in your map are moved and drawn on your screen however far away they are: from the Undead Burg's bridge you watch a teammate fight in the streets below. Their game runs them; yours only shows them (it never takes one over, and their kills pay you nothing). Regular enemies only.
+- **Other players across map boundaries**: a player who crossed into the next map (the Undead Burg onto the aqueduct to Firelink) no longer vanishes from your screen.
+- **Other players' slowest walk, smooth**: their character walks at their own pace (their stick's tilt is sent) and no longer stops and starts on a high frame rate. Co-op players and invaders.
+- **4 GB of address space** (`LargeAddressAware`, new, on): `DARKSOULS.exe` gets the "large address aware" flag on the first start (the original kept as `DARKSOULS.exe.before-laa`); from the next start the game has 4 GB instead of 2 (a host at 4K with DXVK crashed at 1.7 GB with a teammate in the world). Nothing changes on the Steam Deck, where Proton gives 4 GB already.
+- **Includes the DS1 PTDE FPS Unlock 2.8.0: more of the world drawn around you.**
+  - **`DrawMapPieces = adjacent` by default** (was `game`; phones keep `game`): grass, ruins and torches no longer appear only once you reach a certain spot. **`adjacent+`** (new): the rooms up to three steps away, with the detailed lower Burg from the Undead Burg's bridge. An INI from 2.3.0 keeps its `DrawMapPieces = game`: set `adjacent` or `adjacent+` there to have it.
+  - **The detailed version wins, without flicker**: the detailed pieces are drawn in place of the cheaper stand-ins rooms see from afar, and two versions of one surface are never both drawn where they would cut through each other. Coarse far backdrops only where the game draws them.
+  - **The added rooms' effects, lights and objects** (`DrawMapObjects`, new, on): torch fire and mist, ladders, doors, crates, barrels, item corpses. Characters keep the game's rooms (2.3.0 woke them too).
+  - **Occlusion culling** (`OcclusionCulling`, new, on): what `DrawMapPieces` adds is skipped while something in front hides it.
+  - **Faster**: GPU work at 4K +8.7% (Firelink) to +18.5% (Darkroot); the water's mirrored pass is skipped while nothing that reads it shows.
+  - **The game's questions and plates follow the UI scale**: "Are you sure you want to quit the game?" and "Used Dungeon Cell Key".
+- **Plays with 1.5.0 to 2.3.0** (the same co-op protocol; a player on an older version just does not get these improvements on their own screen).
+
+The details are in the [2.4.0 release notes](release-notes/v2.4.0.md) and the FPS Unlock's [2.8.0 release notes](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered/releases/tag/v2.8.0-PTDE-DX9).
 
 ## What's new in 2.3.0
 

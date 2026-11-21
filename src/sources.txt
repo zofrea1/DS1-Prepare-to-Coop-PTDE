@@ -33,3 +33,4 @@ src\coop\logupload.cpp
 src\coop\vanillamp.cpp
 src\coop\jolly.cpp
 src\coop\netsafe.cpp
+src\coop\visible.cpp

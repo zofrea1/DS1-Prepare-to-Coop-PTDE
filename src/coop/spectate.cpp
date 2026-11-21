@@ -7,6 +7,7 @@
 #include "log.h"
 #include "rules.h"
 #include "text.h"
+#include "visible.h"
 #include "world.h"
 #include "xinput_proxy.h"
 
@@ -692,6 +693,10 @@ uint8_t __stdcall hk_activation(uint32_t wcm) {
         ask_view_block(wcm);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_asked_more = 0;
+    }
+    __try {
+        visible::keep_players_asked();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return ready;
 }

@@ -25,6 +25,7 @@
 #include "text.h"
 #include "updates.h"
 #include "vanillamp.h"
+#include "visible.h"
 #include "world.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -343,6 +344,7 @@ void tick_body() {
     coop::drops::tick();
     coop::deathtext::tick();
     coop::spectate::tick();
+    coop::visible::tick();
     if (g_items) coop::knell::tick();
     coop::netrate::tick(coop::session::net_rate());
     coop::players::tick();
@@ -419,6 +421,7 @@ void coop_install(const CoopConfig& config) {
     if (!coop::session::install_nameplate()) LOG_ERROR("[coop] Companion nameplates were not changed");
     if (!coop::session::install_invader_bars()) LOG_ERROR("[coop] Invaders still see no health bars");
     coop::spectate::install();
+    coop::visible::install();
     coop::deathtext::install();
     coop::drops::install();
     coop::talk::install();

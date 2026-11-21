@@ -59,6 +59,51 @@ constexpr int kBosses[] = {1000800, 1010300, 1010301, 1010302, 1010700, 1010750,
                            1410700, 1410802, 1500800, 1510650, 1510800, 1510801, 1510810, 1510811, 1600800, 1600810,
                            1700700, 1700800, 1800800, 1810800, 1810810};
 
+// Address space (2026-11-21 crash): DARKSOULS.exe is not large address aware, so the game has 2 GB of address space,
+// and with DXVK at 4K, DrawMapPieces and the map's objects the user's host sat near its end: it crashed in NVIDIA's
+// Vulkan driver (nvoglv32.dll, a write to address 0: an allocation that failed) at 1702 MB in use, four seconds after
+// 16 more far enemies came in (a crash on 11-19, before this, at 1660 MB, peak 1794). Each enemy brought in loads its
+// character's model, textures and animations if no other character has them. So no enemy is added while less than
+// kAddFloor MB of the address space is free (those shown stay), and all are let go under kKeepFloor; adding starts
+// again above kAddAgain.
+constexpr double kAddFloor = 512.0;
+constexpr double kKeepFloor = 384.0;
+constexpr double kAddAgain = 640.0;
+double g_free_mb = 2048.0;
+ULONGLONG g_free_at = 0;
+int g_memory = 0;  // 0 adding, 1 not adding (low), 2 none shown (very low)
+
+void check_memory() {
+    const ULONGLONG t = GetTickCount64();
+    if (t - g_free_at < 500) return;
+    g_free_at = t;
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (!GlobalMemoryStatusEx(&ms)) return;
+    g_free_mb = static_cast<double>(ms.ullAvailVirtual) / (1024.0 * 1024.0);
+    const int was = g_memory;
+    // Down at once; up again only past the next line (let go -> keep at kAddFloor, keep -> add at kAddAgain).
+    if (g_free_mb < kKeepFloor) {
+        g_memory = 2;
+    } else if (g_free_mb < kAddFloor) {
+        g_memory = was == 2 ? 2 : 1;
+    } else if (g_free_mb < kAddAgain) {
+        g_memory = was == 0 ? 0 : 1;
+    } else {
+        g_memory = 0;
+    }
+    if (g_memory != was) {
+        static int lines = 0;
+        if (++lines <= 40) {
+            LOG_INFO("[coop] Address space: %.0f MB free of %.0f MB: %s", g_free_mb,
+                     static_cast<double>(ms.ullTotalVirtual) / (1024.0 * 1024.0),
+                     g_memory == 0   ? "enemies near the other players are added again"
+                     : g_memory == 1 ? "no more enemies near the other players are added (those shown stay)"
+                                     : "the enemies near the other players are let go");
+        }
+    }
+}
+
 bool g_enabled = true;
 struct Shown {
     bool was_fixed = false;  // its rate was fixed before we showed it (an event's): left fixed after
@@ -180,6 +225,12 @@ void ask(uint32_t wcm) {
         if (!g_shown.empty()) let_all_go(!game::loading());
         return;
     }
+    check_memory();
+    if (g_memory == 2) {
+        g_counts = c;
+        if (!g_shown.empty()) let_all_go(true);
+        return;
+    }
     const uint32_t me = game::player();
     uint32_t my_hit = 0;
     uint8_t my_block = 0xFF;
@@ -254,7 +305,7 @@ void ask(uint32_t wcm) {
                 ++c.dead;
                 continue;
             }
-            if (listed >= kMaxShown) {
+            if (listed >= kMaxShown || (g_memory == 1 && had == g_shown.end())) {
                 ++c.full;
                 continue;
             }
@@ -315,9 +366,9 @@ void tick() {
     if (++lines <= 120) {
         LOG_INFO("[coop] Enemies near the other players (%d in our map): %d shown here, %d of them active, %d moved by "
                  "another game; left to the game: %d our game runs, %d bosses, %d not enemies, %d with their own AI "
-                 "everywhere, %d dead before%s",
-                 c.others_here, c.shown, active, network, c.ours, c.bosses, c.npcs, c.no_sync, c.dead,
-                 c.full ? " (the list was full)" : "");
+                 "everywhere, %d dead before, %d not added (%s); address space %.0f MB free",
+                 c.others_here, c.shown, active, network, c.ours, c.bosses, c.npcs, c.no_sync, c.dead, c.full,
+                 g_memory ? "address space low" : "list full", g_free_mb);
     }
 }
 

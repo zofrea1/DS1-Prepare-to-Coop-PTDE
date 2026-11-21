@@ -108,7 +108,7 @@ __declspec(naked) void gait_stub() {
         jnz take
         test edx, edx
         jz gait_done
-        lock inc dword ptr [g_zero_step_holds]
+        inc dword ptr [g_zero_step_holds]
     take:
         mov al, dl
         jmp gait_done
@@ -495,7 +495,8 @@ void clear_remote_gaits() {
     const ULONGLONG now = GetTickCount64();
     if (now - last >= 10000) {
         last = now;
-        const LONG n = InterlockedExchange(&g_zero_step_holds, 0);
+        const LONG n = g_zero_step_holds;  // the gait stub runs on this thread too (the move, game thread)
+        g_zero_step_holds = 0;
         if (n > 0 && ++lines <= 60) {
             LOG_INFO("[coop] Other players' characters: %ld frame(s) in the last 10 s without a step while their player "
                      "walked or ran; they kept the gait (the game would have stood them for 0.2 s or more)", n);

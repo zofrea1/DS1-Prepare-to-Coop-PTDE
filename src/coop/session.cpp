@@ -424,7 +424,9 @@ struct PlayerEvent {
 struct GaitMsg {
     Header h;
     int8_t gait;
+    uint8_t walk_stick;  // since 2026-11-21 (motion::local_walk_stick); older versions send the gait alone
 };
+constexpr size_t kGaitMsgOldSize = sizeof(Header) + 1;
 struct AnimMsg {
     Header h;
     uint8_t kind;  // 0 start, 1 stop
@@ -923,6 +925,7 @@ int g_follow_travel = -1;
 double g_follow_told = 0;  // a follow (travel or Homeward Bone) last pointed out the menu holding it up
 // Our gait as last sent (motion sync).
 int g_sent_gait = -1;
+int g_sent_walk_stick = -1;
 double g_last_gait = 0;
 // Host, while disbanding: when it began and whether the game's own leave was asked for.
 double g_close_at = 0;
@@ -6519,10 +6522,13 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
             break;
         }
         case kGait: {
-            GaitMsg m;
-            if (!as(&m) || g_role == Role::None) return;
+            // An older version's message has the gait alone.
+            if (size < kGaitMsgOldSize || g_role == Role::None) return;
+            GaitMsg m{};
+            std::memcpy(&m, data, size < sizeof(m) ? kGaitMsgOldSize : sizeof(m));
             PeerInfo* p = peer(from);
             p->gait = m.gait;
+            p->walk_stick = size < sizeof(m) ? -1 : m.walk_stick;
             p->gait_at = now();
             break;
         }
@@ -7793,12 +7799,18 @@ void tick() {
         // 5), and their characters walked, ran and sprinted by the receiving game's guess from their speed: a walk
         // showed as a run, a roll as a sprint, and an uneven link switched between them. The gait is only the
         // animation the copy plays; positions, attacks and rolls come as before.
-        if (g_role != Role::None && g_lobby && (gait != g_sent_gait || now() - g_last_gait > 0.5)) {
+        const int walk_stick = motion::local_walk_stick();
+        // A walk's tilt that changed by more than a little goes out too (at most ten times a second).
+        const bool stick_moved = gait == motion::kWalk && std::abs(walk_stick - g_sent_walk_stick) > 2 &&
+                                 now() - g_last_gait > 0.1;
+        if (g_role != Role::None && g_lobby && (gait != g_sent_gait || stick_moved || now() - g_last_gait > 0.5)) {
             g_sent_gait = gait;
+            g_sent_walk_stick = walk_stick;
             g_last_gait = now();
             GaitMsg m{};
             fill_header(&m, kGait);
             m.gait = static_cast<int8_t>(gait);
+            m.walk_stick = static_cast<uint8_t>(walk_stick);
             broadcast(m, false);
         }
         if (g_role != Role::None && g_lobby) {
@@ -7836,7 +7848,8 @@ void tick() {
                 for (const auto& p : g_peers) {
                     if (p.id != id) continue;  // (an invader's too: see the gait above)
                     const bool fresh = p.gait >= 0 && now() - p.gait_at < 1.5;
-                    motion::set_remote_gait(chr, fresh ? static_cast<motion::Gait>(p.gait) : motion::kUnknown);
+                    motion::set_remote_gait(chr, fresh ? static_cast<motion::Gait>(p.gait) : motion::kUnknown,
+                                            fresh ? p.walk_stick : -1);
                 }
             }
         }

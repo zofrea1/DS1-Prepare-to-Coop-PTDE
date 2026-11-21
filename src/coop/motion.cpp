@@ -46,6 +46,39 @@ struct GaitEntry {
 constexpr int kGaitEntries = players::kMaxPlayers - 1;
 static_assert(kGaitEntries == 7, "gait_stub compares with 7");
 GaitEntry g_gaits[kGaitEntries] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}};
+// The walk's stick (2026-11-21). For a walk the move hands the copy a stick of 0.5 (0xE1E99E, the class 1 case of the
+// jump table at 0xE1EDAC; run and sprint 1.0). A character's walk is not one speed: past the stick's dead zone the
+// smallest tilts walk slower (measured at the Undead Burg bridge with a pad: 1.09 m/s at |stick| 0.004, 1.27 at 0.025,
+// 1.61 from 0.046 on, whatever the tilt up to a run; heavier characters and a raised shield slower still: a Steam Deck
+// player's slowest walk was 0.3 m/s), so a slow walker's copy walked at the full walk, caught up with the last
+// received position, stood (the guess's speed under 0.01) and walked again: on the other screen it walked in bursts
+// with pauses (user report 2026-11-21). Each player now also sends its stick's tilt (the PadManipulator's move vector
+// +0x10, its length), and the copy's walk gets that same tilt, so its walk is as fast as the sender's own; unknown
+// (an older version) keeps the 0.5.
+constexpr uint32_t kWalkStickSite = 0x00E1E99E;  // movss xmm0, dword ptr [0115FBA4h] (0.5)  (8 bytes)
+alignas(4) float g_walk_sticks[kGaitEntries] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+alignas(4) float g_half = 0.5f;
+
+__declspec(naked) void walk_stick_stub() {
+    __asm {
+        movss xmm0, dword ptr [g_half]
+        push esi
+        xor esi, esi
+    next_entry:
+        cmp ecx, dword ptr [g_gaits + esi * 8]
+        jne skip
+        movss xmm0, dword ptr [g_walk_sticks + esi * 4]
+        jmp found
+    skip:
+        inc esi
+        cmp esi, 7
+        jb next_entry
+    found:
+        pop esi
+        ret
+    }
+}
+
 alignas(4) float g_sprint_speed = 4.5f;  // Remastered's fallback threshold (PTDE 6.0)
 alignas(4) float g_run_speed = 2.6f;     // (PTDE 2.0)
 
@@ -99,6 +132,7 @@ game::Vec3 g_prev_pos{};
 bool g_have_prev = false;
 double g_speed = 0;
 Gait g_local = kStand;
+double g_stick = 0;  // the length of our PadManipulator's move vector (+0x10) this frame
 
 // 1 sprinting, 0 not, -1 the test is not there (another walk controller): then the dash flag and the speed decide.
 int sprinting(uint32_t chr) {
@@ -285,6 +319,14 @@ bool install() {
         if (!patch(kGaitSite, k, code, sizeof(code))) ++failed;
     }
     {
+        // movss xmm0, dword ptr [0115FBA4h]
+        static const uint8_t k[8] = {0xF3, 0x0F, 0x10, 0x05, 0xA4, 0xFB, 0x15, 0x01};
+        uint8_t code[8] = {0xE8, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&walk_stick_stub) - (kWalkStickSite + 5));
+        std::memcpy(code + 1, &rel, 4);
+        if (!patch(kWalkStickSite, k, code, sizeof(code))) ++failed;
+    }
+    {
         static const uint8_t k[8] = {0xF3, 0x0F, 0x10, 0x15, 0xAC, 0x03, 0x16, 0x01};
         uint8_t code[8];
         std::memcpy(code, k, 4);
@@ -339,10 +381,21 @@ Gait local_gait() {
     g_prev_pos = pos;
     g_have_prev = true;
     uint8_t dash = 0;
-    if (const uint32_t pad = game::manipulator(me)) read8(pad + 0x1E4, &dash);
+    g_stick = 0;
+    if (const uint32_t pad = game::manipulator(me)) {
+        read8(pad + 0x1E4, &dash);
+        float v[3] = {};
+        if (read32(pad + 0x10, reinterpret_cast<uint32_t*>(&v[0])) && read32(pad + 0x14, reinterpret_cast<uint32_t*>(&v[1])) &&
+            read32(pad + 0x18, reinterpret_cast<uint32_t*>(&v[2]))) {
+            const double len = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+            if (len == len && len <= 1.5) g_stick = len;
+        }
+    }
     const int real = sprinting(me);
     Gait g = kWalk;
-    if (g_speed < 0.3) {
+    // Standing under 0.3 m/s, unless the stick is pushed and the character moves at all: the slowest walks (a Steam
+    // Deck player's at 0.3 m/s) went walk, stand, walk several times a second on the line (2026-11-21).
+    if (g_speed < 0.3 && !(g_stick > 0.001 && g_speed > 0.08)) {
         g = kStand;
     } else if (real == 1 ? g_speed > kRunFrom : real < 0 && dash && g_speed > 4.5) {
         g = kSprint;
@@ -352,7 +405,7 @@ Gait local_gait() {
     if (g != g_local) {
         static int lines = 0;
         if (++lines <= 120) {
-            LOG_INFO("[coop] gait me %d (%.2f m/s, dash button %d, sprinting %s)", g, g_speed, dash,
+            LOG_INFO("[coop] gait me %d (%.2f m/s, stick %.3f, dash button %d, sprinting %s)", g, g_speed, g_stick, dash,
                      real == 1 ? "yes" : real == 0 ? "no" : "unknown");
         }
     }
@@ -389,14 +442,23 @@ std::vector<Anim> take_local_anims() {
     return out;
 }
 
-void set_remote_gait(uint32_t chr, Gait gait) {
+uint8_t local_walk_stick() {
+    if (g_stick <= 0.0) return 0;
+    const double v = g_stick * kWalkStickScale;
+    return v >= 255.0 ? 255 : v < 1.0 ? 1 : static_cast<uint8_t>(v + 0.5);
+}
+
+void set_remote_gait(uint32_t chr, Gait gait, int walk_stick) {
     const uint32_t m = game::manipulator(chr);
     uint32_t vt = 0;
     if (!m || !read32(m, &vt) || vt != kNetworkManipulatorVtable) return;
+    // 255 (or unknown): the full walk's 0.5; else the sender's own tilt.
+    const float stick = walk_stick > 0 && walk_stick < 255 ? static_cast<float>(walk_stick / kWalkStickScale) : 0.5f;
     int free_slot = -1;
     for (int i = 0; i < kGaitEntries; ++i) {
         if (g_gaits[i].manipulator == m) {
             g_gaits[i].gait = gait;
+            g_walk_sticks[i] = stick;
             return;
         }
         if (free_slot < 0 && g_gaits[i].manipulator == 0) free_slot = i;
@@ -404,13 +466,15 @@ void set_remote_gait(uint32_t chr, Gait gait) {
     if (free_slot >= 0) {
         g_gaits[free_slot].gait = gait;
         g_gaits[free_slot].manipulator = m;
+        g_walk_sticks[free_slot] = stick;
     }
 }
 
 void clear_remote_gaits() {
-    for (auto& e : g_gaits) {
-        e.manipulator = 0;
-        e.gait = -1;
+    for (int i = 0; i < kGaitEntries; ++i) {
+        g_gaits[i].manipulator = 0;
+        g_gaits[i].gait = -1;
+        g_walk_sticks[i] = 0.5f;
     }
 }
 

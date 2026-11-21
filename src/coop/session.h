@@ -60,6 +60,7 @@ struct PeerInfo {
     std::wstring char_name;  // their character's name (matches them to their character in our world)
     double alive_since = 0;  // when they last reported coming back alive
     int gait = -1;           // their walk/run/sprint as they report it (motion::Gait), -1 unknown
+    int walk_stick = -1;     // their stick's tilt with it (motion::local_walk_stick), -1 unknown (an older version)
     double gait_at = 0;      // when they last reported it
     int ceremony = 0;        // the bonfire animation they report looping (their sit), 0 none
     double anim_at = 0;      // when one of their event animations last arrived

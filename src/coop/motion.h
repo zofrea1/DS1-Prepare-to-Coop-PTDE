@@ -49,8 +49,13 @@ std::vector<Anim> take_local_anims();
 // The synced event animation the local player is looping right now (the bonfire sit), 0 none.
 int local_loop_anim();
 
-// The gait another player reports, for their character in our world (kUnknown: the game's own estimate).
-void set_remote_gait(uint32_t chr, Gait gait);
+// Our stick's tilt for the gait message (since 2026-11-21): the PadManipulator move vector's length times
+// kWalkStickScale, 0 none, 255 for every tilt from 0.1275 on (a full walk: the walk is only slower below about 0.05).
+constexpr double kWalkStickScale = 2000.0;
+uint8_t local_walk_stick();
+// The gait another player reports, for their character in our world (kUnknown: the game's own estimate), and their
+// stick's tilt as local_walk_stick() gives it (-1 unknown: an older version), which their copy's walk is given.
+void set_remote_gait(uint32_t chr, Gait gait, int walk_stick = -1);
 void clear_remote_gaits();
 // Starts or stops another player's event animation on their character here. False when nothing was done
 // (no such character, it is dead, or bonfire animations are switched off).

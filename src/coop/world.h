@@ -52,8 +52,8 @@ void set_players(int coop_players);       // players sharing the host's world, i
 // others' lists, session::near_count, and ours), not for everyone in the session.
 void set_vicinity(bool on);
 // Our list for the others' vicinity scaling: the net handles of the living enemies our game ran in the last 10 s, or,
-// while we spectate (spectate::viewing), the ones it ran when the view began. Sorted. Empty while we load, invade, or
-// play outside a session.
+// while our death waits (spectate::holding), the ones it ran when the view began. Sorted. Empty while we load, invade,
+// or play outside a session.
 void near_handles(std::vector<uint16_t>* out);
 void set_everyone_dead(bool all_dead);    // every other player is dead too
 // A local rest at a bonfire: `before` runs before the game's own rest (items), `fn` after it (tell the others).

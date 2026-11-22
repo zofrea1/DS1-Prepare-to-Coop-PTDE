@@ -3,6 +3,7 @@
 #include "world.h"
 
 #include "deadlist.h"
+#include "farenemies.h"
 #include "game.h"
 #include "hook.h"
 #include "log.h"
@@ -127,9 +128,12 @@ int g_players = 1;
 // invader's game counts the co-op players' lists and is never counted. A level change is made in place, as a player
 // joining or leaving makes it (retarget, keep_share): the enemy keeps its share of health.
 // An enemy we stop running stays on our list for kNearKeep, so one at the edge of what our game runs does not change
-// its scaling as we step back and forth. While we spectate (our death's view, the Death Knell's) WorldChrMan's pass
-// takes the teammate's character for ours, and what runs here is around them: our list stays as the view found it,
-// where our body is.
+// its scaling as we step back and forth. While our death waits WorldChrMan's pass takes the teammate's character for
+// ours, and what runs here is around them: our list stays as the view found it, where our body is. The Death Knell's
+// view leaves the pass to our standing character: the list keeps following what runs around it. An enemy whose rate
+// is fixed here only to be shown (around the teammate that view shows, spectate::view_pinned; around another player,
+// EnemiesNearOtherPlayers' farenemies::shown_only) is updated here but not run here: never on our list (Grok review
+// 2026-11-22: the fight the kneeling player watched was scaled for them too).
 constexpr double kNearKeep = 10.0;
 bool g_vicinity = false;
 std::map<uint16_t, double> g_ran;  // net handle -> when our game last ran that living enemy
@@ -1865,7 +1869,7 @@ void scale_tick() {
         g_ran_frozen = frozen;
         if (g_vicinity) {
             LOG_INFO("[coop] Scaling by vicinity: our list of the enemies we run %s (%d enemies)",
-                     frozen ? "is kept as it is while we spectate" : "follows our game again",
+                     frozen ? "is kept as it is while our death waits" : "follows our game again",
                      static_cast<int>(g_ran.size()));
         }
     }
@@ -1883,13 +1887,14 @@ void scale_tick() {
         // A corpse keeps what it has: no scaling change comes to it, so its health stays as its death left it (a copy at
         // 0 that another game moves comes back only by that game's or the host's word).
         const bool down = hp(chr) <= 0 || dying(chr);
-        // Our list for the vicinity scaling: the living enemies our game runs (not while we spectate).
+        // Our list for the vicinity scaling: the living enemies our game runs (kept as it was while our death waits;
+        // the ones only shown here never).
         uint16_t handle = 0;
         if (net_handle(chr, &handle)) {
             handles_seen.insert(handle);
             if (down) {
                 g_ran.erase(handle);
-            } else if (!g_ran_frozen && runs_here(chr)) {
+            } else if (!g_ran_frozen && runs_here(chr) && !spectate::view_pinned(chr) && !farenemies::shown_only(chr)) {
                 g_ran[handle] = now();
             }
         }

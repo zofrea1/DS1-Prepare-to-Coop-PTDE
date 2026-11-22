@@ -55,6 +55,9 @@ bool holding();
 // our body. The Death Knell's view leaves the pass to our standing character, whom the enemies around keep fighting,
 // and has the characters around the teammate it shows updated every frame.
 bool viewing();
+// The Death Knell's view fixed this character's update rate (one around the teammate it shows): our game updates it
+// for the view only, it does not run it (world.cpp's vicinity list leaves it out).
+bool view_pinned(uint32_t chr);
 // The death event can be held. Without it, world.cpp holds the respawn warp instead (the old limbo).
 bool installed();
 // The other co-op players as set_teammates last gave them.

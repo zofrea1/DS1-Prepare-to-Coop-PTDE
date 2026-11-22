@@ -883,6 +883,9 @@ void fix_own_rate(bool on) {
 // The characters around the teammate the Death Knell's view shows, updated every frame while it shows them. The pass
 // keeps our own character then (view_extras), so it ranks them by their distance from us and tests them against our
 // draw groups: far from us the game updated them every fifth or thirtieth frame, and they moved in jerks in the view.
+// Taken are the characters of the teammate's block that the pass took while it had their character (their display
+// groups meet the draw groups the teammate's floor gave them, chr+0x274: what standing there shows), and any within
+// kPinReach of them (the user, 2026-11-22: the view must keep showing the enemies around the teammate).
 // Their rate is fixed (chr+0x1FD bit 0, as Set Network Update Rate does) and put back after, unless it was fixed before
 // (an event's). The regular enemies (team 6) of our own block are EnemiesNearOtherPlayers' while it is on (farenemies.cpp
 // fixes them the same way, every frame; a rate fixed here first would read to it as an event's and stay fixed); players
@@ -894,7 +897,12 @@ struct Pinned {
 std::vector<Pinned> g_pinned;
 constexpr float kPinReach = 40.0f;
 constexpr uint32_t kRegularEnemyTeam = 6;  // chr+0x74 (farenemies.cpp's kTeamEnemy)
-constexpr size_t kPinMax = 64;
+constexpr size_t kPinMax = 160;
+
+// A character whose rate the Death Knell's view fixed (around the teammate it shows): updated here for the view only.
+bool pinned_for_view(uint32_t chr) {
+    return std::any_of(g_pinned.begin(), g_pinned.end(), [chr](const Pinned& q) { return q.chr == chr && !q.was_fixed; });
+}
 
 // Whether `chr` is still one of WorldChrMan's characters (one of its blocks' sets): a character of a block that went
 // is gone, and nothing may be written to it.
@@ -939,7 +947,9 @@ void pin_view_rates(uint32_t chr) {
                     continue;
                 }
                 const float dx = p.x - them.x, dy = p.y - them.y, dz = p.z - them.z;
-                if (dx * dx + dy * dy + dz * dz <= kPinReach * kPinReach) want.push_back(c);
+                if (overlaps(c + 0x264, chr + 0x274) || dx * dx + dy * dy + dz * dz <= kPinReach * kPinReach) {
+                    want.push_back(c);
+                }
             }
         }
     }
@@ -1518,6 +1528,7 @@ void trip_release() {
 bool holding() { return g_hold; }
 
 bool viewing() { return g_hold || g_knell_chr != 0; }
+bool view_pinned(uint32_t chr) { return chr && pinned_for_view(chr); }
 
 bool installed() { return g_installed; }
 

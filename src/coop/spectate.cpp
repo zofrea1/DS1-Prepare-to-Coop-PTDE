@@ -927,8 +927,8 @@ bool in_world(uint32_t wcm, uint32_t chr) {
     return false;
 }
 
-// The enemies our game runs around our own standing character while the Death Knell's view is open, updated every frame
-// as without the view (user 2026-11-22: the Undead Burg's firebomb throwers stopped throwing at the kneeling player; a
+// The characters around our own standing character while the Death Knell's view is open (every active one, whichever
+// game moves it), updated every frame as without the view (user 2026-11-22: the Undead Burg's firebomb throwers stopped throwing at the kneeling player; a
 // solo test of the view's drawing from another floor showed them going from every frame to every fifth, rate 5, with the
 // pass on us). Fixed (chr+0x1FD bit 0) and put back as with pin_view_rates; our own character too (fix_own_rate).
 std::vector<Pinned> g_body_pinned;
@@ -954,7 +954,7 @@ void pin_body_rates(bool on) {
         uint32_t count = 0, arr = 0;
         if (set && read32(set, &count) && read32(set + 4, &arr) && arr && count <= 4096) {
             for (uint32_t i = 0; i < count && want.size() < kPinMax; ++i) {
-                uint32_t c = 0, cur = 0, com = 0, ent = 0, state = 0;
+                uint32_t c = 0, ent = 0, state = 0;
                 game::Vec3 p{};
                 if (!read32(arr + i * 0x20, &c) || !c || c == me || player_character(c) || !game::chr_position(c, &p) ||
                     !read32(c + 0xC, &ent) || !ent || !read32(ent + 8, &state) || state != 2) {
@@ -963,7 +963,11 @@ void pin_body_rates(bool on) {
                 const float dx = p.x - at.x, dy = p.y - at.y, dz = p.z - at.z;
                 if (dx * dx + dy * dy + dz * dz > kBodyReach * kBodyReach) continue;
                 if (n_shown < 96) shown[n_shown++] = c;
-                if (read32(c + 0x2C, &cur) && read32(c + 0x410, &com) && cur && cur == com) want.push_back(c);  // ours
+                // Whichever game moves it (user 2026-11-22: a thrower the far teammate's game held through its repeated
+                // throws stayed there the whole view; around us our rate fell to every fifth frame, and a game's bid
+                // for an enemy counts its rate (up to 4 x 256) above nearness (255), so ours lost until the view
+                // closed).
+                want.push_back(c);
             }
         }
     }
@@ -1608,11 +1612,16 @@ void log_enemies(float reach) {
             read32(c + 0x2C, &cur);
             read32(c + 0x410, &com);
             read32(c + 0x414, &net);
-            if (read32(c + 0x28, &ctrl) && ctrl) read32(ctrl + 0x350, &anim);
+            uint32_t aset = 0, tbits = 0;
+            float atime = -1.0f;
+            if (read32(c + 0x28, &ctrl) && ctrl) {
+                read32(ctrl + 0x350, &anim);
+                if (read32(ctrl + 0x14, &aset) && aset && read32(aset + 0x18, &tbits)) std::memcpy(&atime, &tbits, 4);
+            }
             LOG_INFO("[coop] enemies: %08X at (%.1f, %.1f, %.1f) %.1f m, hp %d, team %u, rate %d%s, entity %u ask %u, "
-                     "moved by %s, anim %d",
+                     "moved by %s, anim %d t %.2f",
                      c, p.x, p.y, p.z, d, static_cast<int>(hp), team, rate, (fixed & 1) ? " fixed" : "", state, ask,
-                     cur == com ? "our AI" : cur == net ? "the network" : "other", static_cast<int>(anim));
+                     cur == com ? "our AI" : cur == net ? "the network" : "other", static_cast<int>(anim), atime);
             ++listed;
         }
     }

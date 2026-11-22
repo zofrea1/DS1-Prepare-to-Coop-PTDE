@@ -6056,6 +6056,32 @@ bool attack_action(int id) { return id >= 3000 && id < 5000; }
 // whose AI is off attacks nothing.
 constexpr double kAttackHold = 20.0;
 constexpr double kAttackQuiet = 1.0;  // another game's attack holds while its updates for the copy come this often
+// A thrower's throws one after another read as one long attack (the Undead Burg's c2540 firebomb hollows, 3008): a far
+// player's game kept such an enemy through 20 s of throws, while it threw at nobody in reach and the near player's game
+// bid nothing (user 2026-11-22, the Death Knell test: one of three throwers stayed with the teammate who had walked off).
+// Past kAttackHoldYield, the hold lets go while the game that moves the enemy has its player more than kHoldFar from it
+// and another standing player is kHoldNearer nearer: then the bids decide (the nearer game wins). Up close (a boss fight,
+// players within kHoldFar) the hold stays as it was; single attacks ran 0.6 to 6.9 s.
+constexpr double kAttackHoldYield = 8.0;
+constexpr float kHoldFar = 15.0f;
+constexpr float kHoldNearer = 5.0f;
+
+// Whether the hold on this enemy's long attack gives way (above): `ours`, our game moves it (another player clearly
+// nearer and ours far), else another game does (we are clearly nearer than every other player, the one moving it too).
+bool hold_gives_way(uint32_t chr, bool ours) {
+    game::Vec3 at{}, me{};
+    if (world::local_dead() || !game::chr_position(chr, &at) || !game::position(&me, nullptr)) return false;
+    const int area = (game::map_id() >> 24) & 0xFF;
+    const float mine = dist3(me, at);
+    float other = 1e9f;
+    for (const PeerSpot& p : g_peer_spots) {
+        if (p.dead || p.invader || p.map == -1 || ((p.map >> 24) & 0xFF) != area) continue;
+        const float d = dist3(game::Vec3{p.pos[0], p.pos[1], p.pos[2]}, at);
+        if (d < other) other = d;
+    }
+    if (other >= 1e8f) return false;
+    return ours ? (mine > kHoldFar && other + kHoldNearer < mine) : (other > kHoldFar && mine + kHoldNearer < other);
+}
 struct AttackHold {
     int action = 0;
     double since = 0;
@@ -6101,7 +6127,18 @@ int attack_hold(uint32_t chr) {
         }
         return 0;
     }
-    if (moved_here(chr)) return 1;
+    const bool ours = moved_here(chr);
+    const auto held_it = g_attack_holds.find(chr);  // `it` is end() when the hold was just made
+    const double held = held_it != g_attack_holds.end() ? t - held_it->second.since : 0.0;
+    if (held > kAttackHoldYield && hold_gives_way(chr, ours)) {
+        static std::set<uint32_t> logged;
+        if (logged.size() < 40 && logged.insert(chr).second) {
+            LOG_INFO("[coop] Enemy %08X: attack %d for %.0f s, moved by %s, with a player clearly nearer than the one it "
+                     "is for: it may change hands", chr, action, held, ours ? "this game" : "another game");
+        }
+        return 0;
+    }
+    if (ours) return 1;
     // Another game's attack holds the enemy only while that game is heard from. A copy that gets no more updates
     // stands in the last attack it was sent, and every game whose copy stood so bid nothing for 20 s: after 6700k's
     // character was taken out of three games (2026-10-31), the Asylum Demon stood in its attack 3012 there for 22 s

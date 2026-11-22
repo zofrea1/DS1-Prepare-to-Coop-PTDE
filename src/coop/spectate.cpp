@@ -6,6 +6,8 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "remote.h"
+#include "motion.h"
 #include "rules.h"
 #include "text.h"
 #include "visible.h"
@@ -22,6 +24,8 @@
 #include <cstring>
 
 namespace coop::spectate {
+
+void log_enemies(float reach);  // diagnostics (below)
 
 namespace {
 
@@ -923,6 +927,76 @@ bool in_world(uint32_t wcm, uint32_t chr) {
     return false;
 }
 
+// The enemies our game runs around our own standing character while the Death Knell's view is open, updated every frame
+// as without the view (user 2026-11-22: the Undead Burg's firebomb throwers stopped throwing at the kneeling player; a
+// solo test of the view's drawing from another floor showed them going from every frame to every fifth, rate 5, with the
+// pass on us). Fixed (chr+0x1FD bit 0) and put back as with pin_view_rates; our own character too (fix_own_rate).
+std::vector<Pinned> g_body_pinned;
+constexpr float kBodyReach = 30.0f;
+
+void pin_body_rates(bool on) {
+    uint32_t wcm = 0;
+    read32(kWorldChrManVar, &wcm);
+    std::vector<uint32_t> want;
+    const uint32_t me = game::player();
+    game::Vec3 at{};
+    uint32_t hit = 0;
+    uint8_t b = 0xFF;
+    if (on && wcm && me && game::chr_position(me, &at) && read32(me + 0x29C, &hit) && hit && read8(hit + 0xF, &b) &&
+        b < 64) {
+        const uint32_t set = block_set(wcm, b);
+        uint32_t count = 0, arr = 0;
+        if (set && read32(set, &count) && read32(set + 4, &arr) && arr && count <= 4096) {
+            for (uint32_t i = 0; i < count && want.size() < kPinMax; ++i) {
+                uint32_t c = 0, cur = 0, com = 0, ent = 0, state = 0;
+                game::Vec3 p{};
+                if (!read32(arr + i * 0x20, &c) || !c || c == me || player_character(c) || !game::chr_position(c, &p) ||
+                    !read32(c + 0x2C, &cur) || !read32(c + 0x410, &com) || !cur || cur != com ||  // our game's AI
+                    !read32(c + 0xC, &ent) || !ent || !read32(ent + 8, &state) || state != 2) {
+                    continue;
+                }
+                const float dx = p.x - at.x, dy = p.y - at.y, dz = p.z - at.z;
+                if (dx * dx + dy * dy + dz * dz <= kBodyReach * kBodyReach) want.push_back(c);
+            }
+        }
+    }
+    for (auto it = g_body_pinned.begin(); it != g_body_pinned.end();) {
+        if (std::find(want.begin(), want.end(), it->chr) != want.end()) {
+            ++it;
+            continue;
+        }
+        uint8_t flags = 0;
+        if (!it->was_fixed && in_world(wcm, it->chr) && read8(it->chr + kChrRateFlags, &flags) && (flags & 1)) {
+            *ptr<uint8_t>(it->chr + kChrRateFlags) = flags & ~1;
+        }
+        it = g_body_pinned.erase(it);
+    }
+    for (const uint32_t c : want) {
+        uint8_t flags = 0;
+        if (!read8(c + kChrRateFlags, &flags)) continue;
+        if (std::none_of(g_body_pinned.begin(), g_body_pinned.end(), [c](const Pinned& q) { return q.chr == c; })) {
+            g_body_pinned.push_back({c, (flags & 1) != 0});
+        }
+        *ptr<uint8_t>(c + kChrRateFlags) = flags | 1;
+        *ptr<int32_t>(c + kChrRate) = 0;
+    }
+    // What the enemies around us do while the view is open (every 3 s, the first 20 listings of each view): which game
+    // moves each, its rate and its animation (3000-4999: an attack).
+    static double last = 0;
+    static int listings = 0;
+    if (!on) {
+        listings = 0;
+    } else if (now() - last >= 3.0 && listings < 20) {
+        last = now();
+        ++listings;
+        uint32_t hp = 0;
+        if (me) read32(me + 0x2D4, &hp);
+        LOG_INFO("[coop] Death Knell: around our own character (%.1f, %.1f, %.1f), our HP %u, %zu enemies of ours kept "
+                 "updated every frame:", at.x, at.y, at.z, hp, g_body_pinned.size());
+        log_enemies(kBodyReach);
+    }
+}
+
 void pin_view_rates(uint32_t chr) {
     uint32_t wcm = 0;
     read32(kWorldChrManVar, &wcm);
@@ -1005,10 +1079,11 @@ void point_extras() {
     g_view_chr = 0;
     pin_view_rates(0);
     g_keep_backread = 1;  // the Death Knell's view: the world around our standing character keeps streaming
+    fix_own_rate(true);
+    pin_body_rates(true);
     g_view_block = kNoBlock;
     g_seam_until = 0;
     g_seam_chr = 0;
-    fix_own_rate(false);
     g_drawn_for = 0;
     uint32_t hit = rules::floor_by_id(g_point_floor_map, g_point_floor_index);
     if (!hit) {
@@ -1083,6 +1158,7 @@ void view_extras() {
         g_view_chr = 0;
         pin_view_rates(0);
         g_keep_backread = 0;
+        pin_body_rates(false);
         g_view_block = kNoBlock;
         g_collision_block = kNoBlock;
         g_collision_floor = 0;
@@ -1187,8 +1263,9 @@ void view_extras() {
         g_collision_floor = 0;
     }
     give_lantern(chr);
-    fix_own_rate(g_pass_origin != 0);
+    fix_own_rate(g_pass_origin != 0 || !g_hold);  // the Death Knell's view: our standing character every frame too
     pin_view_rates(g_view_chr && !g_pass_origin ? chr : 0);
+    pin_body_rates(!g_hold);
     if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why) || (!why && streamed != g_drawn_streamed)) {
         g_drawn_for = chr;
         g_drawn_why = why ? why : "";
@@ -1374,6 +1451,8 @@ bool patch_call(uint32_t at, const uint8_t* expect, size_t n, void* fn) {
 
 }  // namespace
 
+bool remote_ext(const char* line, char* reply, size_t size);  // `kneeltest` (below)
+
 bool install() {
     g_installed = redirect_call(kDeathEventCall, kLuaDispatch, reinterpret_cast<void*>(&hk_death_event));
     if (!g_installed) {
@@ -1454,6 +1533,7 @@ bool install() {
         static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_stream_reset) - (kStreamResetSite + 5));
     std::memcpy(reset_code + 1, &reset_rel, 4);
     g_reset_patched = patch(kStreamResetSite, reset_k, reset_code, sizeof(reset_code));
+    remote_set_extension(&remote_ext);  // `kneeltest` (diagnostics builds; a release build's remote control is a stub)
     if (!g_reset_patched) {
         LOG_ERROR("[coop] Death Knell: the streaming update did not match this build (the enemies around the knelling "
                   "player may stop while the view shows a teammate)");
@@ -1470,9 +1550,143 @@ void set_teammates(const std::vector<Teammate>& teammates) { g_team = teammates;
 
 void set_targets(const std::vector<Teammate>& targets) { g_targets = targets; }
 
+// ---------------------------------------------------------------- diagnostics: the Death Knell's view, alone
+// RemoteControl `kneeltest X Y Z [MODE]` (diagnostics builds): every frame the world is drawn from the floor under
+// (X, Y, Z) as the Death Knell's view draws it from a teammate's, with no teammate (MODE bits: 1 drawn from it, 2 what it
+// shows streamed in, 4 the world around us kept streaming; 7 = the view); `kneeltest off`. For what the view does to the
+// enemies around the standing player (2026-11-22: the Undead Burg's firebomb throwers stopped throwing at them).
+volatile LONG g_test_mode = 0;
+float g_test_pos[3] = {};
+uint32_t g_test_hit = 0;
+double g_test_cast_at = 0;
+volatile LONG g_test_new = 0;
+
+// RemoteControl `enemies R`: every character within R m of us in the log (position, distance, HP, team, rate, entity
+// state and ask, whose manipulator moves it, animation), for the same question.
+void log_enemies(float reach) {
+    uint32_t wcm = 0, n = 0;
+    game::Vec3 me{};
+    const uint32_t self = game::player();
+    if (!read32(kWorldChrManVar, &wcm) || !wcm || !self || !game::chr_position(self, &me) ||
+        !read32(wcm + kWcmSetCount, &n) || n > 64) {
+        LOG_INFO("[coop] enemies: no player");
+        return;
+    }
+    int listed = 0;
+    for (uint32_t s = 0; s < n; ++s) {
+        uint32_t set = 0, count = 0, arr = 0;
+        if (!read32(wcm + kWcmSets + s * 12, &set) || !set || !read32(set, &count) || !read32(set + 4, &arr) || !arr ||
+            count > 4096) {
+            continue;
+        }
+        for (uint32_t k = 0; k < count; ++k) {
+            uint32_t c = 0, ent = 0, state = 0, ask = 0, hp = 0, team = 0, cur = 0, com = 0, net = 0, ctrl = 0,
+                     anim = 0xFFFFFFFF;
+            int32_t rate = 0;
+            uint8_t fixed = 0;
+            game::Vec3 p{};
+            if (!read32(arr + k * 0x20, &c) || !c || c == self || !game::chr_position(c, &p)) continue;
+            const float dx = p.x - me.x, dy = p.y - me.y, dz = p.z - me.z;
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d > reach) continue;
+            if (read32(c + 0xC, &ent) && ent) {
+                read32(ent + 8, &state);
+                read32(ent + 0xC, &ask);
+            }
+            read32(c + 0x2D4, &hp);
+            read32(c + 0x74, &team);
+            read32(c + 0xF4, reinterpret_cast<uint32_t*>(&rate));
+            read8(c + 0x1FD, &fixed);
+            read32(c + 0x2C, &cur);
+            read32(c + 0x410, &com);
+            read32(c + 0x414, &net);
+            if (read32(c + 0x28, &ctrl) && ctrl) read32(ctrl + 0x350, &anim);
+            LOG_INFO("[coop] enemies: %08X at (%.1f, %.1f, %.1f) %.1f m, hp %d, team %u, rate %d%s, entity %u ask %u, "
+                     "moved by %s, anim %d",
+                     c, p.x, p.y, p.z, d, static_cast<int>(hp), team, rate, (fixed & 1) ? " fixed" : "", state, ask,
+                     cur == com ? "our AI" : cur == net ? "the network" : "other", static_cast<int>(anim));
+            ++listed;
+        }
+    }
+    LOG_INFO("[coop] enemies: %d within %.0f m", listed, reach);
+}
+
+volatile LONG g_enemies_req = 0;  // `enemies R`: R, read on the game thread
+volatile LONG g_hold_req = 0;     // `kneelhold on|off`: 1 hold, 2 let go (our animations' speed, as the ring's crouch)
+
+bool remote_ext(const char* line, char* reply, size_t size) {
+    char cmd[32] = {};
+    if (sscanf_s(line, "%31s", cmd, static_cast<unsigned>(sizeof(cmd))) != 1) return false;
+    if (std::strcmp(cmd, "enemies") == 0) {
+        int reach = 40;
+        sscanf_s(line, "%*s %d", &reach);
+        InterlockedExchange(&g_enemies_req, reach > 0 ? reach : 40);
+        std::snprintf(reply, size, "enemies %d: in the log", reach);
+        return true;
+    }
+    if (std::strcmp(cmd, "kneelhold") == 0) {
+        const bool on = !std::strstr(line, " off");
+        InterlockedExchange(&g_hold_req, on ? 1 : 2);
+        std::snprintf(reply, size, "kneelhold %s", on ? "on" : "off");
+        return true;
+    }
+    if (std::strcmp(cmd, "kneeltest") != 0) return false;
+    if (std::strstr(line, " off")) {
+        InterlockedExchange(&g_test_mode, 0);
+        std::snprintf(reply, size, "kneeltest off");
+        return true;
+    }
+    float x = 0, y = 0, z = 0;
+    int mode = 7;
+    if (sscanf_s(line, "%*s %f %f %f %d", &x, &y, &z, &mode) < 3) {
+        std::snprintf(reply, size, "kneeltest X Y Z [MODE: 1 draw, 2 stream, 4 keep ours] | kneeltest off");
+        return true;
+    }
+    g_test_pos[0] = x;
+    g_test_pos[1] = y;
+    g_test_pos[2] = z;
+    InterlockedExchange(&g_test_new, 1);
+    InterlockedExchange(&g_test_mode, mode > 0 ? mode : 7);
+    std::snprintf(reply, size, "kneeltest %.1f %.1f %.1f mode %d", x, y, z, mode > 0 ? mode : 7);
+    return true;
+}
+
+void test_tick() {
+    if (const LONG reach = InterlockedExchange(&g_enemies_req, 0)) log_enemies(static_cast<float>(reach));
+    if (const LONG hold = InterlockedExchange(&g_hold_req, 0)) {
+        const bool done = motion::hold_anims(game::player(), hold == 1);
+        LOG_INFO("[coop] kneelhold %s: %s", hold == 1 ? "on" : "off", done ? "done" : "failed");
+    }
+    const LONG mode = g_test_mode;
+    if (!mode) return;
+    if (InterlockedExchange(&g_test_new, 0)) {
+        g_test_hit = 0;
+        g_test_cast_at = 0;
+    }
+    int m = -1, i = -1;
+    if (g_test_hit && !rules::floor_id(g_test_hit, &m, &i)) g_test_hit = 0;
+    if (!g_test_hit && now() - g_test_cast_at >= 1.0) {
+        g_test_cast_at = now();
+        g_test_hit = rules::floor_at(g_test_pos);
+        LOG_INFO("[coop] kneeltest: the floor under (%.1f, %.1f, %.1f): %08X", g_test_pos[0], g_test_pos[1],
+                 g_test_pos[2], g_test_hit);
+    }
+    if (!g_test_hit) return;
+    bool streamed = false;
+    const char* why = (mode & 1) ? rules::draw_from_hit(g_test_hit, (mode & 2) != 0, &streamed) : nullptr;
+    g_keep_backread = (mode & 4) ? 1 : 0;
+    static double last = 0;
+    if (now() - last >= 5.0) {
+        last = now();
+        LOG_INFO("[coop] kneeltest: mode %ld, floor %08X, %s%s", mode, g_test_hit, why ? why : "drawn from it",
+                 streamed ? ", streamed" : "");
+    }
+}
+
 void tick() {
     if (!g_installed) return;
     view_extras();
+    test_tick();
     view_block_report();
     if (game::player() && !world::local_dead()) {
         if (g_hold) {

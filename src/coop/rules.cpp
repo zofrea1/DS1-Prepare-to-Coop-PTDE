@@ -6060,17 +6060,32 @@ constexpr double kAttackQuiet = 1.0;  // another game's attack holds while its u
 // player's game kept such an enemy through 20 s of throws, while it threw at nobody in reach and the near player's game
 // bid nothing (user 2026-11-22, the Death Knell test: one of three throwers stayed with the teammate who had walked off).
 // Past kAttackHoldYield, the hold lets go while the game that moves the enemy has its player more than kHoldFar from it
-// and another standing player is kHoldNearer nearer: then the bids decide (the nearer game wins). Up close (a boss fight,
-// players within kHoldFar) the hold stays as it was; single attacks ran 0.6 to 6.9 s.
+// and another standing player is kHoldNearer nearer: then the bids decide (the nearer game wins). Only for a regular
+// enemy (team 6) that has stayed within kHoldStill of where the attack began: the player walked off from an enemy
+// attacking in place (the throwers moved at most 1.6 m through their throws). Never for a boss (a gauge boss, team 7)
+// nor the Hellkite: a boss repeating one attack reads as one too (the Asylum Demon's jumping slam twice, 12.6 s, three
+// 3005s in a row, 12 s), and a slam that lands it by another player would otherwise change hands in mid-air, the very
+// break-off the 20 s hold is there for (user 2026-11-22: bosses chain long attacks; none may reset on the players).
+// Up close (players within kHoldFar) the hold stays as it was; single attacks ran 0.6 to 6.9 s.
 constexpr double kAttackHoldYield = 8.0;
 constexpr float kHoldFar = 15.0f;
 constexpr float kHoldNearer = 5.0f;
+constexpr float kHoldStill = 3.0f;
+constexpr uint32_t kRegularEnemyTeam = 6;  // chr+0x74
 
 // Whether the hold on this enemy's long attack gives way (above): `ours`, our game moves it (another player clearly
 // nearer and ours far), else another game does (we are clearly nearer than every other player, the one moving it too).
-bool hold_gives_way(uint32_t chr, bool ours) {
+// `began`: where the enemy was when the attack began.
+bool hold_gives_way(uint32_t chr, bool ours, const game::Vec3& began) {
     game::Vec3 at{}, me{};
     if (world::local_dead() || !game::chr_position(chr, &at) || !game::position(&me, nullptr)) return false;
+    uint32_t team = 0, entity = 0;
+    if (!read32(chr + 0x74, &team) || team != kRegularEnemyTeam || gauge_boss_of(chr) ||
+        (read32(chr + 0x208, &entity) && std::find(std::begin(kWatchedEnemies), std::end(kWatchedEnemies),
+                                                   static_cast<int>(entity)) != std::end(kWatchedEnemies))) {
+        return false;
+    }
+    if (dist3(at, began) > kHoldStill) return false;
     const int area = (game::map_id() >> 24) & 0xFF;
     const float mine = dist3(me, at);
     float other = 1e9f;
@@ -6086,6 +6101,7 @@ struct AttackHold {
     int action = 0;
     double since = 0;
     bool told = false;
+    game::Vec3 began{};  // where the enemy was when the attack began
 };
 std::map<uint32_t, AttackHold> g_attack_holds;  // enemies in an attack
 
@@ -6104,7 +6120,9 @@ int attack_hold(uint32_t chr) {
     }
     const double t = seconds();
     if (it == g_attack_holds.end() || it->second.action != action) {
-        g_attack_holds[chr] = AttackHold{action, t, false};
+        game::Vec3 began{};
+        game::chr_position(chr, &began);
+        g_attack_holds[chr] = AttackHold{action, t, false, began};
     } else if (t - it->second.since > kAttackHold) {
         if (!it->second.told) {
             it->second.told = true;
@@ -6130,7 +6148,7 @@ int attack_hold(uint32_t chr) {
     const bool ours = moved_here(chr);
     const auto held_it = g_attack_holds.find(chr);  // `it` is end() when the hold was just made
     const double held = held_it != g_attack_holds.end() ? t - held_it->second.since : 0.0;
-    if (held > kAttackHoldYield && hold_gives_way(chr, ours)) {
+    if (held > kAttackHoldYield && hold_gives_way(chr, ours, held_it->second.began)) {
         static std::set<uint32_t> logged;
         if (logged.size() < 40 && logged.insert(chr).second) {
             LOG_INFO("[coop] Enemy %08X: attack %d for %.0f s, moved by %s, with a player clearly nearer than the one it "

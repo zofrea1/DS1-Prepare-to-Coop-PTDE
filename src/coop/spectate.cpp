@@ -965,8 +965,18 @@ void pin_body_rates(bool on) {
                 if (n_shown < 96) shown[n_shown++] = c;
                 // Whichever game moves it (user 2026-11-22: a thrower the far teammate's game held through its repeated
                 // throws stayed there the whole view; around us our rate fell to every fifth frame, and a game's bid
-                // for an enemy counts its rate (up to 4 x 256) above nearness (255), so ours lost until the view
-                // closed).
+                // for an enemy counts its rate above nearness (0xE6D250: rate 0 -> 6 x 256, -1 -> 5, 2 and 5 -> 4,
+                // others none; plus nearness up to 255), so ours lost until the view closed).
+                // Not one the game itself keeps out of the updates: dead (its -1), or at -1 / -2 when we first come to
+                // it (inactive, beyond the game's own reach, or not shown: 2026-11-22 log, a dead hollow and an idle
+                // one 29.7 m off), which every frame could wake (DrawMapObjects woke the Gargoyles that way); the
+                // view's own lowering is to 5. One we hold stays held while alive.
+                int32_t rate = 0;
+                uint32_t hp = 0;
+                const bool held =
+                    std::any_of(g_body_pinned.begin(), g_body_pinned.end(), [c](const Pinned& q) { return q.chr == c; });
+                if (!read32(c + 0x2D4, &hp) || static_cast<int32_t>(hp) <= 0) continue;
+                if (!held && (!read32(c + kChrRate, reinterpret_cast<uint32_t*>(&rate)) || rate < 0)) continue;
                 want.push_back(c);
             }
         }

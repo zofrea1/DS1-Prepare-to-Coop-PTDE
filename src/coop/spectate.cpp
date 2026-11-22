@@ -938,12 +938,18 @@ void pin_body_rates(bool on) {
     uint32_t wcm = 0;
     read32(kWorldChrManVar, &wcm);
     std::vector<uint32_t> want;
+    // Drawn in the view: our own character and every active character around it, whichever game moves it (user
+    // 2026-11-22: looking back at their body through the view, the kneeling player did not see the enemies attacking it,
+    // which the teammate's game shows; the world is drawn from the teammate's floor, whose rooms are not ours).
+    uint32_t shown[96];
+    int n_shown = 0;
     const uint32_t me = game::player();
     game::Vec3 at{};
     uint32_t hit = 0;
     uint8_t b = 0xFF;
     if (on && wcm && me && game::chr_position(me, &at) && read32(me + 0x29C, &hit) && hit && read8(hit + 0xF, &b) &&
         b < 64) {
+        shown[n_shown++] = me;
         const uint32_t set = block_set(wcm, b);
         uint32_t count = 0, arr = 0;
         if (set && read32(set, &count) && read32(set + 4, &arr) && arr && count <= 4096) {
@@ -951,15 +957,17 @@ void pin_body_rates(bool on) {
                 uint32_t c = 0, cur = 0, com = 0, ent = 0, state = 0;
                 game::Vec3 p{};
                 if (!read32(arr + i * 0x20, &c) || !c || c == me || player_character(c) || !game::chr_position(c, &p) ||
-                    !read32(c + 0x2C, &cur) || !read32(c + 0x410, &com) || !cur || cur != com ||  // our game's AI
                     !read32(c + 0xC, &ent) || !ent || !read32(ent + 8, &state) || state != 2) {
                     continue;
                 }
                 const float dx = p.x - at.x, dy = p.y - at.y, dz = p.z - at.z;
-                if (dx * dx + dy * dy + dz * dz <= kBodyReach * kBodyReach) want.push_back(c);
+                if (dx * dx + dy * dy + dz * dz > kBodyReach * kBodyReach) continue;
+                if (n_shown < 96) shown[n_shown++] = c;
+                if (read32(c + 0x2C, &cur) && read32(c + 0x410, &com) && cur && cur == com) want.push_back(c);  // ours
             }
         }
     }
+    visible::set_view(shown, n_shown);
     for (auto it = g_body_pinned.begin(); it != g_body_pinned.end();) {
         if (std::find(want.begin(), want.end(), it->chr) != want.end()) {
             ++it;
@@ -1613,6 +1621,7 @@ void log_enemies(float reach) {
 
 volatile LONG g_enemies_req = 0;  // `enemies R`: R, read on the game thread
 volatile LONG g_hold_req = 0;     // `kneelhold on|off`: 1 hold, 2 let go (our animations' speed, as the ring's crouch)
+volatile LONG g_hide_req = 0;     // `kneelhide on|off`: 1 our model given no group (not drawn), 2 back
 
 bool remote_ext(const char* line, char* reply, size_t size) {
     char cmd[32] = {};
@@ -1622,6 +1631,12 @@ bool remote_ext(const char* line, char* reply, size_t size) {
         sscanf_s(line, "%*s %d", &reach);
         InterlockedExchange(&g_enemies_req, reach > 0 ? reach : 40);
         std::snprintf(reply, size, "enemies %d: in the log", reach);
+        return true;
+    }
+    if (std::strcmp(cmd, "kneelhide") == 0) {
+        const bool on = !std::strstr(line, " off");
+        InterlockedExchange(&g_hide_req, on ? 1 : 2);
+        std::snprintf(reply, size, "kneelhide %s", on ? "on" : "off");
         return true;
     }
     if (std::strcmp(cmd, "kneelhold") == 0) {
@@ -1639,7 +1654,7 @@ bool remote_ext(const char* line, char* reply, size_t size) {
     float x = 0, y = 0, z = 0;
     int mode = 7;
     if (sscanf_s(line, "%*s %f %f %f %d", &x, &y, &z, &mode) < 3) {
-        std::snprintf(reply, size, "kneeltest X Y Z [MODE: 1 draw, 2 stream, 4 keep ours] | kneeltest off");
+        std::snprintf(reply, size, "kneeltest X Y Z [MODE: 1 draw, 2 stream, 4 keep ours, 8 our surroundings] | kneeltest off");
         return true;
     }
     g_test_pos[0] = x;
@@ -1653,6 +1668,11 @@ bool remote_ext(const char* line, char* reply, size_t size) {
 
 void test_tick() {
     if (const LONG reach = InterlockedExchange(&g_enemies_req, 0)) log_enemies(static_cast<float>(reach));
+    if (const LONG hide = InterlockedExchange(&g_hide_req, 0)) {
+        const uint32_t me = game::player();
+        visible::set_hidden(hide == 1 && me ? &me : nullptr, hide == 1 && me ? 1 : 0);
+        LOG_INFO("[coop] kneelhide %s (%08X)", hide == 1 ? "on" : "off", me);
+    }
     if (const LONG hold = InterlockedExchange(&g_hold_req, 0)) {
         const bool done = motion::hold_anims(game::player(), hold == 1);
         LOG_INFO("[coop] kneelhold %s: %s", hold == 1 ? "on" : "off", done ? "done" : "failed");
@@ -1675,6 +1695,7 @@ void test_tick() {
     bool streamed = false;
     const char* why = (mode & 1) ? rules::draw_from_hit(g_test_hit, (mode & 2) != 0, &streamed) : nullptr;
     g_keep_backread = (mode & 4) ? 1 : 0;
+    if (mode & 8) pin_body_rates(true);  // 8: the view's handling of our own surroundings (rates, drawn)
     static double last = 0;
     if (now() - last >= 5.0) {
         last = now();

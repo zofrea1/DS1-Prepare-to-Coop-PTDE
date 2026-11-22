@@ -30,19 +30,50 @@ volatile int g_count = 0;
 volatile int g_total = 0;
 uint32_t g_model_groups = kModelGroups;
 bool g_installed = false;
+// The Death Knell's view (spectate.cpp, set_view): our own standing character and the characters around it, drawn while
+// the world is drawn from the teammate's floor. And, for diagnostics only, characters given no group (set_hidden).
+constexpr int kMaxView = 96;
+uint32_t g_view[kMaxView] = {};
+volatile int g_view_n = 0;
+uint32_t g_hidden[4] = {};
+volatile int g_hidden_n = 0;
 
 // In place of the call: for one of the other players' characters (esi) the groups on the stack become every group.
 __declspec(naked) void model_groups_stub() {
     __asm {
         push ecx
         xor ecx, ecx
+    hnext:
+        cmp ecx, dword ptr [g_hidden_n]
+        jae others
+        cmp esi, dword ptr [g_hidden + ecx * 4]
+        je hidden
+        inc ecx
+        jmp hnext
+    hidden:
+        mov dword ptr [esp + 8], 0
+        mov dword ptr [esp + 12], 0
+        mov dword ptr [esp + 16], 0
+        mov dword ptr [esp + 20], 0
+        jmp done
+    others:
+        xor ecx, ecx
     next:
         cmp ecx, dword ptr [g_total]
-        jae done
+        jae view
         cmp esi, dword ptr [g_others + ecx * 4]
         je other
         inc ecx
         jmp next
+    view:
+        xor ecx, ecx
+    vnext:
+        cmp ecx, dword ptr [g_view_n]
+        jae done
+        cmp esi, dword ptr [g_view + ecx * 4]
+        je other
+        inc ecx
+        jmp vnext
     other:
         mov dword ptr [esp + 8], 0xFFFFFFFF   // [esp+4] our return address, [esp+8..] the 16 bytes of groups
         mov dword ptr [esp + 12], 0xFFFFFFFF
@@ -85,6 +116,20 @@ void set_extra(const uint32_t* chrs, int n) {
     const int base = g_count;
     if (n > 0) std::memcpy(&g_others[base], chrs, n * sizeof(uint32_t));
     g_total = base + n;
+}
+
+void set_view(const uint32_t* chrs, int n) {
+    if (n < 0 || !chrs) n = 0;
+    if (n > kMaxView) n = kMaxView;
+    if (n > 0) std::memcpy(g_view, chrs, n * sizeof(uint32_t));
+    g_view_n = n;
+}
+
+void set_hidden(const uint32_t* chrs, int n) {
+    if (n < 0 || !chrs) n = 0;
+    if (n > 4) n = 4;
+    if (n > 0) std::memcpy(g_hidden, chrs, n * sizeof(uint32_t));
+    g_hidden_n = n;
 }
 
 int keep_players_asked() {

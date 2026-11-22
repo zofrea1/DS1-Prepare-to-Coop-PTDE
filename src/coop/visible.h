@@ -23,5 +23,10 @@ void tick();
 int keep_players_asked();
 // The enemies shown for the other players (farenemies.cpp): their models given every group too, as the players'.
 void set_extra(const uint32_t* chrs, int n);
+// The Death Knell's view (spectate.cpp): our own standing character and the characters around it, their models given
+// every group too while the world is drawn from the teammate's floor (game thread, every frame; n = 0 lets them go).
+void set_view(const uint32_t* chrs, int n);
+// Diagnostics (RemoteControl `kneelhide`): characters whose models are given no group (not drawn).
+void set_hidden(const uint32_t* chrs, int n);
 
 }  // namespace coop::visible

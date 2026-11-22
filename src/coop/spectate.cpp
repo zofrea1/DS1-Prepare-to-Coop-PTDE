@@ -629,6 +629,38 @@ __declspec(naked) void hk_collision_block() {
     }
 }
 
+// The world around our own standing character while the Death Knell's view streams a teammate's (user 2026-11-22: the
+// Undead Burg's firebomb throwers on the roofs stopped throwing at the knelling player). The streaming update (0xDE7C30)
+// first has the collisions around us say which groups of each block to keep (0xDD42C0 per collision block: the "back
+// read"), then adds our floor's (FieldArea+0x3C) and the extra floors' (+0x44..+0x60) groups, but while any extra floor
+// is set it starts the masks over from the default first (0xDE802C: test edi,edi; jle; the copy of 0x1378AD4), so what
+// the back read kept goes. On a floor that streams nothing itself (+0x78 bit 2 clear) that was everything around us: the
+// characters of those rooms were no longer asked for (in the Deck's log 24 of the block's active characters fell to 9
+// within 4 s, in two of four views), our game stopped bidding for them, and the far player's game, whose events had
+// left their AI off, moved them. While the Death Knell's view is open the start-over is skipped (the extra floors are
+// added to what the back read kept); our death's view keeps the game's way (the body's surroundings do not matter then,
+// and the cutscenes, which use the same slots, are untouched).
+constexpr uint32_t kStreamResetSite = 0x00DE802C;
+constexpr uint32_t kStreamResetGo = 0x00DE8038;    // after the movq: the start-over goes on
+constexpr uint32_t kStreamResetSkip = 0x00DE8065;  // the extra floors' loop
+volatile LONG g_keep_backread = 0;                 // the Death Knell's view is open (set every frame by the view)
+bool g_reset_patched = false;
+uint32_t g_reset_go = kStreamResetGo;
+uint32_t g_reset_skip = kStreamResetSkip;
+
+__declspec(naked) void hk_stream_reset() {
+    __asm {
+        cmp g_keep_backread, 0
+        jne skip
+        test edi, edi
+        jle skip
+        movq xmm0, qword ptr ds:[0x01378AD4]
+        jmp dword ptr [g_reset_go]
+    skip:
+        jmp dword ptr [g_reset_skip]
+    }
+}
+
 // The hero light on the character we follow, for this frame.
 void give_lantern(uint32_t chr) {
     const uint32_t attach = chr + kChrAttach;
@@ -962,6 +994,7 @@ void point_extras() {
     g_pass_origin = 0;
     g_view_chr = 0;
     pin_view_rates(0);
+    g_keep_backread = 1;  // the Death Knell's view: the world around our standing character keeps streaming
     g_view_block = kNoBlock;
     g_seam_until = 0;
     g_seam_chr = 0;
@@ -1039,6 +1072,7 @@ void view_extras() {
         g_pass_origin = 0;
         g_view_chr = 0;
         pin_view_rates(0);
+        g_keep_backread = 0;
         g_view_block = kNoBlock;
         g_collision_block = kNoBlock;
         g_collision_floor = 0;
@@ -1127,6 +1161,7 @@ void view_extras() {
     // own player): they stood there, active and idle, while we knelt in the ring's crouch. The characters around the
     // teammate the view shows are updated every frame instead (pin_view_rates).
     g_pass_origin = g_view_chr && g_hold && g_origin_patched ? chr : 0;
+    g_keep_backread = g_hold ? 0 : 1;  // the Death Knell's view: the world around our standing character keeps streaming
     uint32_t their_floor = 0;
     uint8_t their_block = 0xFF;
     g_view_block = g_view_chr && g_block_test && read32(chr + 0x29C, &their_floor) && their_floor &&
@@ -1399,6 +1434,19 @@ bool install() {
                       "build (the enemies around a far teammate may stay out)",
                       asks ? "in" : "no match", g_block_test ? "in" : "no match");
         }
+    }
+    // test edi,edi; jle 0xDE8065; movq xmm0,[0x1378AD4]
+    static const uint8_t reset_k[12] = {0x85, 0xFF, 0x7E, 0x35, 0xF3, 0x0F, 0x7E, 0x05, 0xD4, 0x8A, 0x37, 0x01};
+    uint8_t reset_code[12];
+    std::memset(reset_code, 0x90, sizeof(reset_code));
+    reset_code[0] = 0xE9;
+    const int32_t reset_rel =
+        static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_stream_reset) - (kStreamResetSite + 5));
+    std::memcpy(reset_code + 1, &reset_rel, 4);
+    g_reset_patched = patch(kStreamResetSite, reset_k, reset_code, sizeof(reset_code));
+    if (!g_reset_patched) {
+        LOG_ERROR("[coop] Death Knell: the streaming update did not match this build (the enemies around the knelling "
+                  "player may stop while the view shows a teammate)");
     }
     return true;
 }

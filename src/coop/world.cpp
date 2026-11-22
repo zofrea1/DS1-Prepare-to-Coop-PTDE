@@ -1859,7 +1859,8 @@ void scale_tick() {
                  g_vicinity && level ? " at most: by vicinity, each enemy for the co-op players whose games run it" : "");
         g_logged_level = level;
     }
-    const bool frozen = spectate::viewing();
+    // Kept while our death waits; the Death Knell's view leaves the world around our standing character to our game.
+    const bool frozen = spectate::holding();
     if (frozen != g_ran_frozen) {
         g_ran_frozen = frozen;
         if (g_vicinity) {

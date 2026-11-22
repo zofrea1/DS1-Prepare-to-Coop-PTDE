@@ -104,6 +104,9 @@ constexpr uint32_t kChrRate = 0xF4;
 //    far teammate failed the draw group test (not drawn, or drawn at rate -2's LOD) and ranked behind everything near
 //    us. While we follow a teammate the pass takes their character instead (0xE3F68A: mov ecx,[edi+3Ch]; mov eax,
 //    [ecx+28h]), checked to be one of WorldChrMan's players every time.
+//    Only while our death waits: the Death Knell's view leaves the pass to our standing character (the enemies around it
+//    fell to every fifth frame and out of our game's bids, 2026-11-22) and fixes the rates of those around the teammate
+//    instead (pin_view_rates).
 constexpr uint32_t kChrPassOriginSite = 0x00E3F68A;
 //  * The enemies there (2026-11-05: around a teammate in another map they were "not there at all"). A character is
 //    updated, and its model placed (0xE6AA30 hands the model its display groups), only while its map entity is active
@@ -192,6 +195,10 @@ std::string g_point_why = "-";  // the last "drawn from" reason logged for the s
 bool g_streaming = true;      // SpectateStreaming
 bool g_origin_patched = false;
 volatile uint32_t g_pass_origin = 0;  // the character WorldChrMan's pass takes instead of ours (0: ours)
+// The followed teammate whose block's characters the view asks for, and whose block counts as ours in the pass's rate
+// test and the collision decision (0: none). The same as g_pass_origin while our death waits; the Death Knell's view
+// has it with no pass origin (view_extras).
+volatile uint32_t g_view_chr = 0;
 // The pass's visibility test is a draw group overlap with that character (0x456B70 copies its chr+0x274, 0x42DB10 /
 // 0x42DAA0 test ours against it), not the camera: far from the teammate our own character failed it, and the pass gave
 // it rate 5 (its LOD path, vt+0xA0), so it was updated every fifth frame. The camera, which turns by our character's
@@ -667,7 +674,7 @@ bool overlaps(uint32_t a, uint32_t b) {
 // whatever the masks, chr+0x15 / chr+0x54 / its vt+0xA0 and +0xA4, nor one it never asks for, chr+0x14).
 void ask_view_block(uint32_t wcm) {
     g_asked_more = 0;
-    const uint32_t chr = g_pass_origin;
+    const uint32_t chr = g_view_chr;
     uint32_t hit = 0, count = 0, arr = 0;
     uint8_t b = 0xFF;
     if (!chr || !read32(chr + 0x29C, &hit) || !hit || !read8(hit + 0xF, &b) || b >= 64) return;
@@ -727,7 +734,7 @@ __declspec(naked) void hk_block_test() {
 void view_block_report() {
     static double last = 0;
     static int lines = 0;
-    const uint32_t chr = g_pass_origin;
+    const uint32_t chr = g_view_chr;
     if (!chr || lines >= 40 || now() - last < 4.0) return;
     last = now();
     uint32_t wcm = 0, hit = 0, fa = 0, ours = 0xFFFFFFFF, count = 0, arr = 0;
@@ -841,6 +848,103 @@ void fix_own_rate(bool on) {
     *ptr<int32_t>(me + kChrRate) = 0;
 }
 
+// The characters around the teammate the Death Knell's view shows, updated every frame while it shows them. The pass
+// keeps our own character then (view_extras), so it ranks them by their distance from us and tests them against our
+// draw groups: far from us the game updated them every fifth or thirtieth frame, and they moved in jerks in the view.
+// Their rate is fixed (chr+0x1FD bit 0, as Set Network Update Rate does) and put back after, unless it was fixed before
+// (an event's). The regular enemies (team 6) of our own block are EnemiesNearOtherPlayers' while it is on (farenemies.cpp
+// fixes them the same way, every frame; a rate fixed here first would read to it as an event's and stay fixed); players
+// are fix_rate's and the game's.
+struct Pinned {
+    uint32_t chr;
+    bool was_fixed;
+};
+std::vector<Pinned> g_pinned;
+constexpr float kPinReach = 40.0f;
+constexpr uint32_t kRegularEnemyTeam = 6;  // chr+0x74 (farenemies.cpp's kTeamEnemy)
+constexpr size_t kPinMax = 64;
+
+// Whether `chr` is still one of WorldChrMan's characters (one of its blocks' sets): a character of a block that went
+// is gone, and nothing may be written to it.
+bool in_world(uint32_t wcm, uint32_t chr) {
+    uint32_t n = 0;
+    if (!wcm || !read32(wcm + kWcmSetCount, &n) || n > 64) return false;
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t set = 0, count = 0, arr = 0;
+        if (!read32(wcm + kWcmSets + i * 12, &set) || !set || !read32(set, &count) || !read32(set + 4, &arr) || !arr ||
+            count > 4096) {
+            continue;
+        }
+        for (uint32_t k = 0; k < count; ++k) {
+            uint32_t c = 0;
+            if (read32(arr + k * 0x20, &c) && c == chr) return true;
+        }
+    }
+    return false;
+}
+
+void pin_view_rates(uint32_t chr) {
+    uint32_t wcm = 0;
+    read32(kWorldChrManVar, &wcm);
+    std::vector<uint32_t> want;
+    uint32_t hit = 0, fa = 0, ours = kNoBlock;
+    uint8_t b = 0xFF;
+    game::Vec3 them{};
+    if (chr && wcm && read32(chr + 0x29C, &hit) && hit && read8(hit + 0xF, &b) && b < 64 &&
+        game::chr_position(chr, &them)) {
+        if (read32(0x01378520, &fa) && fa) read32(fa + 0x14, &ours);  // FieldArea+0x14: the block we stand in
+        const bool theirs = b == ours && farenemies::enabled();  // our block's enemies are farenemies.cpp's
+        const uint32_t set = block_set(wcm, b);
+        uint32_t count = 0, arr = 0;
+        if (set && read32(set, &count) && read32(set + 4, &arr) && arr && count <= 4096) {
+            const uint32_t me = game::player();
+            for (uint32_t i = 0; i < count && want.size() < kPinMax; ++i) {
+                uint32_t c = 0;
+                game::Vec3 p{};
+                uint32_t team = 0;
+                if (!read32(arr + i * 0x20, &c) || !c || c == me || c == chr || player_character(c) ||
+                    (theirs && read32(c + 0x74, &team) && team == kRegularEnemyTeam) || !game::chr_position(c, &p)) {
+                    continue;
+                }
+                const float dx = p.x - them.x, dy = p.y - them.y, dz = p.z - them.z;
+                if (dx * dx + dy * dy + dz * dz <= kPinReach * kPinReach) want.push_back(c);
+            }
+        }
+    }
+    // Those no longer around them (or the view closed): their rates as they were, if they are still here.
+    for (auto it = g_pinned.begin(); it != g_pinned.end();) {
+        if (std::find(want.begin(), want.end(), it->chr) != want.end()) {
+            ++it;
+            continue;
+        }
+        uint8_t flags = 0;
+        if (!it->was_fixed && in_world(wcm, it->chr) && read8(it->chr + kChrRateFlags, &flags) && (flags & 1)) {
+            *ptr<uint8_t>(it->chr + kChrRateFlags) = flags & ~1;
+        }
+        it = g_pinned.erase(it);
+    }
+    // The others every frame (the game clears the fixed rate at times).
+    for (const uint32_t c : want) {
+        uint8_t flags = 0;
+        if (!read8(c + kChrRateFlags, &flags)) continue;
+        if (std::none_of(g_pinned.begin(), g_pinned.end(), [c](const Pinned& q) { return q.chr == c; })) {
+            g_pinned.push_back({c, (flags & 1) != 0});
+        }
+        *ptr<uint8_t>(c + kChrRateFlags) = flags | 1;
+        *ptr<int32_t>(c + kChrRate) = 0;
+    }
+    static size_t logged = 0;  // logged when the view starts and stops pinning
+    if (g_pinned.empty() != (logged == 0)) {
+        logged = g_pinned.size();
+        if (logged) {
+            LOG_INFO("[coop] Death Knell: %zu character(s) around the teammate shown are updated every frame; the world "
+                     "around our own character runs as it does without the view", logged);
+        } else {
+            LOG_INFO("[coop] Death Knell: the characters around the teammate shown are back to the game's rates");
+        }
+    }
+}
+
 // Every frame while the Death Knell's view shows a summon sign: its map kept loaded and the world drawn from the floor
 // under it (the one its owner's game named, else one found by a cast), with that block's collisions loaded as ours, so
 // the warp onto it can go at once. The characters there are left to our own pass (no character of theirs to take).
@@ -856,6 +960,8 @@ void point_extras() {
         rules::view_map(map);
     }
     g_pass_origin = 0;
+    g_view_chr = 0;
+    pin_view_rates(0);
     g_view_block = kNoBlock;
     g_seam_until = 0;
     g_seam_chr = 0;
@@ -931,6 +1037,8 @@ void view_extras() {
     }
     if (!chr) {
         g_pass_origin = 0;
+        g_view_chr = 0;
+        pin_view_rates(0);
         g_view_block = kNoBlock;
         g_collision_block = kNoBlock;
         g_collision_floor = 0;
@@ -1010,14 +1118,22 @@ void view_extras() {
         }
     }
     // Only from a floor of theirs that is loaded here: their draw groups come from it.
-    g_pass_origin = g_streaming && g_origin_patched && !why ? chr : 0;
+    g_view_chr = g_streaming && !why ? chr : 0;
+    // WorldChrMan's pass takes their character for ours only while our death waits. The Death Knell's view leaves it to
+    // our own character (user 2026-11-22: "the enemies still try and pursue and attack the player at their true
+    // location"): with the pass on the teammate, the enemies around our standing body failed its draw group test and
+    // were updated every fifth frame or less, so our game's bid for them (0xE6D250, made only for an enemy it updates)
+    // came and went, a far player's game took them, and there their AI was off (the events switch it on by that game's
+    // own player): they stood there, active and idle, while we knelt in the ring's crouch. The characters around the
+    // teammate the view shows are updated every frame instead (pin_view_rates).
+    g_pass_origin = g_view_chr && g_hold && g_origin_patched ? chr : 0;
     uint32_t their_floor = 0;
     uint8_t their_block = 0xFF;
-    g_view_block = g_pass_origin && g_block_test && read32(chr + 0x29C, &their_floor) && their_floor &&
+    g_view_block = g_view_chr && g_block_test && read32(chr + 0x29C, &their_floor) && their_floor &&
                            read8(their_floor + 0xF, &their_block) && their_block < 64
                        ? their_block
                        : kNoBlock;
-    if (g_pass_origin && g_collision_patched && read32(chr + 0x29C, &their_floor) && their_floor &&
+    if (g_view_chr && g_collision_patched && read32(chr + 0x29C, &their_floor) && their_floor &&
         read8(their_floor + 0xF, &their_block) && their_block < 64) {
         g_collision_floor = their_floor;
         g_collision_block = their_block;
@@ -1027,6 +1143,7 @@ void view_extras() {
     }
     give_lantern(chr);
     fix_own_rate(g_pass_origin != 0);
+    pin_view_rates(g_view_chr && !g_pass_origin ? chr : 0);
     if (chr != g_drawn_for || (why ? why : "") != std::string(g_drawn_why) || (!why && streamed != g_drawn_streamed)) {
         g_drawn_for = chr;
         g_drawn_why = why ? why : "";

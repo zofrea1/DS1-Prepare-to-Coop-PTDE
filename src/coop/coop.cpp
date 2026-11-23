@@ -29,11 +29,14 @@
 #include "farenemies.h"
 #include "world.h"
 
+#include "settingsmenu.h"
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 
@@ -375,6 +378,91 @@ void tick() {
     }
 }
 
+
+// ---------------------------------------------------------------- FPS Unlock Settings: the co-op's page
+// The options a player changes between sessions. A change goes to the session's settings at once when no session
+// runs, else when it ends (session::reconfigure); the companions' health bars at once.
+coop::session::Config g_menu_cfg;  // the page's copy (render thread only)
+
+void menu_apply() { coop::session::reconfigure(g_menu_cfg); }
+void menu_password(const char* v) {
+    g_menu_cfg.password = v;
+    menu_apply();
+}
+void menu_max_players(const char* v) {
+    g_menu_cfg.max_players =
+        std::min(std::max(2, std::min(coop::players::kMaxPlayers, std::atoi(v))), coop::players::max_players());
+    menu_apply();
+}
+bool on(const char* v) { return v[0] == 't' || v[0] == 'T' || v[0] == '1'; }
+void menu_invaders(const char* v) {
+    g_menu_cfg.allow_invaders = on(v);
+    menu_apply();
+}
+void menu_cooldown(const char* v) {
+    g_menu_cfg.invasion_cooldown_s = static_cast<int>(std::atof(v) * 60.0 + 0.5);
+    menu_apply();
+}
+void menu_overhead(const char* v) {
+    g_menu_cfg.overhead_display = std::atoi(v);
+    menu_apply();
+}
+void menu_blossoms(const char* v) {
+    g_menu_cfg.death_debuffs = on(v);
+    menu_apply();
+}
+void menu_bloody(const char* v) {
+    g_menu_cfg.bloody_mary = on(v);
+    menu_apply();
+}
+void menu_vicinity(const char* v) {
+    g_menu_cfg.vicinity_scaling = on(v);
+    menu_apply();
+}
+void menu_rate(const char* v) {
+    g_menu_cfg.net_rate = std::atoi(v);
+    menu_apply();
+}
+void menu_share(const char* v) {
+    g_menu_cfg.share_items = on(v);
+    menu_apply();
+}
+
+const SettingsMenuChoice kMenuPlayers[] = {{"8", L"8"}, {"7", L"7"}, {"6", L"6"}, {"5", L"5"},
+                                           {"4", L"4 (the game's)"}, {"3", L"3"}, {"2", L"2"}};
+const SettingsMenuChoice kMenuOnOff[] = {{"true", L"On"}, {"false", L"Off"}};
+const SettingsMenuChoice kMenuCooldown[] = {{"3", L"3 minutes"}, {"5", L"5 minutes"}, {"10", L"10 minutes"},
+                                            {"0", L"Off"}, {"1", L"1 minute"}, {"2", L"2 minutes"}};
+const SettingsMenuChoice kMenuOverhead[] = {{"5", L"Name, level, ping, smoothing"}, {"4", L"Name, level and ping"},
+                                            {"2", L"Name and level"}, {"1", L"Name and ping"},
+                                            {"3", L"Name and deaths"}, {"0", L"Name only"}};
+const SettingsMenuChoice kMenuRate[] = {{"60", L"60 a second"}, {"30", L"30 a second"}, {"15", L"15 a second"},
+                                        {"6", L"6 a second (the game's)"}};
+constexpr const wchar_t* kMenuNext = L"Applies at once, or when your current session ends";
+constexpr const wchar_t* kMenuHost = L"As host; applies at once, or when your current session ends";
+
+const SettingsMenuRow kMenuRows[] = {
+    {"Password", L"Password", L"Players with the same password find each other. Press A or Enter, type it, then Enter. "
+     L"Avoid #.", nullptr, 0, menu_password, true, kMenuNext},
+    {"MaxPlayers", L"Players in a session", L"How many players your world holds as host: you, your guests and invaders "
+     L"together.", kMenuPlayers, _countof(kMenuPlayers), menu_max_players, false, kMenuHost},
+    {"AllowInvaders", L"Invaders", L"Others may invade your session as evil spirits.", kMenuOnOff, _countof(kMenuOnOff),
+     menu_invaders, false, kMenuHost},
+    {"InvasionCooldown", L"Invasion cooldown", L"After an invasion of your world, no other invader can come in for "
+     L"this long.", kMenuCooldown, _countof(kMenuCooldown), menu_cooldown, false, kMenuHost},
+    {"OverheadPlayerDisplay", L"Health bars over players", L"What the floating health bar over another co-op player "
+     L"shows besides the name.", kMenuOverhead, _countof(kMenuOverhead), menu_overhead, false, L"Applies at once"},
+    {"DeathDebuffs", L"Crimson Blossoms", L"Each death in a session lowers your maximum HP until someone rests at a "
+     L"bonfire.", kMenuOnOff, _countof(kMenuOnOff), menu_blossoms, false, kMenuHost},
+    {"BloodyMary", L"Bloody Mary", L"Each co-op death makes the world's enemies hardier until someone rests at a "
+     L"bonfire.", kMenuOnOff, _countof(kMenuOnOff), menu_bloody, false, kMenuHost},
+    {"VicinityScaling", L"Enemies scaled by nearby players", L"Each enemy is scaled for the co-op players near it "
+     L"rather than for the whole session.", kMenuOnOff, _countof(kMenuOnOff), menu_vicinity, false, kMenuHost},
+    {"NetworkTickRate", L"Network updates", L"How often your session's games send where their players are. Lower it "
+     L"if someone's upload is slow.", kMenuRate, _countof(kMenuRate), menu_rate, false, kMenuHost},
+    {"ShareDroppedItems", L"Shared drops", L"An item a co-op player drops lies on everyone's floor; the first to pick it "
+     L"up has it.", kMenuOnOff, _countof(kMenuOnOff), menu_share, false, kMenuHost},
+};
 }  // namespace
 
 void coop_install_early(const CoopConfig& config) {
@@ -487,6 +575,8 @@ void coop_install(const CoopConfig& config) {
     cfg.test_protocol = g_cfg.test_protocol;
     cfg.test_version = g_cfg.test_version;
     coop::session::configure(cfg);
+    g_menu_cfg = cfg;
+    settingsmenu_add_page(L"Co-op", kMenuRows, _countof(kMenuRows));
     static const char* const kOverhead[] = {"name only", "name and ping", "name and soul level", "name and deaths",
                                             "name, soul level and ping",
                                             "name, soul level, ping and smoothing"};

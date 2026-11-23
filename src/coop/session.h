@@ -89,6 +89,9 @@ struct PeerInfo {
 };
 
 void configure(const Config& cfg);
+// FPS Unlock Settings changed an option (any thread): taken over on the next tick. The overhead display applies at
+// once; the rest when no session runs (at once when none does, else when it ends).
+void reconfigure(const Config& cfg);
 // The tag that keeps the game's own lobbies (ghosts, messages, bloodstains) among Prepare to Co-op players.
 std::string game_tag();
 void tick();

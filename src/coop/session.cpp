@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <map>
 #include <set>
 #include <random>
@@ -7611,6 +7612,36 @@ void set_callbacks() {
 // this one never share these lobbies (no older build can summon or invade a newer one through the game's own way).
 std::string game_tag() { return "open1"; }
 
+std::mutex g_reconfig_lock;
+Config g_reconfig;
+bool g_reconfig_pending = false;
+
+void reconfigure(const Config& cfg) {
+    std::lock_guard<std::mutex> lock(g_reconfig_lock);
+    g_reconfig = cfg;
+    g_reconfig_pending = true;
+}
+
+// The game thread: the settings page's changes.
+void reconfigure_tick() {
+    Config cfg;
+    {
+        std::lock_guard<std::mutex> lock(g_reconfig_lock);
+        if (!g_reconfig_pending) return;
+        cfg = g_reconfig;
+        if (g_cfg.overhead_display != cfg.overhead_display) {
+            g_cfg.overhead_display = cfg.overhead_display;
+            LOG_INFO("[coop] Settings page: companion health bars now show option %d", cfg.overhead_display);
+        }
+        if (in_session()) return;  // the rest when the session ends
+        g_reconfig_pending = false;
+    }
+    configure(cfg);
+    LOG_INFO("[coop] Settings page: in use now (password %s, invaders %s, max %d players, %d updates a second)",
+             g_cfg.password.empty() ? "EMPTY" : "set", g_cfg.allow_invaders ? "allowed" : "off", g_cfg.max_players,
+             g_cfg.net_rate);
+}
+
 void configure(const Config& cfg) {
     g_cfg = cfg;
     g_bloody_on = cfg.bloody_mary;
@@ -7628,6 +7659,7 @@ void configure(const Config& cfg) {
 }
 
 void tick() {
+    reconfigure_tick();
     flash_tick();
     reward_tick();
     share_dead_lists();

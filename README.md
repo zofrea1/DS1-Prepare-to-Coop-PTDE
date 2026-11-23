@@ -29,6 +29,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 ## What's new in 2.6.0
 
+- **Fixed: a co-op item used from the inventory kept being used**: after the Cursed Pendant was used from the inventory menu, every press of the use button used it again instead of the quick bar's item, so its curse went on and off. Now the next press uses the quick bar's item.
 - **Includes the DS1 PTDE FPS Unlock 3.0.0**: lips a little above a step are climbed as at 30 FPS (`FixStepUp`, new; the Great Hollow's Chloranthy Ring hollow could not be left at a high frame rate); enemies are no longer carried up walls (the Lower Undead Burg's door-ambush thief that shot into the sky at 120 FPS); no more whitish dots in dark places, and 10 bits to HDR displays (`HighPrecisionOutput`, new); the picture no longer goes dark with supersampling in exclusive fullscreen; on the Steam Deck, no more grey specks in grass and leaves with anti-aliasing, and `AlphaToCoverage` works there now; borderless fullscreen by default with DXVK (`BorderlessFullscreen = auto`).
 - **Plays with 1.5.0 to 2.5.0** (the same co-op protocol).
 

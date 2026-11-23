@@ -245,13 +245,38 @@ char __cdecl hk_can_use(int32_t goods, uint32_t chr, uint32_t p3, int type, int 
 }
 
 // ---------------------------------------------------------------- use
+// The game's UseGoods (0xE50C70) ends an item's use in its use-up (0xC0CEB0): the inventory slot in use
+// ([equipment data +0x180], the equipment data = PlayerGameData+0x1B8) goes back to -1 and the menu's use flag
+// ([MenuMan+0x1A8]) to 0, and PlayerIns+0x634 (the item menu's state) to 0. An item this mod uses in its place
+// (the co-op items, the Homeward Bone in a session) skips that use-up, which would also take the item, so the use
+// is ended here the same way. Used from the inventory, the slot stayed in use: every later press of the use button
+// used that item again instead of the quick bar's (user report 2026-11-23: the Cursed Pendant, used from the menu,
+// played again after each press of use with the Estus Flask on the bar, and its curse went on and off).
+void end_use(void* chr, int32_t goods) {
+    const uint32_t pgd = game::player_game_data();
+    if (!pgd) return;
+    auto* in_use = reinterpret_cast<int32_t*>(pgd + 0x1B8 + 0x180);
+    const uint32_t menu = *reinterpret_cast<const uint32_t*>(kMenuManVar);
+    int32_t* menu_use = menu ? reinterpret_cast<int32_t*>(menu + 0x1A8) : nullptr;
+    if (*in_use != -1 || (menu_use && *menu_use != 0)) {
+        LOG_INFO("[coop] Item %d's use ended as the game's own use ends it (slot in use %d, menu use %d)", goods, *in_use,
+                 menu_use ? *menu_use : -1);
+    }
+    *in_use = -1;
+    if (menu_use) *menu_use = 0;
+    *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(chr) + 0x634) = 0;
+}
+
 char __fastcall hk_use_goods(void* chr, void*, int32_t goods, int32_t p2) {
     const uint32_t me = game::player();
     const bool ours = goods >= kFirst && goods <= kLast;
     if (me && reinterpret_cast<uint32_t>(chr) == me) {
         if (ours) LOG_INFO("[coop] Used co-op item %d", goods);
         const bool handled = g_use_fn ? g_use_fn(goods) : false;
-        if (handled || ours) return 1;
+        if (handled || ours) {
+            end_use(chr, goods);
+            return 1;
+        }
     } else if (ours) {
         return 1;
     }

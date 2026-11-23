@@ -106,6 +106,7 @@ void close_world();  // the host's Black Separation Crystal: every other player 
 void cycle_rules();  // Ominous Tome: none -> allies hostile -> teams -> none
 void taunt();        // Dried Fingers
 void curse_world();  // Cursed Pendant: curses our own world (offline or hosting), or lifts the curse
+bool curse_just_toggled();  // the pendant was used under kCurseGuard seconds ago (coop.cpp can_use refuses it)
 // A Homeward Bone used in a session (one bone from every player), the Darksign (every soul and all humanity from every
 // player, taken when the trip goes) or the Homeward miracle (no cost but the cast): the host and every guest go to the
 // host's last bonfire, whoever used it. The host's own takes the travel slot at once and goes on the next tick; false

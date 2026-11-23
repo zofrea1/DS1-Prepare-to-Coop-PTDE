@@ -8172,9 +8172,22 @@ void taunt() {
 }
 
 // The Cursed Pendant curses our own world, offline or hosting, and lifts the curse when used again. It cannot be
-// used in another player's world, nor while joining one (coop.cpp can_use).
+// used in another player's world, nor while joining one (coop.cpp can_use), nor again within kCurseGuard seconds:
+// a second press during its animation (a doubled or buffered press, user report 2026-11-23: the pendant played five
+// times in a row, 2.8 s apart, and the curse went on and off) used it again the moment the animation ended, and
+// lifted the curse just laid. Its animation lasts 2.8 s.
+constexpr double kCurseGuard = 4.0;
+double g_curse_toggled_at = -1.0e9;
+
+bool curse_just_toggled() { return now() - g_curse_toggled_at < kCurseGuard; }
+
 void curse_world() {
     if (!game::own_world() || g_role == Role::Guest) return;
+    if (curse_just_toggled()) {
+        LOG_INFO("[coop] Cursed Pendant used again %.1f s after the last use: ignored", now() - g_curse_toggled_at);
+        return;
+    }
+    g_curse_toggled_at = now();
     g_own_curse = !g_own_curse;
     g_curse_owner = party::local_name();
     apply_curse();

@@ -108,11 +108,8 @@ int can_use(int32_t id) {
         case items::kRules:
         case items::kTaunt:
             return host && area_allows(id) ? 1 : 0;
-        case items::kInfection:  // our own world, with or without a session, but not while joining another, and not
-                                 // again within 4 s (a doubled press would lift the curse just laid)
-            return (host || !session::active()) && game::own_world() && area_allows(id) && !session::curse_just_toggled()
-                       ? 1
-                       : 0;
+        case items::kInfection:  // our own world, with or without a session, but not while joining another
+            return (host || !session::active()) && game::own_world() && area_allows(id) ? 1 : 0;
         case items::kBlossom:
         case items::kBloody:
         case items::kParchment:  // retired in 1.8.0 (items.cpp, retired_tick)

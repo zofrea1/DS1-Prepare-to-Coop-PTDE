@@ -8,7 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
-| Prepare to Co-op Edition 2.6.0 | DS1 PTDE FPS Unlock 2.10.0 |
+| Prepare to Co-op Edition 2.6.0 | DS1 PTDE FPS Unlock 3.0.0 |
 | Prepare to Co-op Edition 2.5.0 | DS1 PTDE FPS Unlock 2.9.0 |
 | Prepare to Co-op Edition 2.4.0 | DS1 PTDE FPS Unlock 2.8.0 |
 | Prepare to Co-op Edition 2.3.0 | DS1 PTDE FPS Unlock 2.7.0 |
@@ -29,11 +29,10 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 ## What's new in 2.6.0
 
-- **Fixed: the Cursed Pendant could lift the curse it had just laid**: a second press during its animation used it again as it ended. It can now not be used again for 4 seconds after a use.
-- **Includes the DS1 PTDE FPS Unlock 2.10.0**: lips a little above a step are climbed as at 30 FPS (`FixStepUp`, new; the Great Hollow's Chloranthy Ring hollow could not be left at a high frame rate); enemies are no longer carried up walls (the Lower Undead Burg's door-ambush thief that shot into the sky at 120 FPS); no more whitish dots in dark places, and 10 bits to HDR displays (`HighPrecisionOutput`, new); the picture no longer goes dark with supersampling in exclusive fullscreen; on the Steam Deck, no more grey specks in grass and leaves with anti-aliasing, and `AlphaToCoverage` works there now; no more presses arriving twice with one pad on two XInput slots (Steam Input beside DS4Windows or DSX); borderless fullscreen by default with DXVK (`BorderlessFullscreen = auto`).
+- **Includes the DS1 PTDE FPS Unlock 3.0.0**: lips a little above a step are climbed as at 30 FPS (`FixStepUp`, new; the Great Hollow's Chloranthy Ring hollow could not be left at a high frame rate); enemies are no longer carried up walls (the Lower Undead Burg's door-ambush thief that shot into the sky at 120 FPS); no more whitish dots in dark places, and 10 bits to HDR displays (`HighPrecisionOutput`, new); the picture no longer goes dark with supersampling in exclusive fullscreen; on the Steam Deck, no more grey specks in grass and leaves with anti-aliasing, and `AlphaToCoverage` works there now; no more presses arriving twice with one pad on two XInput slots (Steam Input beside DS4Windows or DSX; the Cursed Pendant could lift the curse it had just laid); borderless fullscreen by default with DXVK (`BorderlessFullscreen = auto`).
 - **Plays with 1.5.0 to 2.5.0** (the same co-op protocol).
 
-The details are in the [2.6.0 release notes](release-notes/v2.6.0.md) and the FPS Unlock's [2.10.0 release notes](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered/releases/tag/v2.10.0-PTDE-DX9).
+The details are in the [2.6.0 release notes](release-notes/v2.6.0.md) and the FPS Unlock's [3.0.0 release notes](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered/releases/tag/v3.0.0-PTDE-DX9).
 
 ## What's new in 2.5.0
 

@@ -50,7 +50,9 @@ constexpr DbType kTypes[] = {
     {"NitoInvitation", 0x011DC538, 0x00FA0210, true, "Gravelord Servant's invitation (black phantoms)"},
     {"Bonfire", 0x011D9178, 0x00BD8F90, true, "bonfire kindling"},
     {"ColiseumEntrant", 0x011DC710, 0x00BC7C90, true, "Oolacile arena entrant"},
-    {"Ranking", 0x011D9ED8, 0x00BCF040, true, "covenant ranking"},
+    // Each linked game's covenant rankings come as a burst of packets after a load (36 lines in the Deck's 2026-11-25
+    // evening): summed up.
+    {"Ranking", 0x011D9ED8, 0x00BCF040, false, "covenant ranking"},
     {"BloodMessage", 0x011D8DE8, 0x00BDDF30, false, "messages"},
     {"BloodStain", 0x011D8F98, 0x00BDB540, false, "bloodstains"},
     {"WanderingGhost", 0x011D8910, 0x00BE1080, false, "ghosts"},
@@ -383,8 +385,8 @@ void install(bool on) {
         return;
     }
     LOG_INFO("[net] NetworkEventLog: the online extras other Prepare to Co-op players' games send are logged as they "
-             "arrive (%d of %d kinds; bells, vagrants, miracle resonance, curse statues, Gravelord, bonfire kindling, "
-             "arena, rankings each, the rest summed up every 5 minutes)%s",
+             "arrive (%d of %d kinds; bells, vagrants, miracle resonance, Gravelord, bonfire kindling, "
+             "arena each, the rest summed up every 5 minutes)%s",
              hooked, kTypeCount, trigger ? "" : "; the bell's sending is not logged (its site does not match)");
 }
 

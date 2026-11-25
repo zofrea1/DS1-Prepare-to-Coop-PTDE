@@ -1892,7 +1892,10 @@ void reset_rules() {
     apply_curse();
 }
 
+void note_invasion_over();  // below
+
 void finish(const std::wstring& why) {
+    note_invasion_over();
     if (!why.empty()) say(why);
     knell::left_session("the session ended");
     // A host closing its world over an invader: that invasion is over too (InvasionCooldown).
@@ -3248,9 +3251,63 @@ int invasion_level() {
     return sl;
 }
 
+// The worlds we invaded lately (the user's request, 2026-11-25): for kRecentInvasion seconds after our invasion of a
+// world ends, our invasion searches pass over it while another world can be invaded. Dried Fingers' pull and a host's
+// short InvasionCooldown (or none) are kept as they are; a frequent invader only finds a fresh world when there is
+// one. With no other world, the one just invaded is invaded again. A world is its host's lobby (kept while the host
+// stays in the world), or its owner when Steam tells it.
+constexpr double kRecentInvasion = 30.0;
+struct RecentInvasion {
+    uint64_t lobby = 0;
+    uint64_t host = 0;
+    double ended = 0;
+};
+std::vector<RecentInvasion> g_recent_invasions;
+
+// Our invasion of the world we are in is over (an invader leaving it, whatever the reason).
+void note_invasion_over() {
+    if (!g_invade || !g_lobby || g_step != Step::InWorld) return;
+    const double t = now();
+    g_recent_invasions.erase(std::remove_if(g_recent_invasions.begin(), g_recent_invasions.end(),
+                                            [&](const RecentInvasion& r) {
+                                                return t - r.ended > kRecentInvasion || r.lobby == g_lobby;
+                                            }),
+                             g_recent_invasions.end());
+    g_recent_invasions.push_back(RecentInvasion{g_lobby, g_host, t});
+}
+
+// Seconds since our last invasion of this lobby's world ended, or -1.
+double since_invaded(uint64_t lobby) {
+    const uint64_t owner = steam::lobby_owner(lobby);
+    for (const auto& r : g_recent_invasions) {
+        if (r.lobby == lobby || (owner && r.host == owner)) return now() - r.ended;
+    }
+    return -1;
+}
+
 // An invader's pick among the worlds found: at random, weighed by level matching (level_weight) and Dried Fingers
-// (kFingersWeight). A 1.0.0 host with Dried Fingers says so in "ptdesc_taunt", a newer one in "ptdesc_fingers".
-uint64_t pick_invade_world(const std::vector<uint64_t>& found) {
+// (kFingersWeight), after the worlds invaded in the last kRecentInvasion seconds are set aside while others are
+// there. A 1.0.0 host with Dried Fingers says so in "ptdesc_taunt", a newer one in "ptdesc_fingers".
+uint64_t pick_invade_world(const std::vector<uint64_t>& all) {
+    std::vector<uint64_t> found;
+    double recent_age = -1;
+    for (uint64_t l : all) {
+        const double age = since_invaded(l);
+        if (age >= 0 && age < kRecentInvasion) {
+            recent_age = age;
+        } else {
+            found.push_back(l);
+        }
+    }
+    if (found.size() < all.size()) {
+        if (found.empty()) {
+            found = all;
+            LOG_INFO("[coop] The world we invaded %.0f s ago is the only one to invade: invading it again", recent_age);
+        } else {
+            LOG_INFO("[coop] Passing over %zu world(s) invaded in the last %.0f s (ended %.0f s ago): %zu other(s) to "
+                     "invade", all.size() - found.size(), kRecentInvasion, recent_age, found.size());
+        }
+    }
     static std::mt19937_64 rng = [] {
         LARGE_INTEGER t{};
         QueryPerformanceCounter(&t);
@@ -3767,6 +3824,7 @@ bool holds(const std::vector<int32_t>& v, int32_t id) { return std::find(v.begin
 
 void guest_go_home(const std::wstring& why, const char* reason) {
     LOG_INFO("[coop] Going home (%s; session state %d, step %d)", reason, game::session_state(), game::join_step());
+    note_invasion_over();
     knell::left_session("the trip home started");
     g_blossoms_home = true;
     if (!g_invade && g_step == Step::InWorld) {

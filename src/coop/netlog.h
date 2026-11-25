@@ -6,9 +6,9 @@
 // the game is linked with (its "nodes": steam.cpp shares the game's lobbies among every Prepare to Co-op player).
 // Prepare to Die Edition keeps them in network databases (FrpgNet*Db) that travel between the players' games over
 // those links: the shared events (the Undead Parish's bell, multiplayer event 10010), vagrants, miracle resonance
-// rings, basilisk curse statues, Gravelord Servants' invitations, bonfire kindling, the Oolacile arena's entrants and
-// the covenant rankings each have a line as they come; messages, bloodstains, ghosts, signs and the node lists are
-// counted and summed up every five minutes. The bell being rung here (the event that sends 10010) has a line too, and
+// rings, Gravelord Servants' invitations, bonfire kindling and the Oolacile arena's entrants each have a line as they
+// come; messages, bloodstains, ghosts, signs, curse statues, covenant rankings and the node lists are counted and
+// summed up every five minutes. The bell being rung here (the event that sends 10010) has a line too, and
 // so do the games it is linked with (its node's table: who joins and leaves, and whether each is a Prepare to Co-op
 // player's) and the distance it searches.
 

@@ -50,6 +50,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.knell_soul_level = settings_parse_bool(val);
         } else if (key == "sharedroppeditems") {
             c.share_items = settings_parse_bool(val);
+        } else if (key == "footikplayers") {
+            c.foot_ik_players = settings_parse_bool(val);
         } else if (key == "overheadplayerdisplay") {
             c.overhead_display = std::atoi(val.c_str());
         } else if (key == "networktickrate") {

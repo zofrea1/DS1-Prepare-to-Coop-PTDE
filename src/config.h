@@ -54,6 +54,10 @@ struct CoopConfig {
     // An item a co-op player drops lies on every co-op player's floor; the first to pick it up has it (itemshare.cpp).
     // The host's decides for its session.
     bool share_items = true;
+    // The other players' characters (co-operators, invaders) place their feet on stairs and slopes as yours does
+    // (the FPS Unlock's foot placement for other characters, footik.cpp; FootIkNpcs does the NPCs). Each game's own
+    // choice, for what it draws.
+    bool foot_ik_players = true;
     // Text over other players: 0 name only, 1 ping, 2 soul level, 3 deaths, 4 soul level and ping, 5 soul level,
     // ping and the smoothing their character is drawn with.
     int overhead_display = 5;

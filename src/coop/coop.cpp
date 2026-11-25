@@ -31,6 +31,7 @@
 #include "farenemies.h"
 #include "world.h"
 
+#include "footik.h"
 #include "settingsmenu.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -426,6 +427,7 @@ void menu_rate(const char* v) {
     g_menu_cfg.net_rate = std::atoi(v);
     menu_apply();
 }
+void menu_foot_ik(const char* v) { footik_set_players(on(v)); }
 void menu_share(const char* v) {
     g_menu_cfg.share_items = on(v);
     menu_apply();
@@ -459,6 +461,8 @@ const SettingsMenuRow kMenuRows[] = {
      L"this long.", kMenuCooldown, _countof(kMenuCooldown), menu_cooldown, false, kMenuHost},
     {"OverheadPlayerDisplay", L"Health bars over players", L"What the floating health bar over another co-op player "
      L"shows besides the name.", kMenuOverhead, _countof(kMenuOverhead), menu_overhead, false, L"Applies at once"},
+    {"FootIkPlayers", L"Players' feet on the ground", L"The other players' characters place their feet on stairs and "
+     L"slopes, as yours does.", kMenuOnOff, _countof(kMenuOnOff), menu_foot_ik, false, L"Applies at once"},
     {"DeathDebuffs", L"Crimson Blossoms", L"Each death in a session lowers your maximum HP until someone rests at a "
      L"bonfire.", kMenuOnOff, _countof(kMenuOnOff), menu_blossoms, false, kMenuHost},
     {"BloodyMary", L"Bloody Mary", L"Each co-op death makes the world's enemies hardier until someone rests at a "
@@ -527,6 +531,7 @@ void coop_install(const CoopConfig& config) {
         LOG_INFO("[coop] Dropped items are shared with the co-op players: %s (ShareDroppedItems)",
                  g_cfg.share_items ? "yes" : "no");
     }
+    footik_set_players(g_cfg.foot_ik_players);
     if (!coop::motion::install()) LOG_ERROR("[coop] Other players' gait and bonfire animations are not synced");
     coop::motion::set_bonfire_animations(g_cfg.bonfire_animations);
     coop::spectate::set_streaming(g_cfg.spectate_streaming);

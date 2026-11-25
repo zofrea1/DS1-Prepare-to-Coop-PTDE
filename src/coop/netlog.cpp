@@ -15,6 +15,8 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
+#include <tuple>
 #include <string>
 
 namespace coop::netlog {
@@ -74,6 +76,17 @@ ULONGLONG g_next_summary = 0;
 
 bool line_ok() { return InterlockedIncrement(&g_lines) <= kMaxLines; }
 
+// The games re-send what they hold every few seconds (each node's curse statues came every 20 s, 2026-11-25): an item
+// has its line once (its kind and first data words).
+std::mutex g_seen_lock;
+std::set<std::tuple<int, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> g_seen;
+
+bool first_time(int n, uint8_t kind, const uint32_t* w) {
+    std::lock_guard<std::mutex> lock(g_seen_lock);
+    if (g_seen.size() > 4096) return false;
+    return g_seen.insert(std::make_tuple(n, static_cast<uint32_t>(kind), w[0], w[1], w[2], w[3])).second;
+}
+
 void map_text(char* out, size_t n) {
     const LONG m = g_map;
     if (m < 0) {
@@ -99,7 +112,9 @@ void note(int n, uint32_t from, uint32_t packet) {
     InterlockedIncrement(&g_since[n]);
     const LONG total = InterlockedIncrement(&g_total[n]);
     const DbType& t = kTypes[n];
+    const bool fresh = first_time(n, kind, w);
     if (!t.each && total > 3) return;
+    if (t.each && !fresh) return;
     if (!line_ok()) return;
     char where[24];
     map_text(where, sizeof(where));
@@ -241,9 +256,11 @@ void tick() {
         links = neighbours_text();
     }
     if (s.empty()) {
-        LOG_INFO("[net] Last 5 minutes: nothing arrived from other players' games; linked with %s", links.c_str());
+        LOG_INFO("[net] Last 5 minutes: nothing arrived from other players' games; our node's own links now: %s",
+                 links.c_str());
     } else {
-        LOG_INFO("[net] Last 5 minutes from other players' games: %s; linked with %s", s.c_str(), links.c_str());
+        LOG_INFO("[net] Last 5 minutes from other players' games: %s; our node's own links now: %s", s.c_str(),
+                 links.c_str());
     }
 }
 

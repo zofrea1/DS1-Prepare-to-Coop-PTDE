@@ -14,8 +14,9 @@
 #include <cstring>
 #include <cwchar>
 #include <mutex>
+#include <vector>
 
-// More than four players in a session (MaxPlayers 5 to 8). The game holds four: itself and three others.
+// More than four players in a session (MaxPlayers 5 to 64). The game holds four: itself and three others.
 //  * The game session's member limit, SessMan+0x8C, is set to 4 when the session manager starts (0xD2CB1B) and is
 //    what the session's room is made with (0xD2D4F0 -> attribute 0x80000001).
 //  * The network library (DLNRD) makes each session object (SteamSessionLight) with a pool of member objects and
@@ -32,7 +33,8 @@
 //    the game asks it for its free space (vt+0x18, 0xD2EF0C) and leaves the session when under 64 KB
 //    (OnIrregularLeaveSession). A seventh player of 2026-11-02 got to the world, all six others made, and left it
 //    0.3 s later so, back home; on the try before, the game died at a C runtime error box a moment after arriving.
-//    With more players the heap is made 16 MB (kNetHeap); the lowest free space of each minute in a session is logged.
+//    With more players the heap is made bigger (net_heap_size: 16 MB up to eight players, as in 1.4.0, and 1 MB more
+//    for each player above eight: 72 MB at 64); the lowest free space of each minute in a session is logged.
 //  * GameDataMan keeps the other players' PlayerGameData in one block of three (+0xC, 0x4C0 each, made by the
 //    constructor 0xC06710 as 0x10 + 0xE40 bytes with the count at block+0xC), a state byte for each (+0x10, three
 //    bytes; 0x1F once the player is ready to be made) and another byte each inline at +0x84..+0x86. A member's slot
@@ -42,17 +44,18 @@
 //  * WorldChrMan's player characters live in a set of four (+0x24, made by 0xE63C90: 4 x 0x20); the others are
 //    put in a free entry (0xE63F10) when they are made (0xEE2B10 -> 0xE40970).
 // All of it is widened here before the game makes these objects (from DllMain), each patch checked against the
-// bytes it replaces; nothing changes at four. The party list (PartyMemberInfo [GameMan+0xBEC]) is widened apart,
-// at any player count, to eight entries (partylist.cpp); only when that does not fit this build does it keep the
-// game's four, and then a fifth player simply has no entry and none of the game's own party bookkeeping (its add
-// 0xEA2510 refuses when no entry is free). The floating health bars do not need it: the HUD has seven of them
-// (records MenuMan+0x8F4 + 0x20 * slot, slot < 7 in the widget 0xFA89C0 and in the filler 0x1012C30), which the
-// filler fed from party entry `slot`
-// while `slot` < the party's count (+0x10), entry 0, our own character, drawing nothing. The filler takes its
-// characters from bar_list instead (at four players too: an NPC phantom in one of the party's entries left the
-// fourth player without a bar): every other player's character first (WorldChrMan's player set), then the party's
-// entries but ours (its NPC phantoms), seven at most. An NPC never keeps a bar from a player; it gets one back as
-// soon as a player leaves.
+// bytes it replaces; nothing changes at four. Every bound above is an 8-bit immediate or wider and every size a
+// 32-bit one, so the same patches hold up to kMaxPlayers (64 since 2.7.0; eight in 1.4.0 .. 2.6.0). The party list
+// (PartyMemberInfo [GameMan+0xBEC]) is widened apart, at any player count, to partylist::kWide entries
+// (partylist.cpp); only when that does not fit this build does it keep the game's four, and then a fifth player
+// simply has no entry and none of the game's own party bookkeeping (its add 0xEA2510 refuses when no entry is free).
+// The floating health bars do not need it: the HUD has seven of them (records MenuMan+0x8F4 + 0x20 * slot, slot < 7
+// in the widget 0xFA89C0 and in the filler 0x1012C30), which the filler fed from party entry `slot` while `slot` <
+// the party's count (+0x10), entry 0, our own character, drawing nothing. The filler takes its characters from
+// bar_list instead (at four players too: an NPC phantom in one of the party's entries left the fourth player without
+// a bar): every other player's character first (WorldChrMan's player set), then the party's entries but ours (its NPC
+// phantoms). An NPC never keeps a bar from a player; it gets one back as soon as a player leaves. With more players
+// the bars' records move into an array of ours and more bars are made in the HUD (below: kMaxBars).
 
 namespace coop::players {
 
@@ -65,7 +68,7 @@ int32_t g_party_slot = 0x7C;
 bool g_ok = false;  // every patch in place
 bool g_zeroed = false;
 // The inline bytes GameDataMan+0x84 + slot, moved here for every slot.
-uint8_t g_slot_bytes[16] = {};
+uint8_t g_slot_bytes[kMaxPlayers] = {};
 
 constexpr uint32_t kGameDataManVar = 0x01378700;
 constexpr uint32_t kPgdSize = 0x4C0;
@@ -136,8 +139,12 @@ void __stdcall reset_extra_slots() {
 
 uint32_t g_reset_tail = kResetTail;
 
-// The network heap's block (see the top): 4 MB, 16 MB with more players.
-constexpr uint32_t kNetHeap = 0x01000000;
+// The network heap's block (see the top): 4 MB, more with more players (net_heap_size).
+constexpr uint32_t kNetHeapBase = 0x01000000;  // 16 MB: eight players (1.4.0 .. 2.6.0)
+constexpr uint32_t kNetHeapPerPlayer = 0x00100000;
+uint32_t net_heap_size(int max_players) {
+    return kNetHeapBase + static_cast<uint32_t>(max_players > 8 ? max_players - 8 : 0) * kNetHeapPerPlayer;
+}
 const uint32_t kNetHeapSites[3] = {0x00F8B595, 0x0040A50F, 0x0040A530};
 const uint8_t kNetHeapOld[5] = {0x68, 0x00, 0x00, 0x40, 0x00};  // push 400000h
 constexpr uint32_t kNetHeapVar = 0x013787F8;      // the heap (its allocator interface), 0 until made
@@ -345,13 +352,49 @@ __declspec(naked) void count_summon_type() {
 }
 
 // ---------------------------------------------------------------- the floating health bars
-constexpr int kBars = 7;
+// The HUD's floating bars over other players (and NPC phantoms) are dialogs of class FrpgMenuDlgFloatingPCGauge
+// (vtable 0x11CAFAC, 0x11C bytes), each drawing the record of its slot (property 1004, set through vt+0x58 = 0xFA9330
+// into +0xF4): MenuMan+0x8F4 + 0x20 * slot, seven records made by MenuMan's constructor (0xC2DA6F), filled every frame
+// by 0x1012C30 and read by the gauge's update 0xFA89C0 and its placing 0xFA86F0 (both: slot < 7, else no record at
+// all, a null read). The seven gauges are one definition of the HUD's menu file, "F21-00", seven times in a plain
+// dialog (EzMenuDialog, vtable 0x110614C) inside the HUD (FrpgMenuDlgPCGauge, "F20-00"). A dialog holds its pieces as
+// EzMenuDlgObj (vtable 0x1106264, 0x20 bytes: +0x10 the dialog, +0x14 the piece's shape, +0x18 flags, +0x1C the
+// piece's record in the menu file) in a TVector at +0x8 (+0xC the array, +0x10 the count, +0x14 the room, +0x18 its
+// memory {buffer, room, owned}); a gauge's shape is a CMenuNestedDialog (vtable 0x1107174, +0x10 the gauge, which has
+// its piece at +0x34). The dialog's update (0x784380) and draw walk that vector (each piece's vt+0x40, its shape's,
+// the gauge's), and its destructor frees every piece, its shape and its gauge.
+//
+// More bars (2.7.0): the records move into an array of ours (kMaxBars of them). The reads of MenuMan that feed a
+// record's address (`mov reg, [MenuMan]` before `lea reg, [slot * 0x20 + reg + 0x8F4]`: the update, the placing, the
+// filler's four, a getter and a setter) take our array's address less 0x8F4 instead, the slot bounds 6 become
+// kMaxBars - 1, the filler's end 0xE0 kMaxBars * 0x20, and the filler's line-of-sight test (one bar a frame: the slot
+// equal to [0x1378648], which went round modulo 7) goes round the bars in use. Then tick makes more gauges in the
+// HUD's dialog, each the way the menu loader makes a nested dialog of a class (0x79BE30): the gauge from its class's
+// constructor, its init from the same definition ("F21-00", which makes its pieces), a nested-dialog shape around it
+// from the seventh's record of the menu file, and a piece holding the shape, put at the end of the dialog's vector
+// (its memory grown by the game's own 0x783D30), slot property 1004 set to its bar. A piece's own attach (0x788D10)
+// would make the gauge as a plain EzMenuDialog: the loader takes the class from the menu system's +0xB4, set only
+// while the HUD loads (first try, 2026-11-24: 531 plain dialogs made). The loader needs the menu file's resource
+// (+0x14 its heap, +0x54 its definitions), which the dialog keeps nowhere: the game's attach of every piece is watched
+// (the pieces' vtable slot) for the resource of each dialog. The HUD's teardown frees our pieces with its own (each
+// piece its shape, each shape its gauge), and a new HUD (every load) is grown again. A bar not in use is not drawn
+// (bit 1 of its piece's flags): each drawn bar records its transforms into the menus' command buffer every frame.
+constexpr int kGameBars = 7;
 constexpr uint32_t kGameManVar = 0x013784A0;
 constexpr uint32_t kWorldChrManVar = 0x0137D644;
-uint32_t g_bar_handles[kBars] = {};
-uint32_t g_bar_chrs[kBars] = {};
+uint32_t g_bar_handles[kMaxBars] = {};
+uint32_t g_bar_chrs[kMaxBars] = {};
 int g_bar_count = 0;
+int32_t g_bar_limit = kGameBars;  // the records there are (bars_handle's bound)
+int32_t g_bar_mod = 1;            // the bars the line-of-sight test goes round (at least 1)
 bool g_bars = false;
+bool g_records_moved = false;
+struct alignas(16) Record {
+    uint8_t b[0x20];
+};
+Record g_records[kMaxBars];
+int g_gauges = kGameBars;
+int g_want_extra = 0;
 
 // A character handle's character (0x10000000 | block << 14 | place): WorldChrMan+0x240 + block * 4, as 0xE3E340.
 uint32_t chr_of_handle(uint32_t wcm, uint32_t handle) {
@@ -370,7 +413,7 @@ void __stdcall bar_list() {
     if (!read32(kGameManVar, &gm) || !gm || !read32(kWorldChrManVar, &wcm) || !wcm) return;
     read32(wcm + 0x3C, &self);
     auto add = [&](uint32_t handle, uint32_t chr) {
-        if (g_bar_count >= kBars || !chr || chr == self) return;
+        if (g_bar_count >= g_bar_limit || !chr || chr == self) return;
         for (int i = 0; i < g_bar_count; ++i) {
             if (g_bar_chrs[i] == chr) return;
         }
@@ -382,8 +425,8 @@ void __stdcall bar_list() {
     // handle the game made them with (0xE63F10: the players' block from [WorldChrMan+0x10]+0xC): an NPC phantom
     // never keeps a bar from a player, however early it was summoned.
     uint32_t n = 0, entries = 0, field = 0, block = 0;
-    if (read32(wcm + 0x24, &n) && read32(wcm + 0x28, &entries) && entries && n <= 64 && read32(wcm + 0x10, &field) &&
-        field && read32(field + 0xC, &block)) {
+    if (read32(wcm + 0x24, &n) && read32(wcm + 0x28, &entries) && entries && n <= kMaxPlayers &&
+        read32(wcm + 0x10, &field) && field && read32(field + 0xC, &block)) {
         for (uint32_t s = 1; s < n; ++s) {
             uint32_t chr = 0;
             if (!read32(entries + s * 0x20, &chr) || !chr) continue;
@@ -399,6 +442,7 @@ void __stdcall bar_list() {
             if (read32(pmi + 0x18 + i * 0x14, &handle)) add(handle, chr_of_handle(wcm, handle));
         }
     }
+    g_bar_mod = g_bar_count > 0 ? g_bar_count : 1;
 }
 
 // 0x1012C47: `mov edx, [ecx+10h]` (the party's count) ; `xorps xmm0, xmm0`. Everything else is kept.
@@ -438,7 +482,7 @@ __declspec(naked) void bars_handle() {
         or edx, -1
         cmp esi, dword ptr [g_bar_count]
         jae done
-        cmp esi, 7
+        cmp esi, dword ptr [g_bar_limit]
         jae done
         mov edx, dword ptr [g_bar_handles + esi * 4]
     done:
@@ -446,8 +490,134 @@ __declspec(naked) void bars_handle() {
     }
 }
 
+// The filler draws a bar only for a character of the player's kind (vt+0x9C: PlayerIns, which human NPCs are too;
+// 0x1012D03: mov eax, [edx+9Ch] ; mov ecx, esi ; call eax, then test al, al). The stress test's stand-ins are
+// enemies (stress.cpp), so while it runs (g_all_bars) any character of a bar is taken. Off, the game's own answer.
+int32_t g_all_bars = 0;
+constexpr uint32_t kBarKindSite = 0x01012D03;
+const uint8_t kBarKindOld[10] = {0x8B, 0x82, 0x9C, 0x00, 0x00, 0x00, 0x8B, 0xCE, 0xFF, 0xD0};
+
+__declspec(naked) void bars_kind() {
+    __asm {
+        mov eax, dword ptr [edx + 0x9C]
+        mov ecx, esi
+        call eax
+        test al, al
+        jnz done
+        cmp dword ptr [g_all_bars], 0
+        je done
+        mov al, 1
+    done:
+        ret
+    }
+}
+
+// 0x1013474 (`mov ecx, 7` before the idiv that turns the line-of-sight test's bar): ecx = the bars in use.
+__declspec(naked) void bars_mod() {
+    __asm {
+        mov ecx, dword ptr [g_bar_mod]
+        ret
+    }
+}
+
 const uint8_t kBarsBegin[6] = {0x8B, 0x51, 0x10, 0x0F, 0x57, 0xC0};
 const uint8_t kBarsHandle[14] = {0x83, 0xCA, 0xFF, 0x3B, 0x71, 0x10, 0x7D, 0x06, 0x8B, 0x44, 0x24, 0x28, 0x8B, 0x10};
+
+// The records' sites (see above). A MenuMan load becomes `mov reg, imm32` (+ nop), a bound its new value.
+struct RecordSite {
+    uint32_t at;
+    uint8_t n;
+    uint8_t old[6];
+    uint8_t op;  // 0: a bound (an 8-bit 6 -> kMaxBars - 1, the 32-bit 0xE0 -> kMaxBars * 0x20); else mov reg, imm32
+};
+const RecordSite kRecordSites[] = {
+    {0x00FA89D3, 3, {0x83, 0xF8, 0x06}, 0},                          // update: cmp eax, 6
+    {0x00FA89D8, 6, {0x8B, 0x0D, 0xD0, 0x86, 0x37, 0x01}, 0xB9},     // mov ecx, [MenuMan]
+    {0x00FA86FD, 3, {0x83, 0xF8, 0x06}, 0},                          // placing: cmp eax, 6
+    {0x00FA8702, 6, {0x8B, 0x0D, 0xD0, 0x86, 0x37, 0x01}, 0xB9},     // mov ecx, [MenuMan]
+    {0x01012C5B, 6, {0x8B, 0x3D, 0xD0, 0x86, 0x37, 0x01}, 0xBF},     // filler: mov edi, [MenuMan]
+    {0x010132E2, 6, {0x8B, 0x3D, 0xD0, 0x86, 0x37, 0x01}, 0xBF},
+    {0x0101333C, 6, {0x8B, 0x3D, 0xD0, 0x86, 0x37, 0x01}, 0xBF},
+    {0x01013373, 6, {0x8B, 0x3D, 0xD0, 0x86, 0x37, 0x01}, 0xBF},
+    {0x01012C71, 3, {0x83, 0xFE, 0x06}, 0},                          // cmp esi, 6
+    {0x0101345A, 5, {0x3D, 0xE0, 0x00, 0x00, 0x00}, 0},              // cmp eax, 0E0h
+    {0x00C29D62, 3, {0x83, 0xF9, 0x06}, 0},                          // getter: cmp ecx, 6
+    {0x00C29D67, 5, {0xA1, 0xD0, 0x86, 0x37, 0x01}, 0xB8},           // mov eax, [MenuMan]
+    {0x00C29D84, 6, {0x8B, 0x15, 0xD0, 0x86, 0x37, 0x01}, 0xBA},     // setter: mov edx, [MenuMan]
+};
+constexpr uint32_t kBarsModSite = 0x01013474;
+const uint8_t kBarsModOld[5] = {0xB9, 0x07, 0x00, 0x00, 0x00};
+
+// The menus' drawing goes into one of three command buffers a frame (FrpgMenuDc, made once by 0xC246A0 from the heap
+// [0x13787C8]: 0x40000 bytes each, the size kept at +0x10), played back by the render thread. Its writers do not check
+// the room: a full buffer hands out a null place and the next write faults (0x437F73, the first try with 66 gauges,
+// 2026-11-24: each nested dialog records its transform every frame). With more gauges the buffers are 1 MB.
+constexpr uint32_t kMenuBufSize = 0x00100000;
+const uint32_t kMenuBufSites[4] = {0x00C2471C + 3, 0x00C2472B + 1, 0x00C24740 + 1, 0x00C24755 + 1};
+uint32_t g_menu_buf = 0x40000;
+
+bool grow_menu_buffers() {
+    const uint8_t mov[7] = {0xC7, 0x46, 0x10, 0x00, 0x00, 0x04, 0x00};
+    const uint8_t push[5] = {0x68, 0x00, 0x00, 0x04, 0x00};
+    if (!bytes_match(0x00C2471C, mov, sizeof(mov)) || !bytes_match(0x00C2472B, push, sizeof(push)) ||
+        !bytes_match(0x00C24740, push, sizeof(push)) || !bytes_match(0x00C24755, push, sizeof(push))) {
+        return false;
+    }
+    const uint32_t old = 0x40000;
+    for (uint32_t at : kMenuBufSites) patch(at, &old, &kMenuBufSize, 4);
+    g_menu_buf = kMenuBufSize;
+    return true;
+}
+
+// All or nothing, before the HUD exists (from DllMain): every record read and write goes to g_records.
+bool move_records() {
+    if (!grow_menu_buffers()) {
+        LOG_ERROR("[coop] Floating health bars: the menus' draw buffers do not match this build (seven bars)");
+        return false;
+    }
+    for (const RecordSite& r : kRecordSites) {
+        if (!bytes_match(r.at, r.old, r.n)) {
+            LOG_ERROR("[coop] Floating health bars: %08X does not match this build (seven bars)", r.at);
+            return false;
+        }
+    }
+    if (!bytes_match(kBarsModSite, kBarsModOld, sizeof(kBarsModOld))) return false;
+    for (Record& r : g_records) {
+        std::memset(r.b, 0, sizeof(r.b));
+        r.b[0xD] = 1;  // as the game's record constructor (0x5159B0)
+    }
+    const uint32_t base = reinterpret_cast<uint32_t>(&g_records[0]) - 0x8F4;
+    for (const RecordSite& r : kRecordSites) {
+        uint8_t code[6];
+        std::memcpy(code, r.old, r.n);
+        if (r.op) {
+            code[0] = r.op;
+            std::memcpy(code + 1, &base, 4);
+            if (r.n == 6) code[5] = 0x90;
+        } else if (r.n == 3) {
+            code[2] = static_cast<uint8_t>(kMaxBars - 1);
+        } else {
+            const uint32_t end = kMaxBars * 0x20;
+            std::memcpy(code + 1, &end, 4);
+        }
+        if (!patch(r.at, r.old, code, r.n)) return false;  // (none can fail after the checks above)
+    }
+    uint8_t code[5] = {0xE8};
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&bars_mod) - (kBarsModSite + 5));
+    std::memcpy(code + 1, &rel, 4);
+    patch(kBarsModSite, kBarsModOld, code, sizeof(code));
+    if (bytes_match(kBarKindSite, kBarKindOld, sizeof(kBarKindOld))) {
+        uint8_t kind[10];
+        std::memset(kind, 0x90, sizeof(kind));
+        kind[0] = 0xE8;
+        const int32_t to = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&bars_kind) - (kBarKindSite + 5));
+        std::memcpy(kind + 1, &to, 4);
+        patch(kBarKindSite, kBarKindOld, kind, sizeof(kind));
+    }
+    g_records_moved = true;
+    g_bar_limit = kMaxBars;
+    return true;
+}
 
 bool install_bars() {
     if (!bytes_match(0x01012C47, kBarsBegin, sizeof(kBarsBegin)) ||
@@ -465,6 +635,279 @@ bool install_bars() {
     rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&bars_handle) - (0x01012CDA + 5));
     std::memcpy(code + 1, &rel, 4);
     return patch(0x01012CDA, kBarsHandle, code, sizeof(kBarsHandle));
+}
+
+// ---------------------------------------------------------------- more gauges in the HUD
+constexpr uint32_t kGaugeVtable = 0x011CAFAC;      // FrpgMenuDlgFloatingPCGauge
+constexpr uint32_t kGaugeUpdateSlot = 0x011CAFEC;  // its vt+0x40 (0xFA8C90): the update, every frame
+constexpr uint32_t kGaugeUpdate = 0x00FA8C90;
+constexpr uint32_t kDlgObjVtable = 0x01106264;     // EzMenu::EzMenuDlgObj
+constexpr uint32_t kDialogVtable = 0x0110614C;     // EzMenu::EzMenuDialog
+constexpr uint32_t kNestedVtable = 0x01107174;     // EzMenu::DynamicUI::CMenuNestedDialog
+constexpr uint32_t kDlgObjNew = 0x00789460;        // stdcall(context 0 = the menu heap, flag) -> EzMenuDlgObj
+constexpr uint32_t kTymeAlloc = 0x00783D30;        // thiscall(memory {buffer, room, owned}, n, name, 0): frees, makes
+constexpr uint32_t kHeapOf = 0x00562C30;           // cdecl(block) -> its heap (free: vt+0x34)
+uint32_t g_gauge_update = kGaugeUpdate;
+volatile uint32_t g_seen_gauge = 0;  // a gauge the game updated (the hook below)
+double g_gauges_checked = 0;
+int g_grow_lines = 0;
+constexpr uint32_t kAttachSlot = 0x011062A8;  // EzMenuDlgObj vt+0x44 (0x788D10)
+constexpr uint32_t kAttach = 0x00788D10;
+struct DialogResource {
+    uint32_t dialog = 0, resource = 0;
+};
+constexpr uint32_t kDialogResources = 4096;
+DialogResource g_dialog_resources[kDialogResources];  // by the dialog's address (a later dialog in its place wins)
+uint32_t g_failed_dialog = 0;   // a dialog we could not grow (not tried again until the next load)
+// The pieces we made (bar kGameBars + i), drawn only while their bar is in use: each one drawn records its transforms
+// into the menus' command buffer every frame, shown or not.
+uint32_t g_made_dialog = 0;
+uint32_t g_made_pieces[kMaxBars] = {};
+int g_made_count = 0;
+
+__declspec(naked) void hk_gauge_update() {
+    __asm {
+        mov dword ptr [g_seen_gauge], ecx
+        jmp dword ptr [g_gauge_update]
+    }
+}
+
+uint32_t vtable_of(uint32_t p) {
+    uint32_t vt = 0;
+    return p >= 0x10000 && read32(p, &vt) ? vt : 0;
+}
+
+// The gauge of a piece of the dialog, or 0.
+uint32_t gauge_of_piece(uint32_t obj) {
+    uint32_t shape = 0, gauge = 0;
+    if (vtable_of(obj) != kDlgObjVtable || !read32(obj + 0x14, &shape) || vtable_of(shape) != kNestedVtable ||
+        !read32(shape + 0x10, &gauge) || vtable_of(gauge) != kGaugeVtable) {
+        return 0;
+    }
+    return gauge;
+}
+
+using DlgObjNewFn = uint32_t(__stdcall*)(uint32_t context, uint32_t flag);
+using AttachFn = char(__thiscall*)(uint32_t obj, uint32_t record, uint32_t resource, uint32_t dialog);
+
+// In place of every piece's attach (vt+0x44): the game's, then the resource of a gauge's.
+char __fastcall hk_attach(uint32_t obj, void*, uint32_t record, uint32_t resource, uint32_t dialog) {
+    const char made = reinterpret_cast<AttachFn>(kAttach)(obj, record, resource, dialog);
+    // The resource each dialog's pieces were attached with (the HUD's bars come with the rest of its dialog).
+    if (made && resource && dialog) {
+        DialogResource& d = g_dialog_resources[(dialog >> 4) % kDialogResources];
+        d.dialog = dialog;
+        d.resource = resource;
+    }
+    return made;
+}
+using SetPropFn = void(__thiscall*)(uint32_t dlg, int32_t id, int32_t value, int32_t type);
+using TymeAllocFn = char(__thiscall*)(uint32_t memory, int32_t n, const wchar_t* name, int32_t);
+using HeapOfFn = uint32_t(__cdecl*)(uint32_t block);
+using DtorFn = void(__thiscall*)(uint32_t obj, int32_t flags);
+using FreeFn = void(__thiscall*)(uint32_t heap, uint32_t block);
+
+using GaugeNewFn = uint32_t(__thiscall*)(uint32_t context, uint32_t flag);  // 0x50D350: a floating bar, 0x11C
+using SetDefIndexFn = void(__thiscall*)(uint32_t dlg, uint32_t index);        // 0x516320: +0x28
+using InitFromDefFn = char(__thiscall*)(uint32_t dlg, uint32_t def, uint32_t resource, uint32_t sys);  // 0x788970
+using AllocFn = uint32_t(__cdecl*)(uint32_t size, uint32_t align, uint32_t heap);  // 0x5629C0
+using ShapeCtorFn = uint32_t(__thiscall*)(uint32_t shape, uint32_t data, uint32_t resource, uint32_t sys,
+                                          uint32_t child);  // 0x79F890: CMenuNestedDialog
+using SetPieceFn = void(__thiscall*)(uint32_t dlg, uint32_t piece);  // 0x783300: +0x34
+constexpr uint32_t kGaugeNew = 0x0050D350, kSetDefIndex = 0x00516320, kInitFromDef = 0x00788970;
+constexpr uint32_t kAlloc = 0x005629C0, kShapeCtor = 0x0079F890, kSetPiece = 0x00783300;
+
+// An object of the game's heaps, destroyed and freed as the game's loader does on a failure (0x79BF5B).
+void destroy(uint32_t obj) {
+    const uint32_t heap = reinterpret_cast<HeapOfFn>(kHeapOf)(obj);
+    reinterpret_cast<DtorFn>(*ptr<uint32_t>(vtable_of(obj) + 4))(obj, 0);
+    if (heap) reinterpret_cast<FreeFn>(*ptr<uint32_t>(vtable_of(heap) + 0x34))(heap, obj);
+}
+
+// One more bar in `dialog`, as the menu loader makes a nested dialog of a class (0x79BE30): the gauge from its
+// class's constructor (0x50D350), its definition's index (+0x28) and its init from the definition (0x788970, which
+// makes its pieces), the nested dialog's shape around it (0x79F890, from the record's shape data) and the piece that
+// holds the shape (0x789460, its fields as its attach 0x788D10 sets them), the gauge told its piece (+0x34).
+uint32_t make_bar(uint32_t dialog, uint32_t source, uint32_t source_gauge, uint32_t resource, uint32_t sys, int slot) {
+    // The record's shape: +4 {its type's name, its data} (0x79D070 picks the loader by the name, which gets the data).
+    const uint32_t record = *ptr<uint32_t>(source + 0x1C);
+    const uint32_t shape_def = record ? *ptr<uint32_t>(record + 4) : 0;
+    const uint32_t data = shape_def ? *ptr<uint32_t>(shape_def + 4) : 0;
+    const uint32_t def = *ptr<uint32_t>(source_gauge + 0x2C);
+    const uint32_t heap = *ptr<uint32_t>(resource + 0x14);
+    if (!record || !data || !def || !heap) return 0;
+    const uint32_t gauge = reinterpret_cast<GaugeNewFn>(kGaugeNew)(0, 0);
+    if (!gauge || vtable_of(gauge) != kGaugeVtable) return 0;
+    reinterpret_cast<SetDefIndexFn>(kSetDefIndex)(gauge, *ptr<uint32_t>(source_gauge + 0x28));
+    if (!reinterpret_cast<InitFromDefFn>(kInitFromDef)(gauge, def, resource, sys)) {
+        destroy(gauge);
+        return 0;
+    }
+    const uint32_t shape = reinterpret_cast<AllocFn>(kAlloc)(0x1C, 4, heap);
+    if (!shape) {
+        destroy(gauge);
+        return 0;
+    }
+    reinterpret_cast<ShapeCtorFn>(kShapeCtor)(shape, data, resource, sys, gauge);
+    const uint32_t obj = reinterpret_cast<DlgObjNewFn>(kDlgObjNew)(0, 0);
+    if (!obj) {
+        destroy(shape);  // its destructor frees the gauge
+        return 0;
+    }
+    *ptr<uint32_t>(obj + 0x1C) = record;
+    *ptr<uint32_t>(obj + 0x10) = dialog;
+    *ptr<uint32_t>(obj + 0x14) = shape;
+    *ptr<uint32_t>(obj + 0x18) = *ptr<uint32_t>(source + 0x18);
+    reinterpret_cast<SetPieceFn>(kSetPiece)(gauge, obj);
+    reinterpret_cast<SetPropFn>(*ptr<uint32_t>(kGaugeVtable + 0x58))(gauge, 0x3EC, slot, 2);
+    return obj;
+}
+
+bool make_gauges(uint32_t dialog, int want, int* made_out) {
+    *made_out = 0;
+    uint32_t arr = 0, count = 0, room = 0, buffer = 0, sys = 0;
+    if (!read32(dialog + 0xC, &arr) || !read32(dialog + 0x10, &count) || !read32(dialog + 0x14, &room) ||
+        !read32(dialog + 0x18, &buffer) || !read32(dialog + 0xD4, &sys) || !sys || !arr || arr != buffer ||
+        count > 4096 || room < count) {
+        return false;
+    }
+    std::vector<uint32_t> pieces(count);
+    uint32_t source = 0, source_gauge = 0;
+    int gauges = 0, top = -1;
+    for (uint32_t i = 0; i < count; ++i) {
+        read32(arr + i * 4, &pieces[i]);
+        const uint32_t g = gauge_of_piece(pieces[i]);
+        if (!g) continue;
+        ++gauges;
+        uint32_t slot = 0;
+        if (read32(g + 0xF4, &slot) && static_cast<int>(slot) > top) {
+            top = static_cast<int>(slot);
+            source = pieces[i];
+            source_gauge = g;
+        }
+    }
+    if (!source || gauges >= want) {
+        g_gauges = gauges;
+        return source != 0;
+    }
+    const DialogResource& known = g_dialog_resources[(dialog >> 4) % kDialogResources];
+    const uint32_t resource = known.dialog == dialog ? known.resource : 0;
+    if (!resource) {
+        LOG_INFO("[coop] Floating health bars: the HUD's dialog %08X has no menu resource known", dialog);
+        return false;
+    }
+    // The vector's memory, grown by the game's own allocation (which frees the old one).
+    const int32_t grown = static_cast<int32_t>(count) + (want - gauges);
+    if (static_cast<int32_t>(room) < grown) {
+        static const wchar_t kName[] = L"TTymeMemory[%d]";
+        if (!reinterpret_cast<TymeAllocFn>(kTymeAlloc)(dialog + 0x18, grown, kName, grown)) {
+            LOG_ERROR("[coop] Floating health bars: the HUD's dialog could not grow (%d bars)", gauges);
+            *ptr<uint32_t>(dialog + 0xC) = 0;
+            *ptr<uint32_t>(dialog + 0x10) = 0;
+            *ptr<uint32_t>(dialog + 0x14) = 0;
+            return false;
+        }
+        const uint32_t fresh = *ptr<uint32_t>(dialog + 0x18);
+        for (uint32_t i = 0; i < count; ++i) *ptr<uint32_t>(fresh + i * 4) = pieces[i];
+        *ptr<uint32_t>(dialog + 0xC) = fresh;
+        *ptr<uint32_t>(dialog + 0x14) = static_cast<uint32_t>(grown);
+        arr = fresh;
+    }
+    if (dialog != g_made_dialog || gauges <= kGameBars) {
+        g_made_dialog = dialog;  // a new HUD (perhaps where the last one was)
+        g_made_count = 0;
+    }
+    for (int slot = gauges; slot < want; ++slot) {
+        const uint32_t obj = make_bar(dialog, source, source_gauge, resource, sys, slot);
+        if (!obj) {
+            LOG_ERROR("[coop] Floating health bars: the menu did not make bar %d", slot);
+            g_gauges = gauges + *made_out;
+            return false;
+        }
+        *ptr<uint32_t>(arr + count * 4) = obj;
+        ++count;
+        *ptr<uint32_t>(dialog + 0x10) = count;
+        ++*made_out;
+        if (slot >= kGameBars && slot - kGameBars < kMaxBars) {
+            g_made_pieces[slot - kGameBars] = obj;
+            if (slot - kGameBars + 1 > g_made_count) g_made_count = slot - kGameBars + 1;
+        }
+    }
+    g_gauges = gauges + *made_out;
+    return true;
+}
+
+// The gauges the HUD should have: one for every other member of a full session and its NPC phantoms (three, the
+// game's limit), and the test's extra ones.
+int gauges_wanted() {
+    const int want = g_max - 1 + 3 + g_want_extra;
+    return want < kGameBars ? kGameBars : want > kMaxBars ? kMaxBars : want;
+}
+
+// Every frame: our pieces draw only while their bar is in use (bit 1 of the piece's flags, tested by its draw 0x788D80).
+void gauges_draw_tick() {
+    if (!g_made_count || vtable_of(g_made_dialog) != kDialogVtable) return;
+    uint32_t arr = 0, count = 0;
+    if (!read32(g_made_dialog + 0xC, &arr) || !read32(g_made_dialog + 0x10, &count) || !arr) return;
+    for (int i = 0; i < g_made_count; ++i) {
+        const uint32_t obj = g_made_pieces[i];
+        const uint32_t at = static_cast<uint32_t>(count) - static_cast<uint32_t>(g_made_count) + i;
+        uint32_t listed = 0;
+        if (!obj || at >= count || !read32(arr + at * 4, &listed) || listed != obj) continue;
+        uint8_t* flags = ptr<uint8_t>(obj + 0x18);
+        const bool use = kGameBars + i < g_bar_count;
+        *flags = use ? (*flags | 2) : (*flags & ~2);
+    }
+}
+
+void gauges_tick() {
+    if (!g_records_moved) return;
+    gauges_draw_tick();
+    if (game::loading()) {
+        g_failed_dialog = 0;
+        return;
+    }
+    const uint32_t g = g_seen_gauge;
+    if (!g) return;
+    const double t = GetTickCount64() / 1000.0;
+    if (t - g_gauges_checked < 0.5) return;
+    g_gauges_checked = t;
+    uint32_t obj = 0, dialog = 0;
+    if (vtable_of(g) != kGaugeVtable || !read32(g + 0x34, &obj) || vtable_of(obj) != kDlgObjVtable ||
+        !read32(obj + 0x10, &dialog) || vtable_of(dialog) != kDialogVtable) {
+        return;
+    }
+    if (dialog == g_failed_dialog) return;
+    const int want = gauges_wanted();
+    int made = 0;
+    bool ok = false;
+    LARGE_INTEGER t0, t1, f;
+    QueryPerformanceCounter(&t0);
+    __try {
+        ok = make_gauges(dialog, want, &made);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&f);
+    if (made > 0 || !ok) {
+        if (++g_grow_lines <= 40) {
+            LOG_INFO("[coop] Floating health bars: %d made in the HUD in %.1f ms (%d now, %d wanted)%s", made,
+                     static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart),
+                     g_gauges, want, ok ? "" : "; stopped: this HUD keeps the bars it has");
+        }
+    }
+    // A HUD that failed is left as it is (a fault partway could leave half a piece behind each try).
+    if (!ok) g_failed_dialog = dialog;
+}
+
+bool install_gauges() {
+    const uint8_t old[4] = {0x90, 0x8C, 0xFA, 0x00};  // 0xFA8C90
+    const uint8_t attach_old[4] = {0x10, 0x8D, 0x78, 0x00};  // 0x788D10
+    if (!bytes_match(kGaugeUpdateSlot, old, 4) || !bytes_match(kAttachSlot, attach_old, 4)) return false;
+    const uint32_t attach = reinterpret_cast<uint32_t>(&hk_attach);
+    const uint32_t hook = reinterpret_cast<uint32_t>(&hk_gauge_update);
+    return patch(kAttachSlot, attach_old, &attach, 4) && patch(kGaugeUpdateSlot, old, &hook, 4);
 }
 
 const uint8_t kC5AF40[6] = {0x8B, 0x0D, 0x00, 0x87, 0x37, 0x01};  // mov ecx, [01378700h]
@@ -607,12 +1050,13 @@ int install_all() {
         if (read32(kNetHeapMade, &made) && made) {
             LOG_ERROR("[coop] More players: the network heap was made before us (it stays 4 MB)");
         } else {
+            const uint32_t heap = net_heap_size(g_max);
             uint8_t code[5] = {0x68};
-            std::memcpy(code + 1, &kNetHeap, 4);
+            std::memcpy(code + 1, &heap, 4);
             int done = 0;
             for (uint32_t at : kNetHeapSites) done += patch(at, kNetHeapOld, code, sizeof(code)) ? 1 : 0;
             if (done == 3) {
-                g_net_heap = kNetHeap;
+                g_net_heap = heap;
             } else {
                 for (uint32_t at : kNetHeapSites) patch(at, code, kNetHeapOld, sizeof(kNetHeapOld));
                 one(false, "the network heap's size");
@@ -654,7 +1098,12 @@ bool install_early(int max_players) {
     }
     g_ok = true;
     g_bars = install_bars();
-    if (!g_bars) LOG_ERROR("[coop] More players: the floating health bars do not match this build (four at most)");
+    if (!g_bars) {
+        LOG_ERROR("[coop] More players: the floating health bars do not match this build (four at most)");
+    } else if (move_records() && !install_gauges()) {
+        LOG_ERROR("[coop] More players: the floating health bar's update does not match this build (seven bars)");
+        g_bar_limit = kGameBars;
+    }
     return true;
 }
 
@@ -663,6 +1112,29 @@ int max_players() { return g_max; }
 bool bars_fed() { return g_bars; }
 
 uint32_t bar_chr(int slot) { return g_bars && slot >= 0 && slot < g_bar_count ? g_bar_chrs[slot] : 0; }
+
+uint32_t bar_record(int slot) {
+    if (slot < 0 || slot >= (g_records_moved ? kMaxBars : kGameBars)) return 0;
+    if (g_records_moved) return reinterpret_cast<uint32_t>(&g_records[slot]);
+    uint32_t mm = 0;
+    return read32(0x013786D0, &mm) && mm ? mm + 0x8F4 + slot * 0x20 : 0;  // MenuMan's own
+}
+
+int bar_slot(uint32_t rec) {
+    const uint32_t first = bar_record(0);
+    const int n = g_records_moved ? kMaxBars : kGameBars;
+    if (!first || rec < first || rec >= first + n * 0x20 || (rec - first) % 0x20 != 0) return -1;
+    return static_cast<int>((rec - first) / 0x20);
+}
+
+int gauges() { return g_records_moved ? g_gauges : kGameBars; }
+
+void show_all_bars(bool on) { g_all_bars = on ? 1 : 0; }
+
+void want_bars(int extra) {
+    g_want_extra = extra < 0 ? 0 : extra;
+    g_all_bars = extra > 0 ? 1 : 0;
+}
 
 void tick() {
     if (g_ok && game::session_state() != 0) {
@@ -679,6 +1151,7 @@ void tick() {
     } else {
         g_net_free_at = 0;
     }
+    gauges_tick();
     if (!g_ok || g_zeroed) return;
     // The state bytes past the game's three are not cleared by its constructor (it clears three).
     uint32_t gdm = 0, states = 0;
@@ -692,8 +1165,10 @@ void log_status() {
     LOG_INFO("[coop] More players: up to %d in a session (the game's records, slots and character set widened, its "
              "network sessions made for %u, its network heap %u MB; the floating health bars %s; %s)", g_max,
              g_people, g_net_heap >> 20,
-             g_bars ? "show every other player, seven at most" : "stay with the party's four",
-             partylist::widened() ? "the party list holds eight" : "players past the party's four have no party entry");
+             !g_bars            ? "stay with the party's four"
+             : g_records_moved  ? "show every other player and NPC phantom, more made in the HUD as needed"
+                                : "show every other player, seven at most",
+             partylist::widened() ? "the party list holds 72" : "players past the party's four have no party entry");
 }
 
 }  // namespace coop::players

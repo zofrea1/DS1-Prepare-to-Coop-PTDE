@@ -12,7 +12,7 @@
 namespace coop::session {
 
 // The most players a session can hold (MaxPlayers): the game's own is 4 (players.cpp makes room for more).
-constexpr int kMaxSessionPlayers = 8;
+constexpr int kMaxSessionPlayers = 64;
 
 struct Config {
     std::string password;

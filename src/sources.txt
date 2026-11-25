@@ -35,3 +35,4 @@ src\coop\jolly.cpp
 src\coop\netsafe.cpp
 src\coop\visible.cpp
 src\coop\farenemies.cpp
+src\coop\stress.cpp

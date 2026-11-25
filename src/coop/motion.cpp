@@ -47,13 +47,14 @@ constexpr uint32_t kRunSite = 0x00E1E913;     // movss xmm2, dword ptr [0115F588
 constexpr uint32_t kNetworkManipulatorVtable = 0x0118DDEC;
 
 struct GaitEntry {
-    uint32_t manipulator;
-    int32_t gait;  // -1 none
+    uint32_t manipulator = 0;
+    int32_t gait = -1;  // -1 none
 };
-// One for each other player (players::kMaxPlayers - 1); gait_stub's loop counts to the same.
+static_assert(sizeof(GaitEntry) == 8, "gait_stub steps 8 bytes");
+// One for each other player (players::kMaxPlayers - 1); gait_stub's loop counts to the same (g_gait_entries).
 constexpr int kGaitEntries = players::kMaxPlayers - 1;
-static_assert(kGaitEntries == 7, "gait_stub compares with 7");
-GaitEntry g_gaits[kGaitEntries] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}};
+GaitEntry g_gaits[kGaitEntries];
+int32_t g_gait_entries = kGaitEntries;
 // The walk's stick (2026-11-21). For a walk the move hands the copy a stick of 0.5 (0xE1E99E, the class 1 case of the
 // jump table at 0xE1EDAC; run and sprint 1.0). A character's walk is not one speed: past the stick's dead zone the
 // smallest tilts walk slower (measured at the Undead Burg bridge with a pad: 1.09 m/s at |stick| 0.004, 1.27 at 0.025,
@@ -64,7 +65,11 @@ GaitEntry g_gaits[kGaitEntries] = {{0, -1}, {0, -1}, {0, -1}, {0, -1}, {0, -1}, 
 // +0x10, its length), and the copy's walk gets that same tilt, so its walk is as fast as the sender's own; unknown
 // (an older version) keeps the 0.5.
 constexpr uint32_t kWalkStickSite = 0x00E1E99E;  // movss xmm0, dword ptr [0115FBA4h] (0.5)  (8 bytes)
-alignas(4) float g_walk_sticks[kGaitEntries] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+alignas(4) float g_walk_sticks[kGaitEntries];
+const bool g_walk_sticks_set = [] {
+    for (float& s : g_walk_sticks) s = 0.5f;
+    return true;
+}();
 alignas(4) float g_half = 0.5f;
 
 __declspec(naked) void walk_stick_stub() {
@@ -79,7 +84,7 @@ __declspec(naked) void walk_stick_stub() {
         jmp found
     skip:
         inc esi
-        cmp esi, 7
+        cmp esi, dword ptr [g_gait_entries]
         jb next_entry
     found:
         pop esi
@@ -114,7 +119,7 @@ __declspec(naked) void gait_stub() {
         jmp gait_done
     skip:
         inc esi
-        cmp esi, 7
+        cmp esi, dword ptr [g_gait_entries]
         jb next_entry
     gait_done:
         pop esi

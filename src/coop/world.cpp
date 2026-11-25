@@ -50,18 +50,22 @@ constexpr uint32_t kOwnPoiseSlot = 0x160;           // ChrIns vtable: own poise 
 // ---------------------------------------------------------------- our SpEffect rows
 // Remastered Seamless Co-op's rows and ids: enemy and boss scaling for 1..5 extra players, and the death debuff
 // for 1..5 Crimson Blossoms. SpEffectParam has the same 0x170-byte layout in both games. Sessions of more than six
-// (MaxPlayers, players.cpp) go on with ids of our own for 6 and 7 extra players.
+// (MaxPlayers, players.cpp) go on with ids of our own for 6 and 7 extra players, and since 2.7.0 (64 players) for 8
+// to 63 (kScaleEnemy3, kScaleBoss3).
 constexpr int kScaleEnemy = 2147418000;   // + (players - 1), 0..4
 constexpr int kScaleBoss = 2147418005;    // + (players - 1), 0..4
 constexpr int kScaleEnemy2 = 2147418010;  // + (players - 7), 0..1
 constexpr int kScaleBoss2 = 2147418012;   // + (players - 7), 0..1
+constexpr int kScaleEnemy3 = 2147418100;  // + (players - 9), 0..55
+constexpr int kScaleBoss3 = 2147418200;   // + (players - 9), 0..55
+constexpr int kLevels3 = 56;              // extra players 8 .. 63
 constexpr int kDebuff = 2147419000;       // + (blossoms - 1), 0..4
 // 1.5.0: no other co-op player in the world but Bloody Marys held (only their part of the health).
 constexpr int kScaleEnemy0 = 2147418014;
 constexpr int kScaleBoss0 = 2147418015;
 constexpr int kRow = 0x170;               // SP_EFFECT_PARAM_ST
-constexpr int kMaxLevel = 7;              // extra players
-constexpr int kRows = 21;
+constexpr int kMaxLevel = 63;             // extra players (players::kMaxPlayers - 1)
+constexpr int kRows = 21 + 2 * kLevels3;  // 21..76 enemies at 8..63 extra players, 77..132 bosses
 constexpr int kMaxBloody = 5;
 
 Config g_cfg;
@@ -77,7 +81,16 @@ int row_index(int id) {
     if (id >= kScaleEnemy2 && id < kScaleEnemy2 + 4) return 15 + (id - kScaleEnemy2);
     if (id == kScaleEnemy0) return 19;
     if (id == kScaleBoss0) return 20;
+    if (id >= kScaleEnemy3 && id < kScaleEnemy3 + kLevels3) return 21 + (id - kScaleEnemy3);
+    if (id >= kScaleBoss3 && id < kScaleBoss3 + kLevels3) return 21 + kLevels3 + (id - kScaleBoss3);
     return -1;
+}
+
+// The scaling effect for `level` extra players (1..kMaxLevel).
+int scale_id(int level, bool boss) {
+    if (level <= 5) return (boss ? kScaleBoss : kScaleEnemy) + level - 1;
+    if (level <= 7) return (boss ? kScaleBoss2 : kScaleEnemy2) + level - 6;
+    return (boss ? kScaleBoss3 : kScaleEnemy3) + level - 8;
 }
 
 // ---------------------------------------------------------------- the Bloody Mary (1.5.0)
@@ -271,6 +284,10 @@ void build_rows() {
         }
         scale_row(rows[19], 0, g_cfg.enemy_health, 0, 0, b, 3);
         scale_row(rows[20], 0, g_cfg.boss_health, 0, 0, b, 8);
+        for (int k = 0; k < kLevels3; ++k) {
+            scale_row(rows[21 + k], 8 + k, g_cfg.enemy_health, g_cfg.enemy_damage, g_cfg.enemy_posture, b, 3);
+            scale_row(rows[21 + kLevels3 + k], 8 + k, g_cfg.boss_health, g_cfg.boss_damage, g_cfg.boss_posture, b, 8);
+        }
     }
     g_rows_ready = true;
 }
@@ -299,11 +316,11 @@ int our_row(uint32_t row, int* count) {
 float posture_rate(uint32_t row) {
     const int i = our_row(row, nullptr);
     if (i < 0) return 0;
-    // The enemy rows 0..4 (levels 1..5) and 15..16 (6..7), the boss rows 5..9 and 17..18; 10..14 are the debuff's,
-    // 19..20 the Bloody Marys' alone (no extra player: no posture).
-    if ((i >= 10 && i < 15) || i >= 19) return 0;
-    const bool boss = (i >= 5 && i < 10) || i >= 17;
-    const int level = i < 10 ? i % 5 + 1 : 6 + (i - 15) % 2;
+    // The enemy rows 0..4 (levels 1..5), 15..16 (6..7) and 21..76 (8..63), the boss rows 5..9, 17..18 and 77..132;
+    // 10..14 are the debuff's, 19..20 the Bloody Marys' alone (no extra player: no posture).
+    if ((i >= 10 && i < 15) || i == 19 || i == 20) return 0;
+    const bool boss = (i >= 5 && i < 10) || (i >= 17 && i < 19) || i >= 21 + kLevels3;
+    const int level = i < 10 ? i % 5 + 1 : i < 19 ? 6 + (i - 15) % 2 : 8 + (i - 21) % kLevels3;
     const int percent = boss ? g_cfg.boss_posture : g_cfg.enemy_posture;
     const float rate = level * (percent / 100.0f);
     return rate < -1.0f ? -1.0f : rate;
@@ -1685,9 +1702,10 @@ int scaled_max(int base, int id) {
 // the default EnemyHealthScaling), and with VicinityScaling an enemy one player runs alone has them. Left out, an
 // enemy that player walked away from kept that max in their game when a teammate came to it (Grok review 064550aa).
 bool other_level_max(int base, int m, int except) {
-    static const int kFirst[6] = {kScaleEnemy, kScaleBoss, kScaleEnemy2, kScaleBoss2, kScaleEnemy0, kScaleBoss0};
-    static const int kCount[6] = {5, 5, 2, 2, 1, 1};
-    for (int k = 0; k < 6; ++k) {
+    static const int kFirst[8] = {kScaleEnemy, kScaleBoss,   kScaleEnemy2, kScaleBoss2,
+                                  kScaleEnemy0, kScaleBoss0, kScaleEnemy3, kScaleBoss3};
+    static const int kCount[8] = {5, 5, 2, 2, 1, 1, kLevels3, kLevels3};
+    for (int k = 0; k < 8; ++k) {
         for (int n = 0; n < kCount[k]; ++n) {
             const int id = kFirst[k] + n;
             if (id != except && std::abs(scaled_max(base, id) - m) <= 1) return true;
@@ -1902,9 +1920,7 @@ void scale_tick() {
         // with no other co-op player for it, the rows of no extra player (health x1 until a Bloody Mary comes): a Mary
         // then only points the enemy at another count's row, as with more players.
         const int lv = enemy_level(chr);
-        const int want = !lv      ? (g_active ? (boss ? kScaleBoss0 : kScaleEnemy0) : 0)
-                         : lv <= 5 ? (boss ? kScaleBoss : kScaleEnemy) + lv - 1
-                                   : (boss ? kScaleBoss2 : kScaleEnemy2) + lv - 6;
+        const int want = !lv ? (g_active ? (boss ? kScaleBoss0 : kScaleEnemy0) : 0) : scale_id(lv, boss);
         if (!down) ++levels[lv];
         auto it = g_scaled.find(chr);
         const int have = it == g_scaled.end() ? 0 : it->second;

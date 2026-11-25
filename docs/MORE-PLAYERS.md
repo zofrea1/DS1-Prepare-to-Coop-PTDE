@@ -4,6 +4,11 @@ Status in 1.4.0: **on by default** (`MaxPlayers = 8`). Stages 1 and 2 are built 
 code, ran with five players on 2026-10-31 (below: what that test found), and with eight on 2026-11-02. `MaxPlayers = 4`
 keeps the game's own number.
 
+Status in 2.7.0: **up to 64** (`MaxPlayers` 2 to 64, default still 8). Everything below that held eight holds 64 with
+the same patches; the party list, the floating health bars, the game's network heap, the menus' draw buffers and the
+enemy scaling needed more (see [64 players](#64-players-270)). Tested in the game with NPC phantoms standing in for up
+to 61 other players; not yet with more than eight real players.
+
 ## Is eight harder than six?
 
 No. The hard part is going past four at all; the number above it is a constant. PTDE has no limit tied to a player
@@ -96,6 +101,80 @@ members").
 
 - **A "recently met" list at `SessMan+0x1B4`** (three names, its own bound) and the values `0xD280E0` writes into it
   per slot (`cmp eax, 2` kept): players past the fourth are not added. Harmless.
+
+## 64 players (2.7.0)
+
+**Is 64 the limit?** No: none of the game's limits that were found is tied to 64. Steam allows lobbies of up to 250
+members (both the game's own session lobby, made with the session's member limit, and ours). What 64 bounds is the
+widening itself: the party list's bounds are 8-bit immediates (up to 127 entries) and the bars' slot bounds too, and
+64 is what was asked for and tested. The real cost of a large session is upload (every game sends to every other: 63
+other players at 30 updates a second is about 125 KB a second each way, double at 60) and the work of drawing and
+updating every other player's character.
+
+What changed for more than eight:
+
+- **The game's player structures** (players.cpp): the same patches as for eight, with 64 in them (the remote player
+  records' block 63 x 0x4C0, 63 state bytes, the inline slot bytes in an array of 64, the character set 64 x 0x20, the
+  slot bounds 62 / 63). All are 8-bit bounds or 32-bit sizes.
+- **The network library's sessions** are made for `MaxPlayers + 1` people (65), as for eight. Its member pool is made
+  up front: 65 places take about 64 KB each of the network heap.
+- **The network heap** (made once at start-up) is 16 MB up to eight players and 1 MB more for each player above eight:
+  72 MB at 64. Measured: a session of one with `MaxPlayers = 64` uses 6.4 MB of it (67,219 KB free of 73,728); each
+  player in a session took about 0.2 MB more in the eight-player tests, so a full session of 64 should use about 20 MB.
+- **The party list** (partylist.cpp) has 72 entries: 64 players and eight more for NPC phantoms. Its bounds are now
+  computed from `kWide` (the table holds the eight-entry values; each bound is the game's plus `kWide - 4`) and the
+  block is 0x24 + 0x18 + 72 x 0x14 bytes. The NPC summons' own list stays three (the game's phantom limit).
+- **The floating health bars** (players.cpp): the HUD's seven bars are seven dialogs of class
+  FrpgMenuDlgFloatingPCGauge, one menu-file definition ("F21-00") seven times in a plain dialog inside the HUD, each
+  drawing the record of its slot (MenuMan+0x8F4 + 0x20 x slot, slot < 7 in the gauge's update and placing, a null read
+  past seven). The records move into an array of 71 of ours (every read of MenuMan that feeds a record's address takes
+  the array's instead: the update, the placing, the filler's four, a getter and a setter; the bounds 6 become 70), and
+  more bars are made in the HUD's dialog the way the menu loader makes a nested dialog of a class: the gauge from its
+  class's constructor, its init from the same definition, a nested-dialog shape around it and a piece holding it, at
+  the end of the dialog's piece list (grown by the game's own allocation), its slot set. The HUD frees them with its
+  own; each load's new HUD is grown again (59 bars made in 0.1 ms at the load). As many are made as a full session needs
+  (`MaxPlayers - 1` and three NPC phantoms: 10 at eight players, 66 at 64); a bar not in use is not drawn. The
+  filler's line-of-sight test (one bar a frame, going round seven) goes round the bars in use: with many players a
+  bar hidden behind a wall can take longer to go (61 bars: 0.2 s at 285 FPS, 2 s at 30 FPS).
+- **The menus' draw buffers**: the menus record their drawing into one of three command buffers a frame, made at
+  start-up with 256 KB each and written without a room check (a full one hands out a null place). 66 bars overran
+  them in the first try; they are 1 MB each now (3 MB in all, from the menus' heap).
+- **Enemy scaling** (world.cpp): rows of our own for 8 to 63 extra players (SpEffect ids 2147418100 + n for enemies,
+  2147418200 + n for bosses), the same formula as before (1 + extra players x `EnemyHealthScaling`, and so on), so
+  with the default 25% an enemy has x16.75 health with 64 players.
+- **The co-op's own lists** that were sized for eight: the gait table (63 entries), the party slots, the character
+  list, the nameplates, the settings page (`MaxPlayers` choices up to 64), the session limit.
+- **Kept at eight**: the group invasion messages hold eight Steam ids (their layout is the protocol's; an older game
+  reads the fields after them at the same place), so a group of more than eight invaders is held for eight.
+
+**Stress test** (2026-11-24, diagnostics builds only: remote commands `npcs N`, `perf S`, `bars 0|1`, stress.cpp).
+With no 64 games to join, the Undead Burg's own characters stand in: `npcs N` brings the N nearest to the player, makes
+each a white phantom with the game's own steps (chr type 1 and its team, as a summon sign does; the human NPCs that
+summons are can do it through the game's own call, the hollows need its steps applied directly), and adds each to the
+party list as an NPC member (0xEA2510, a live summon: the "Phantom summoned" notice). Each takes a party entry and a
+floating bar. With 61 phantoms the party held 62 members and 61 bars drew (records checked in memory), and the game
+ran on without fault, through loads and with the HUD grown again after each.
+
+Frame time at the Undead Burg's statue courtyard, 1280x720, uncapped, this PC (Ryzen 7 5800X3D), 10 s each:
+
+| Phantoms | Mean frame time | FPS |
+|---|---|---|
+| 0 | 3.51 ms | 285 |
+| 8 | 3.71 ms | 270 |
+| 15 | 3.91 ms | 256 |
+| 30 | 4.91 ms | 204 |
+| 47 | 5.74 ms | 174 |
+| 61 | 6.72 ms | 149 |
+
+About 0.05 ms a phantom: each is a whole character the game animates, runs AI for and draws. A real player's character
+runs no AI (the network moves it) but is a heavier model (armour, FaceGen), so expect the same order. Of that, the
+floating bars are 0.1 to 0.17 ms for 60 (bars on 6.79 / 6.91 ms, off 6.68 / 6.75 ms). The extra bars cost nothing while
+nobody uses them: with no phantoms, `MaxPlayers = 64` (66 bars) ran at 3.509 ms and `MaxPlayers = 8` (10 bars) at
+3.512 ms (`MaxPlayers = 4`, the game's seven, 3.474 ms).
+
+Not tested: more than eight real players (the network library, the host's hand-out of enemies to every game, every
+game's upload). Nothing found in the game's session or network code holds a count of members in a bit mask or a
+fixed array; the eight-player test is the evidence so far.
 
 ## The five-player test (2026-10-31)
 

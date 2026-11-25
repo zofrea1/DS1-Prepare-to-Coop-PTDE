@@ -19,6 +19,7 @@
 #include "session.h"
 #include "spectate.h"
 #include "steam.h"
+#include "stress.h"
 #include "itemshare.h"
 #include "summons.h"
 #include "talk.h"
@@ -353,6 +354,7 @@ void tick_body() {
     if (g_items) coop::knell::tick();
     coop::netrate::tick(coop::session::net_rate());
     coop::players::tick();
+    coop::stress::tick();
     coop::updates::tick();
     if (g_items) {
         coop::items::tick();
@@ -428,8 +430,10 @@ void menu_share(const char* v) {
     menu_apply();
 }
 
-const SettingsMenuChoice kMenuPlayers[] = {{"8", L"8"}, {"7", L"7"}, {"6", L"6"}, {"5", L"5"},
-                                           {"4", L"4 (the game's)"}, {"3", L"3"}, {"2", L"2"}};
+const SettingsMenuChoice kMenuPlayers[] = {{"8", L"8"},   {"12", L"12"}, {"16", L"16"}, {"24", L"24"},
+                                           {"32", L"32"}, {"48", L"48"}, {"64", L"64"}, {"7", L"7"},
+                                           {"6", L"6"},   {"5", L"5"},   {"4", L"4 (the game's)"},
+                                           {"3", L"3"},   {"2", L"2"}};
 const SettingsMenuChoice kMenuOnOff[] = {{"true", L"On"}, {"false", L"Off"}};
 const SettingsMenuChoice kMenuCooldown[] = {{"3", L"3 minutes"}, {"5", L"5 minutes"}, {"10", L"10 minutes"},
                                             {"0", L"Off"}, {"1", L"1 minute"}, {"2", L"2 minutes"}};
@@ -440,12 +444,14 @@ const SettingsMenuChoice kMenuRate[] = {{"60", L"60 a second"}, {"30", L"30 a se
                                         {"6", L"6 a second (the game's)"}};
 constexpr const wchar_t* kMenuNext = L"Applies at once, or when your current session ends";
 constexpr const wchar_t* kMenuHost = L"As host; applies at once, or when your current session ends";
+constexpr const wchar_t* kMenuPlayersWhen =
+    L"As host; at once up to the number the game started with, more after a restart";
 
 const SettingsMenuRow kMenuRows[] = {
     {"Password", L"Password", L"Players with the same password find each other. Press A or Enter, type it, then Enter. "
      L"Avoid #.", nullptr, 0, menu_password, true, kMenuNext},
     {"MaxPlayers", L"Players in a session", L"How many players your world holds as host: you, your guests and invaders "
-     L"together.", kMenuPlayers, _countof(kMenuPlayers), menu_max_players, false, kMenuHost},
+     L"together.", kMenuPlayers, _countof(kMenuPlayers), menu_max_players, false, kMenuPlayersWhen},
     {"AllowInvaders", L"Invaders", L"Others may invade your session as evil spirits.", kMenuOnOff, _countof(kMenuOnOff),
      menu_invaders, false, kMenuHost},
     {"InvasionCooldown", L"Invasion cooldown", L"After an invasion of your world, no other invader can come in for "

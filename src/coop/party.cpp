@@ -216,8 +216,11 @@ std::vector<Node> slot_nodes() {
 
 // Per player slot: the other players, players::kMaxPlayers - 1 of them (remote_slots() in use).
 constexpr int kSlots = players::kMaxPlayers - 1;
-static_assert(kSlots == 7, "g_queued_at's initializer");
-double g_queued_at[kSlots] = {-100, -100, -100, -100, -100, -100, -100};
+double g_queued_at[kSlots];
+const bool g_queued_at_set = [] {
+    for (double& t : g_queued_at) t = -100;
+    return true;
+}();
 int g_deferred[kSlots] = {};  // a missing character waits: 1 for its player to be in the world, 2 to be up (logged once)
 bool g_was_loading = true;
 double g_loaded_at = 0;

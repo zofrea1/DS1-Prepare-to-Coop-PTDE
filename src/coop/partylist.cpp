@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 //
-// The party list, eight members wide.
+// The party list, kWide (72) members wide.
 //
 // PartyMemberInfo ([GameMan+0xBEC], made once with GameMan: 0xEBB55B allocates 0x8C bytes, 0xEA24A0 builds it) is
 // a vtable (+0), five counts (+4 white, +8 black, +0xC intruder, +0x10 members, +0x14 members of the session plus
@@ -11,11 +11,13 @@
 // Its add (0xEA2510) refuses a fifth member: with four players and an NPC, or more players, the last had no entry,
 // and an NPC summoned into a full list had none of the game's summon handling (2026-10-31).
 //
-// Eight entries need +0x18 .. +0xB7, where the fields after the four lie. Those fields move before the list
+// More entries need room from +0x68 on, where the fields after the four lie. Those fields move before the list
 // instead: the block is 0x24 bytes longer at the front, the list's pointer is 0x24 into it, and every access to
 // one of them (+0x68 .. +0x88) becomes -0x24 .. -0x04, the same instruction with only its displacement changed (an
 // 8-bit one stays 8-bit). The entries themselves are reached by index or by a pointer stepped 0x14 at a time, so
-// they only need their bounds: each loop's 4 becomes 8. Found by a sweep of the party's code (0xEA1600 ..
+// they only need their bounds: each loop's 4 becomes kWide (3 kWide - 1, 2 kWide - 2; every bound is an 8-bit
+// immediate or larger, so up to 127 entries fit the same instructions). Eight in 1.4.0, 72 since the 64 players of
+// 2.7.0: a full session's 64 players and eight more for NPC phantoms. Found by a sweep of the party's code (0xEA1600 ..
 // 0xEA3400: every displacement 0x68 .. 0x8B on the list, every bound 3/4, each checked by hand) and of the 76
 // reads of GameMan+0xBEC elsewhere (only the counts, entries bounded by +0x10, and +0x7C); the table below is
 // generated from that sweep and checked against the game's bytes. The game's three loot tests of +0x7C are the
@@ -39,6 +41,9 @@ constexpr int kVanilla = 4;
 constexpr uint32_t kFieldsBefore = 0x24;  // the fields' bytes moved before the list (0x68 .. 0x8B; 24h below)
 constexpr uint32_t kShift = 0x8C;         // a field at +o is at +o - 0x8C
 bool g_widened = false;
+static_assert(kWide <= 127, "the party's bounds are 8-bit immediates");
+int32_t g_wide = kWide;       // read by the asm below
+int32_t g_npc_test = 0;       // set_npc_test: NPC adds past the three NPC handles
 
 struct Site {
     uint32_t at;
@@ -156,9 +161,10 @@ const Site kSites[] = {
 };
 // clang-format on
 
-// The allocation (GameMan's constructor): push heap ; push 4 ; push 0x8C (now 0xDC, a site above) ; call 0x5629C0
-// (cdecl: size, alignment, heap). The list's pointer is 0x24 into the block.
+// The allocation (GameMan's constructor): push heap ; push 4 ; push 0x8C (a site above: 0x24 + 0x18 + kWide * 0x14)
+// ; call 0x5629C0 (cdecl: size, alignment, heap). The list's pointer is 0x24 into the block.
 constexpr uint32_t kAllocSite = 0x00EBB669;
+constexpr uint32_t kAllocSizeSite = 0x00EBB55D;  // push 0x8C (in kSites)
 constexpr uint32_t kAlloc = 0x005629C0;
 uint32_t g_alloc_ret = 0;
 
@@ -244,7 +250,7 @@ void __cdecl blank_all(uint32_t p) {
 // members (at least 1) plus the NPC handles' count (+0x74) plus a scripted summon (0xEA18A0). That limit is the
 // players'; an NPC does not take a player's place. What an NPC needs is an entry and one of the three NPC handles
 // (0xEA1770 stores its handle right after this test, and stores nothing once the three are taken; the summon's add
-// at 0xDB3E2F ignores a refusal): an NPC's sign (+0x88 = its entity) is refused when the eight entries (+0x10) or
+// at 0xDB3E2F ignores a refusal): an NPC's sign (+0x88 = its entity) is refused when the kWide entries (+0x10) or
 // the three handles are full. A player's sign keeps the game's test. At 0xDB35B4: cmp eax, [ecx+0x8C] (eax = +0x14,
 // ecx = SessMan, ebp = the party list, esi = the sign); the jge at 0xDB35BA refuses.
 constexpr uint32_t kTouchGate = 0x00DB35B4;
@@ -254,7 +260,10 @@ __declspec(naked) void hk_touch_gate() {
     __asm {
         cmp dword ptr [esi + 0x88], 0
         jl player
-        cmp dword ptr [ebp + 10h], 8      // the entries in use (kWide)
+        push edx
+        mov edx, dword ptr [g_wide]
+        cmp dword ptr [ebp + 10h], edx    // the entries in use (kWide)
+        pop edx
         jge done
         cmp dword ptr [ebp - 18h], 3      // the NPC handles' count (+0x74, moved: field(0x74))
     done:
@@ -266,7 +275,7 @@ __declspec(naked) void hk_touch_gate() {
 }
 
 // The add (0xEA2510) refused a member once the party's +0x10 reached the session's member limit (0xEA252A: cmp
-// ecx, [edx+0x8C], then the jge that returns al = 0): now the eight entries, and for an NPC (its fourth argument 2)
+// ecx, [edx+0x8C], then the jge that returns al = 0): now the kWide entries, and for an NPC (its fourth argument 2)
 // also the three NPC handles, unless its handle is one of them already (the touch summon stores it before the
 // summon's add: a third NPC's own handle is the third). eax (al = 0) is kept; ecx (+0x10) and edx are overwritten
 // after; ebp is the add's frame (+0xC the handle, +0x14 the type), edi the party list.
@@ -275,9 +284,11 @@ const uint8_t kAddRoomOld[6] = {0x3B, 0x8A, 0x8C, 0x00, 0x00, 0x00};
 
 __declspec(naked) void hk_add_room() {
     __asm {
-        cmp ecx, 8                        // kWide
+        cmp ecx, dword ptr [g_wide]       // kWide
         jge done                          // full: refused
         cmp dword ptr [ebp + 14h], 2
+        jne room
+        cmp dword ptr [g_npc_test], 0     // the test's NPC phantoms (stress.cpp): no handle needed
         jne room
         cmp dword ptr [edi - 18h], 3      // the NPC handles' count (field(0x74))
         jl room
@@ -291,7 +302,7 @@ __declspec(naked) void hk_add_room() {
         cmp ecx, ecx                      // equal: the jge refuses
         ret
     room:
-        cmp ecx, 8                        // below eight here: the jge goes on
+        cmp ecx, dword ptr [g_wide]       // below kWide here: the jge goes on
     done:
         ret
     }
@@ -333,7 +344,23 @@ bool install() {
         LOG_ERROR("[coop] Party list: the allocation call does not match; it keeps the game's four members");
         return false;
     }
-    for (const Site& s : kSites) patch(s.at, s.old, s.now, s.n);
+    for (const Site& s : kSites) {
+        uint8_t now[10];
+        std::memcpy(now, s.now, s.n);
+        if (s.at == kAllocSizeSite) {
+            // push 0x8C -> the block: the fields moved before the list, its head and kWide entries.
+            const uint32_t size = kFieldsBefore + 0x18 + kWide * 0x14;
+            std::memcpy(now + 1, &size, 4);
+        } else {
+            // A bound: the table holds the eight-entry value (old + 4); kWide's is old + kWide - 4.
+            for (int i = 0; i < s.n; ++i) {
+                if (s.old[i] != s.now[i] && s.old[i] >= 2 && s.old[i] <= 4 && s.now[i] == s.old[i] + 4) {
+                    now[i] = static_cast<uint8_t>(s.old[i] + (kWide - kVanilla));
+                }
+            }
+        }
+        patch(s.at, s.old, now, s.n);
+    }
     uint8_t code[6];
     code[0] = 0xE8;
     int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_free_lookup) - (kFreeLookupSite + 5));
@@ -363,6 +390,8 @@ bool install() {
 bool widened() { return g_widened; }
 
 int entries() { return g_widened ? kWide : kVanilla; }
+
+void set_npc_test(bool on) { g_npc_test = on ? 1 : 0; }
 
 int field(int vanilla_offset) {
     return g_widened && vanilla_offset >= 0x68 && vanilla_offset < 0x8C ? vanilla_offset - static_cast<int>(kShift)

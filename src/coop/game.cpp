@@ -3,6 +3,7 @@
 #include "game.h"
 
 #include "hook.h"
+#include "players.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -193,7 +194,7 @@ std::vector<uint32_t> remote_player_chrs() {
     const uint32_t n = field<uint32_t>(wcm, 0x24, 0), arr = field<uint32_t>(wcm, 0x28, 0);
     if (!arr) return out;
     const uint32_t me = player();
-    for (uint32_t i = 1; i < n && i < 8; ++i) {
+    for (uint32_t i = 1; i < n && i < static_cast<uint32_t>(players::kMaxPlayers); ++i) {
         const uint32_t chr = field<uint32_t>(arr, i * 0x20, 0);
         if (chr && chr != me) out.push_back(chr);
     }

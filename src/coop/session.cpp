@@ -497,7 +497,8 @@ struct HelloMore {
     uint8_t spare[3];
 };
 // 1.6.0, group invasions.
-constexpr int kGroupMax = kMaxSessionPlayers;
+// The group messages' fixed room (their layout: older games read the fields after it at the same place).
+constexpr int kGroupMax = 8;
 struct GroupSearchMsg {
     Header h;
     uint8_t searching;  // 1 the search began, 0 it ended without a world
@@ -8762,14 +8763,14 @@ bool utf8_is(const wchar_t* shown, const std::string& utf8) {
     return n > 1 && wcscmp(shown, buf) == 0;
 }
 
-// The character of a floating bar's slot record (MenuMan+0x8F4 + 0x20 * slot, filled by 0x1012C30 from
-// PartyMemberInfo entry `slot`), or 0.
+// The character of a floating bar's slot record (MenuMan+0x8F4 + 0x20 * slot, or players.cpp's own array with more
+// bars; filled by 0x1012C30 from PartyMemberInfo entry `slot`, or from players::bar_list), or 0.
 uint32_t chr_of_bar(uint32_t rec) {
-    uint32_t mm = 0, gm = game::game_man(), party = 0, handle = 0xFFFFFFFF;
-    if (!read32(0x013786D0, &mm) || !mm || rec < mm + 0x8F4) return 0;  // MenuMan
-    const uint32_t slot = (rec - (mm + 0x8F4)) / 0x20;
+    uint32_t gm = game::game_man(), party = 0, handle = 0xFFFFFFFF;
+    const int slot = players::bar_slot(rec);
+    if (slot < 0) return 0;
     // With more players the bars are fed from every other player's character (players.cpp), not party entry `slot`.
-    if (players::bars_fed()) return slot < 7 ? players::bar_chr(static_cast<int>(slot)) : 0;
+    if (players::bars_fed()) return players::bar_chr(slot);
     if (slot > 3 || !gm || !read32(gm + game::kGmParty, &party) || party < 0x10000 ||
         !read32(party + 0x18 + slot * 0x14, &handle)) {
         return 0;
@@ -8830,15 +8831,14 @@ const wchar_t* plate_text(const PeerInfo& p, int mine, uint32_t chr) {
 // its slot (`rec`, the caller's ebp): the slot's character, matched to its player as the world rules match them.
 const wchar_t* __stdcall nameplate_for(const wchar_t* shown, uint32_t rec) {
     if (g_role == Role::None) return nullptr;
-    // Which of the HUD's seven bars draw (for sessions of more than four: players.cpp feeds all seven).
-    static uint32_t drawn = 0;
-    uint32_t mm = 0;
-    if (read32(0x013786D0, &mm) && mm && rec >= mm + 0x8F4 && rec < mm + 0x8F4 + 7 * 0x20) {
-        const uint32_t bit = 1u << ((rec - (mm + 0x8F4)) / 0x20);
-        if (!(drawn & bit)) {
-            drawn |= bit;
-            LOG_INFO("[coop] Floating health bar %u draws (bars seen so far: %02X)", (rec - (mm + 0x8F4)) / 0x20, drawn);
-        }
+    // Which of the HUD's bars draw (for sessions of more than four: players.cpp feeds them all), each the first time.
+    static bool drawn[players::kMaxBars] = {};
+    static int drawn_count = 0;
+    const int bar = players::bar_slot(rec);
+    if (bar >= 0 && bar < players::kMaxBars && !drawn[bar]) {
+        drawn[bar] = true;
+        ++drawn_count;
+        LOG_INFO("[coop] Floating health bar %d draws (%d bars seen so far)", bar, drawn_count);
     }
     wchar_t name[24] = {};
     const bool named = read_shown_name(shown, name, 24) && wcslen(name) <= 16;

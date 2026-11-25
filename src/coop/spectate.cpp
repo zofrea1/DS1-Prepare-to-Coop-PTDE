@@ -9,6 +9,7 @@
 #include "remote.h"
 #include "motion.h"
 #include "rules.h"
+#include "stress.h"
 #include "text.h"
 #include "visible.h"
 #include "world.h"
@@ -1643,6 +1644,7 @@ volatile LONG g_hold_req = 0;     // `kneelhold on|off`: 1 hold, 2 let go (our a
 volatile LONG g_hide_req = 0;     // `kneelhide on|off`: 1 our model given no group (not drawn), 2 back
 
 bool remote_ext(const char* line, char* reply, size_t size) {
+    if (stress::remote(line, reply, size)) return true;  // `npcs`, `perf`
     char cmd[32] = {};
     if (sscanf_s(line, "%31s", cmd, static_cast<unsigned>(sizeof(cmd))) != 1) return false;
     if (std::strcmp(cmd, "enemies") == 0) {

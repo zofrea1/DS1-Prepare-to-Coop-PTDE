@@ -1770,7 +1770,11 @@ bool clear_bonus_goes(const char* via) {
     if (pgd) read32(pgd + 0xF0, reinterpret_cast<uint32_t*>(&due));
     if (invader_here()) {
         if (pgd) *ptr<float>(pgd + 0xF0) = 0.0f;
-        LOG_INFO("[coop] A boss died in the world we invade: its %.0f souls are not ours (%s)", due, via);
+        // The game pays a zero clear bonus at every load as well (2026-11-25 Deck log: on arriving and on going home):
+        // only a real one has a line.
+        if (due >= 1.0f) {
+            LOG_INFO("[coop] A boss died in the world we invade: its %.0f souls are not ours (%s)", due, via);
+        }
         return false;
     }
     if (!g_state.active) return true;

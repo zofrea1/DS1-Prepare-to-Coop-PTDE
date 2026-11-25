@@ -39,7 +39,9 @@ constexpr DbType kTypes[] = {
     {"EventMeddle", 0x011D9658, 0x00FA10A0, true, "shared event"},
     {"ItemVagrant", 0x011D9A90, 0x00BD3720, true, "vagrant (lost items or humanity passed on)"},
     {"ResonanceMagic", 0x011D9C54, 0x00BD1EA0, true, "miracle resonance ring"},
-    {"SpiritualStatue", 0x011D94D0, 0x00BD7020, true, "basilisk curse statue"},
+    // Each item holds a player's Steam id (16 hex digits) and every linked game re-sends its list every 20 s (the
+    // 2026-11-25 logs): summed up, not a line each.
+    {"SpiritualStatue", 0x011D94D0, 0x00BD7020, false, "curse statue lists"},
     {"NitoInvitation", 0x011DC538, 0x00FA0210, true, "Gravelord Servant's invitation (black phantoms)"},
     {"Bonfire", 0x011D9178, 0x00BD8F90, true, "bonfire kindling"},
     {"ColiseumEntrant", 0x011DC710, 0x00BC7C90, true, "Oolacile arena entrant"},
@@ -99,12 +101,12 @@ void map_text(char* out, size_t n) {
 
 void note(int n, uint32_t from, uint32_t packet) {
     uint8_t kind = 0xFF;
-    uint32_t data = 0, w[4] = {};
+    uint32_t data = 0, w[8] = {};
     if (packet) {
         read8(packet + 4, &kind);
         read32(packet + 8, &data);
         if (data) {
-            for (int i = 0; i < 4; ++i) read32(data + 4 * i, &w[i]);
+            for (int i = 0; i < 8; ++i) read32(data + 4 * i, &w[i]);
         }
     }
     if (n == 0 && kind == 0) bells::received(static_cast<int>(w[0]));  // the Blighttown bell (bells.cpp)
@@ -121,6 +123,16 @@ void note(int n, uint32_t from, uint32_t packet) {
     if (n == 0 && kind == 0) {
         LOG_INFO("[net] Shared event %d arrived from a linked player: %s; we are %s", static_cast<int>(w[0]),
                  event_name(static_cast<int>(w[0])), where);
+        return;
+    }
+    if (n == 1 && kind == 2) {
+        // A vagrant (FrpgNetItemVagrantDb, kind 2: 0xBD3720 -> 0xBD36A0 -> 0xBD2CC0 adds it to our list): 0x20 bytes,
+        // a position and an angle, then three words and one that packs three 10-bit numbers.
+        float f[4];
+        std::memcpy(f, w, sizeof(f));
+        LOG_INFO("[net] Arrived: a vagrant (lost items or humanity passed on from another player's world) at (%.1f, "
+                 "%.1f, %.1f) facing %.2f; its other words %08X %08X %08X, packed %u/%u/%u; we are %s", f[0], f[1], f[2],
+                 f[3], w[4], w[5], w[6], (w[7] >> 20) & 0x3FF, (w[7] >> 10) & 0x3FF, w[7] & 0x3FF, where);
         return;
     }
     LOG_INFO("[net] %s %s: a %s packet (kind %u, from %08X, data %08X %08X %08X %08X); we are %s",

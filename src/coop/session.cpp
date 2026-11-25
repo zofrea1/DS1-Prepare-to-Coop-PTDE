@@ -91,7 +91,9 @@ constexpr double kLevelUnknown = 2.5;
 constexpr double kLevelFade = 10.0;
 // Steam's room in our lobby: more than the game's four players, so that lobby members who never join (players of
 // other games that use Spacewar, or knocks that fail) cannot fill it. The game's own limit is kept by host_answer.
+// Above eight players the room is MaxPlayers and as many again as eight leaves spare (kLobbySpare), up to Steam's 250.
 constexpr int kLobbyRoom = 16;
+constexpr int kLobbySpare = 8;
 
 enum MsgType : uint8_t {
     kHello = 1,        // guest/invader -> host: please let me in
@@ -1972,7 +1974,8 @@ void publish_world_levels();
 
 void host_open_lobby() {
     set_step(Step::HostLobby);
-    steam::create_lobby(std::max(kLobbyRoom, g_cfg.max_players), [](bool ok, uint64_t lobby) {
+    const int room = std::min(250, std::max(kLobbyRoom, g_cfg.max_players + kLobbySpare));
+    steam::create_lobby(room, [](bool ok, uint64_t lobby) {
         if (!ok) {
             finish(kMsgHostTimeout);
             return;

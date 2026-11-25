@@ -1242,13 +1242,17 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     // Since 2026-11-25 (the user's rule) all world progress witnessed in the session goes home: bosses, the named world
     // events and a map's world flags (world::goes_home_witnessed: not the endgame, the NPCs' questlines or event state).
     // An invader takes none of the invaded world's progress home but a boss's defeat, as before.
+    // An NPC's step another player's game made goes home when the NPC stood on the same step at home as in the host's
+    // world (npc_alignment 1, the user's choice 2026-11-25: as a step our own game makes); one that does not line up
+    // stays in the host's world, as before.
     if (g_applying_remote) {
         const bool boss = world::boss_defeat_flag(id);
-        if (!boss && (g_state.invader || !world::goes_home_witnessed(id))) return;
+        const bool npc_step = id >= 1000 && id <= 1999 && g_npc_aligned == 1;
+        if (!boss && (g_state.invader || !(world::goes_home_witnessed(id) || npc_step))) return;
     }
-    // An NPC's step that does not line up with their state at home (npc_alignment): not a Firekeeper's death or another
-    // named world event, which go home whatever the NPC's state there.
-    if (g_npc_aligned == 0 && !world::world_event_flag(id)) {
+    // An NPC's step that does not line up with their state at home (npc_alignment): not an NPC's death or another
+    // named world event, which go home whatever the NPC's state there (the death clears the NPC's other states).
+    if (g_npc_aligned == 0 && !world::world_event_flag(id) && !world::npc_death_flag(id, nullptr, nullptr)) {
         static int lines = 0;
         if (++lines <= 40) {
             LOG_INFO("[coop] Flag %d %s: an NPC's step in the host's world that does not line up with ours at home; "
@@ -1278,11 +1282,14 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     if (const char* name = world::world_event_name(id)) {
         LOG_INFO("[coop] World event in the host's world (flag %d %s%s): %s in our own world too", id,
                  (value & 0xFF) ? "on" : "off", g_applying_remote ? ", from another player's game" : "", name);
-    } else if (g_applying_remote && world::world_progress_flag(id)) {
+    } else if ((value & 0xFF) && world::npc_death_flag(id, nullptr, nullptr)) {
+        LOG_INFO("[coop] An NPC died in the host's world (flag %d%s): dead in our own world too, their other states "
+                 "cleared", id, g_applying_remote ? ", from another player's game" : "");
+    } else if (g_applying_remote && (world::world_progress_flag(id) || (id >= 1000 && id <= 1999))) {
         static int lines = 0;
         if (++lines <= 120) {
-            LOG_INFO("[coop] Witnessed in the host's world (flag %d %s, from another player's game): in our own world "
-                     "too", id, (value & 0xFF) ? "on" : "off");
+            LOG_INFO("[coop] Witnessed in the host's world (flag %d %s, from another player's game%s): in our own world "
+                     "too", id, (value & 0xFF) ? "on" : "off", id < 2000 ? ", an NPC's step on the same step at home" : "");
         }
     }
 }
@@ -1296,6 +1303,17 @@ void set_home_needs(uint32_t efm, int id) {
     for (int i = 0; i < n; ++i) {
         const world::WorldEventNeed& need = needs[i];
         if (game::flag(need.flag)) continue;
+        // An NPC's step as a need: never over that NPC's death at home (a dead Lautrec stays dead).
+        int dead_lo = 0, dead_hi = 0;
+        bool dead_here = false;
+        for (int f = need.clear_lo; need.clear_lo && f <= need.clear_hi && !dead_here; ++f) {
+            dead_here = world::npc_death_flag(f, &dead_lo, &dead_hi) && game::flag(f);
+        }
+        if (dead_here) {
+            LOG_INFO("[coop] Flag %d taken home would need %d there, but that NPC is dead in our own world: left as it is",
+                     id, need.flag);
+            continue;
+        }
         ++g_flag_quiet;
         for (int f = need.clear_lo; need.clear_lo && f <= need.clear_hi; ++f) {
             if (f != need.flag) call_set_flag(efm, f, 0);

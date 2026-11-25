@@ -42,6 +42,8 @@ bool world_event_flag(int id);
 const char* world_event_name(int id);
 // An NPC's death among them: the state range [lo, hi] cleared at home before the dead flag is set.
 bool world_event_clears(int id, int* lo, int* hi);
+// An NPC's dead flag (each map's death events); its state range (either may be null).
+bool npc_death_flag(int id, int* lo, int* hi);
 // What a world event needs in a world that takes it home (set there too); their count.
 struct WorldEventNeed {
     int flag;

@@ -1079,8 +1079,9 @@ bool boss_defeat_flag(int id) {
 //  * the Firelink Altar and the Kiln of the First Flame (m18_00, 1180xxxx): the Lordvessel placed, the Lord Souls, the
 //    Kiln's opening; they gate the endgame, and each player places their own (quick when they were there for it, a trek
 //    through what they missed when they were not)
-//  * the NPCs' questlines (flags 1000-1999 and the maps' NPC events, xxxx05xx): today's rules (npc_alignment), still
-//    to be decided, but for the Firekeepers' deaths and Gwynevere's (below)
+//  * the maps' NPC events (xxxx05xx); an NPC's own states (1000-1999) follow their own rules: a step goes home when the
+//    NPC stood on the same step at home as in the host's world (rules.cpp, npc_alignment), whoever's game made it, and
+//    an NPC's death always does (kNpcDeaths), with the NPC's other states cleared (the user's choice, 2026-11-25)
 //  * the maps' event-state flags (xxxx5xxx: a fight's phase, an event's own working flags): no progress.
 // A world event can bring what it stands on in that world (kWorldEventNeeds): only that, never the bosses on the way.
 struct WorldEvent {
@@ -1095,12 +1096,68 @@ constexpr WorldEvent kWorldEvents[] = {
     {11600100, "New Londo's water drained", 0, 0},
     {11510400, "Anor Londo darkened: Gwynevere is gone", 0, 0},
     {590, "the door between the Depths and Blighttown opened", 0, 0},  // a global flag (m10_00 event 11000110)
-    // The Firekeepers' deaths (each NPC's death event, xxxx0520 or Firelink's 11020530: her state range cleared, her
-    // dead flag set): her bonfire is unkindled at home too.
-    {1177, "Anastacia of Astora, Firelink Shrine's Firekeeper, is dead", 1170, 1180},
-    {1034, "the Darkmoon Knightess, Anor Londo's Firekeeper, is dead", 1030, 1036},
-    {1272, "the Daughter of Chaos, Quelaag's Domain's Firekeeper, is dead", 1270, 1279},
+    // The Firekeepers. Anastacia of Astora (Firelink's 6060, states 1140-1169) cannot be killed by a player (event
+    // 11020110's immortality); her death is Lautrec's murder (m10_02 event 11020555: both bells rung or Sen's gate open,
+    // Lautrec free and alive: 1140 -> 1141). The other two die by the NPC death events (kNpcDeaths).
+    {1141, "Anastacia of Astora, Firelink Shrine's Firekeeper, murdered by Lautrec", 1140, 1169},
+    {1034, "the Darkmoon Knightess, Anor Londo's Firekeeper, is dead", 0, 0},
+    {1272, "the Daughter of Chaos, Quelaag's Domain's Firekeeper, is dead", 0, 0},
 };
+
+// Every NPC's death as the game's own death events make it (each map's xxxx0520 and Firelink's 11020530, started with
+// the NPC's entity, its state range and its dead flag: IF HP 0 -> the range cleared, the dead flag set). The range is
+// the widest the game clears for that NPC in any map. Generated from the PTDE map scripts, 2026-11-25.
+struct NpcDeath {
+    int16_t dead, lo, hi;
+};
+constexpr NpcDeath kNpcDeaths[] = {
+    {1005, 1000, 1029},  // entities 6001, 6002, 6003
+    {1034, 1030, 1036},  // 6010 (the Darkmoon Knightess)
+    {1073, 1060, 1074},  // 6023
+    {1097, 1090, 1109},  // 6030, 6031, 6032, 6033
+    {1115, 1110, 1119},  // 6040, 6041, 6043
+    {1125, 1120, 1139},  // 6050, 6051
+    {1177, 1170, 1189},  // 6070, 6073
+    {1214, 1210, 1219},  // 6090, 6091
+    {1224, 1220, 1229},  // 6100, 6101
+    {1232, 1230, 1239},  // 1510600 (Gwynevere)
+    {1242, 1240, 1249},  // 1510650
+    {1254, 1250, 1259},  // 6130, 6131, 6132
+    {1272, 1270, 1279},  // 1400700 (the Daughter of Chaos)
+    {1284, 1280, 1289},  // 6160
+    {1295, 1290, 1309},  // 6170
+    {1315, 1310, 1319},  // 6180, 6181
+    {1322, 1320, 1339},  // 6190
+    {1342, 1340, 1343},  // 6200
+    {1362, 1360, 1363},  // 6210
+    {1382, 1380, 1399},  // 6220
+    {1402, 1400, 1409},  // 6230
+    {1412, 1410, 1413},  // 6240
+    {1422, 1420, 1429},  // 6250
+    {1462, 1460, 1489},  // 6270, 6271
+    {1513, 1490, 1539},  // 6280, 6282, 6283, 6287
+    {1548, 1540, 1569},  // 6290, 6291, 6292
+    {1575, 1570, 1599},  // 6300, 6301 (Lautrec)
+    {1604, 1600, 1619},  // 6310, 6311
+    {1628, 1620, 1629},  // 6322
+    {1702, 1700, 1709},  // 6370
+    {1764, 1760, 1769},  // 6420, 6421
+    {1823, 1820, 1839},  // 6720
+    {1842, 1840, 1859},  // 6730
+    {1864, 1860, 1869},  // 6740
+    {1872, 1870, 1889},  // 6750
+};
+
+bool npc_death_flag(int id, int* lo, int* hi) {
+    for (const auto& d : kNpcDeaths) {
+        if (d.dead == id) {
+            if (lo) *lo = d.lo;
+            if (hi) *hi = d.hi;
+            return true;
+        }
+    }
+    return false;
+}
 
 const WorldEvent* world_event(int id) {
     for (const auto& e : kWorldEvents) {
@@ -1118,10 +1175,12 @@ const char* world_event_name(int id) {
 
 bool world_event_clears(int id, int* lo, int* hi) {
     const WorldEvent* e = world_event(id);
-    if (!e || !e->clear_lo) return false;
-    *lo = e->clear_lo;
-    *hi = e->clear_hi;
-    return true;
+    if (e && e->clear_lo) {
+        *lo = e->clear_lo;
+        *hi = e->clear_hi;
+        return true;
+    }
+    return npc_death_flag(id, lo, hi);
 }
 
 bool world_progress_flag(int id) {
@@ -1133,19 +1192,33 @@ bool world_progress_flag(int id) {
     return true;
 }
 
-bool goes_home_witnessed(int id) { return boss_defeat_flag(id) || world_event_flag(id) || world_progress_flag(id); }
+bool goes_home_witnessed(int id) {
+    return boss_defeat_flag(id) || world_event_flag(id) || world_progress_flag(id) || npc_death_flag(id, nullptr, nullptr);
+}
 
 // What a world event stands on in a world that takes it home: set there too when still off, and only that (the user's
 // rule: nothing that leaves that world inconsistent, nothing taken in bulk). Sen's Fortress's gate opens on both bells,
 // so a guest who saw the second bell gets the first at home, even rung before they came, but not the Bell Gargoyles or
 // Quelaag. The drain stands on its seal, the lifts below the water line on the drain, Anor Londo's darkness on
-// Gwynevere's death (her states 1230-1239 cleared, 1232 set: m15_01 event 11510520 slot 2).
+// Gwynevere's death (her states 1230-1239 cleared, 1232 set: m15_01 event 11510520 slot 2). The flags the game sets
+// beside a death or a boss's defeat, read by talk scripts and menus only, come with them: the Daughter of Chaos's
+// 140 and her chamber opening (m14_00 event 11400800), the Darkmoon Knightess's 151 (m15_01 11510533), Ornstein and
+// Smough's 12 and 120 (m15_01 11510001 / 11510900), the DLC boss's 121 (m12_01 11210001). Not 402 (Bed of Chaos
+// before the Lordvessel: the endgame) nor the endings 20 and 21.
 constexpr WorldEventNeeds kWorldEventNeeds[] = {
     {11500200, {{11010700, 0, 0}, {11400200, 0, 0}}, 2},
     {11600100, {{11600101, 0, 0}}, 1},
     {11600211, {{11600100, 0, 0}}, 1},
     {11600221, {{11600100, 0, 0}}, 1},
     {11510400, {{1232, 1230, 1239}}, 1},
+    {1272, {{11400800, 0, 0}, {140, 0, 0}}, 2},
+    // Anastacia murdered: Lautrec has gone to Anor Londo with her soul (1578), where it can be won back.
+    {1141, {{1578, 1570, 1599}}, 1},
+    {1034, {{151, 0, 0}}, 1},
+    {11510900, {{12, 0, 0}, {120, 0, 0}}, 2},
+    {11510902, {{12, 0, 0}, {120, 0, 0}}, 2},
+    {11510903, {{12, 0, 0}, {120, 0, 0}}, 2},
+    {11210001, {{121, 0, 0}}, 1},
 };
 
 int world_event_needs(int id, const WorldEventNeed** needs) {

@@ -6,18 +6,23 @@
 #include "game.h"
 #include "hook.h"
 #include "log.h"
+#include "session.h"
 #include "steam.h"
+#include "vagrants.h"
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <map>
 #include <mutex>
 #include <set>
 #include <tuple>
 #include <string>
+#include <vector>
 
 namespace coop::netlog {
 
@@ -126,13 +131,24 @@ void note(int n, uint32_t from, uint32_t packet) {
         return;
     }
     if (n == 1 && kind == 2) {
-        // A vagrant (FrpgNetItemVagrantDb, kind 2: 0xBD3720 -> 0xBD36A0 -> 0xBD2CC0 adds it to our list): 0x20 bytes,
-        // a position and an angle, then three words and one that packs three 10-bit numbers.
+        // A vagrant (FrpgNetItemVagrantDb, kind 2: 0xBD3720 -> 0xBD36A0 -> 0xBD2CC0 adds it to our list; vagrants.cpp):
+        // where it was lost (x, y, z, facing), the map's index in bits 20-27 of the next word, the item twice (category
+        // in the top 4 bits; goods 350 is the game's humanity vagrant), then its count (bits 0-9) and the number of
+        // games it has passed through (bits 20-29).
         float f[4];
         std::memcpy(f, w, sizeof(f));
-        LOG_INFO("[net] Arrived: a vagrant (lost items or humanity passed on from another player's world) at (%.1f, "
-                 "%.1f, %.1f) facing %.2f; its other words %08X %08X %08X, packed %u/%u/%u; we are %s", f[0], f[1], f[2],
-                 f[3], w[4], w[5], w[6], (w[7] >> 20) & 0x3FF, (w[7] >> 10) & 0x3FF, w[7] & 0x3FF, where);
+        const bool humanity = w[6] == 0x4000015E;
+        char item[48];
+        if (humanity) {
+            std::snprintf(item, sizeof(item), "lost humanity");
+        } else {
+            static const char* const kCat[] = {"weapon", "armor", "ring", "?", "goods"};
+            const unsigned cat = w[6] >> 28;
+            std::snprintf(item, sizeof(item), "%u x %s %u", w[7] & 0x3FF, cat < 5 ? kCat[cat] : "?", w[6] & 0x0FFFFFFF);
+        }
+        LOG_INFO("[net] Arrived: a vagrant (%s, lost in map index %u at (%.1f, %.1f, %.1f), through %u game(s) so far) "
+                 "passed on by a linked game; we are %s (%d held now)", item, (w[4] >> 20) & 0xFF, f[0], f[1], f[2],
+                 (w[7] >> 20) & 0x3FF, where, vagrants::held() + 1);
         return;
     }
     LOG_INFO("[net] %s %s: a %s packet (kind %u, from %08X, data %08X %08X %08X %08X); we are %s",
@@ -184,13 +200,10 @@ __declspec(naked) void hk_trigger() {
     }
 }
 
-// The game's lobby (its node): the players it picked to link with, three Steam ids in the keys 20000015 + 20000017,
-// 20000018 + 20000019 and 2000001A + 2000001B, each written as two "I<int64>" halves of the id's hex text.
-std::mutex g_lobby_lock;
-std::map<std::string, std::string> g_neighbour_keys;
-std::string g_neighbours_logged;
-int g_neighbour_lines = 0;
-
+// The game's lobbies hold Steam ids as two "I<int64>" halves of the id's hex text: its owner in 2000000E + 2000000F,
+// three of its links in 20000015 + 20000017, 20000018 + 20000019 and 2000001A + 2000001B. Those three are only the
+// ones it advertises (its node has up to 20 links, read below); up to 2026-11-25 they were logged as "the game's
+// links", which looked like a limit of three.
 std::string id_half(const std::string& v) {
     if (v.size() < 2 || v[0] != 'I') return std::string();
     const long long x = _strtoi64(v.c_str() + 1, nullptr, 10);
@@ -203,20 +216,148 @@ std::string id_half(const std::string& v) {
     return s;
 }
 
-std::string neighbours_text() {
-    static const char* const kPairs[3][2] = {{"20000015", "20000017"}, {"20000018", "20000019"}, {"2000001a", "2000001b"}};
-    std::string out;
-    int n = 0;
-    for (const auto& p : kPairs) {
-        const auto a = g_neighbour_keys.find(p[0]), b = g_neighbour_keys.find(p[1]);
-        const std::string id = (a == g_neighbour_keys.end() ? std::string() : id_half(a->second)) +
-                               (b == g_neighbour_keys.end() ? std::string() : id_half(b->second));
-        if (id.empty()) continue;
-        const unsigned long long sid = std::strtoull(id.c_str(), nullptr, 16);
-        const std::string name = sid ? steam::persona(sid) : std::string();
-        out += (n++ ? ", " : "") + (name.empty() ? id : name + " " + id);
+// ---------------------------------------------------------------- the game's links (its node's table)
+// Read where DSCM reads them (metal-crow's DaS-PC-MPChan, the same addresses in this exe): the count with our own node
+// at 0x1362DD0, the first node at [0x1362DCC] (each: +0 the next, +0xC its player: +0x30 the name, +0xC -> +0x30 the
+// Steam id as UTF-16 hex), the limit at [[[0x137F838]+0x38]+0x70] (20). On 2026-11-25 a test game had 6 to 8 other
+// games there while the lobby advertised 3.
+constexpr uint32_t kNodeFirst = 0x01362DCC;
+constexpr uint32_t kNodeCount = 0x01362DD0;
+constexpr uint32_t kNodeLimit = 0x0137F838;
+
+struct Node {
+    uint64_t id = 0;
+    std::string name;
+};
+
+bool read_wide(uint32_t addr, wchar_t* out, int n) {
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(static_cast<uintptr_t>(addr)), n * sizeof(wchar_t));
+        out[n - 1] = 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = 0;
+        return false;
     }
-    return n ? std::to_string(n) + ": " + out : std::string("none");
+}
+
+int node_limit() {
+    uint32_t a = 0, b = 0, v = 0;
+    return read32(kNodeLimit, &a) && a && read32(a + 0x38, &b) && b && read32(b + 0x70, &v) && v <= 64
+               ? static_cast<int>(v)
+               : -1;
+}
+
+std::vector<Node> read_nodes() {
+    std::vector<Node> out;
+    uint32_t count = 0, list = 0, node = 0;
+    if (!read32(kNodeCount, &count) || count > 64 || !read32(kNodeFirst, &list) || !list || !read32(list, &node)) {
+        return out;
+    }
+    const uint64_t self = steam::self();
+    for (uint32_t i = 0; i < count && node; ++i) {
+        uint32_t player = 0, online = 0;
+        wchar_t id[24] = {}, name[33] = {};
+        if (read32(node + 0xC, &player) && player) {
+            read_wide(player + 0x30, name, 33);
+            if (read32(player + 0xC, &online) && online) read_wide(online + 0x30, id, 24);
+        }
+        Node n;
+        n.id = std::wcstoull(id, nullptr, 16);
+        char utf8[100] = "";
+        WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8, sizeof(utf8), nullptr, nullptr);
+        n.name = utf8;
+        if (n.id && n.id != self) out.push_back(n);
+        if (!read32(node, &node)) break;
+    }
+    return out;
+}
+
+// Which of them are Prepare to Co-op players: the owners of the game lobbies with our tag (a search of our own every
+// minute; each lobby's owner is in its keys 2000000E + 2000000F). A linked game that is not among them found us from
+// a search without the tag: an unmodded game on Spacewar (the community's steam_appid.txt way, DSCM's players), or a
+// Prepare to Co-op of another tag.
+std::mutex g_ptc_lock;
+std::map<uint64_t, ULONGLONG> g_ptc;  // Steam id -> when last found
+ULONGLONG g_ptc_searched = 0;
+ULONGLONG g_next_ptc_search = 0;
+
+uint64_t lobby_owner_key(uint64_t lobby) {
+    const std::string id = id_half(steam::lobby_data(lobby, "2000000e")) + id_half(steam::lobby_data(lobby, "2000000f"));
+    return id.size() == 16 ? std::strtoull(id.c_str(), nullptr, 16) : 0;
+}
+
+void search_ptc() {
+    steam::find_lobbies({{"ptdesc_game", session::game_tag()}}, 50, [](std::vector<uint64_t> lobbies) {
+        const ULONGLONG t = GetTickCount64();
+        std::lock_guard<std::mutex> lock(g_ptc_lock);
+        for (uint64_t lobby : lobbies) {
+            const uint64_t owner = lobby_owner_key(lobby);
+            if (owner) g_ptc[owner] = t;
+        }
+        g_ptc_searched = t;
+    });
+}
+
+const char* kind_of(uint64_t id) {
+    std::lock_guard<std::mutex> lock(g_ptc_lock);
+    const auto it = g_ptc.find(id);
+    if (it != g_ptc.end() && GetTickCount64() - it->second < 15 * 60000) return "Prepare to Co-op";
+    return g_ptc_searched ? "not a Prepare to Co-op game: unmodded on Spacewar?" : "not searched yet";
+}
+
+std::string node_text(const Node& n) {
+    char b[200];
+    std::snprintf(b, sizeof(b), "%s %016llx (%s)", n.name.empty() ? "?" : n.name.c_str(),
+                  static_cast<unsigned long long>(n.id), kind_of(n.id));
+    return b;
+}
+
+std::string links_text() {
+    const std::vector<Node> nodes = read_nodes();
+    std::string out = std::to_string(nodes.size()) + " other game(s) (limit " + std::to_string(node_limit()) + ")";
+    for (size_t i = 0; i < nodes.size(); ++i) out += (i ? ", " : ": ") + node_text(nodes[i]);
+    return out;
+}
+
+// Every 2 s: who joined and who left the game's links.
+std::map<uint64_t, std::string> g_linked;
+int g_link_lines = 0;
+
+void watch_links() {
+    static ULONGLONG next = 0;
+    const ULONGLONG t = GetTickCount64();
+    if (t < next) return;
+    next = t + 2000;
+    // A link's name comes a moment after the link: one counts once it has its name.
+    std::vector<Node> nodes = read_nodes();
+    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [](const Node& n) { return n.name.empty(); }), nodes.end());
+    std::map<uint64_t, std::string> now;
+    for (const auto& n : nodes) now[n.id] = n.name;
+    if (now == g_linked) return;
+    std::string change;
+    for (const auto& n : nodes) {
+        if (!g_linked.count(n.id)) change += (change.empty() ? "" : ", ") + std::string("+") + node_text(n);
+    }
+    for (const auto& [id, name] : g_linked) {
+        if (!now.count(id)) {
+            char b[120];
+            std::snprintf(b, sizeof(b), "-%s %016llx", name.empty() ? "?" : name.c_str(),
+                          static_cast<unsigned long long>(id));
+            change += (change.empty() ? "" : ", ") + std::string(b);
+        }
+    }
+    g_linked = now;
+    if (g_link_lines >= 300) return;
+    ++g_link_lines;
+    LOG_INFO("[net] The game's links: %zu other game(s) (limit %d): %s", nodes.size(), node_limit(), change.c_str());
+}
+
+void watch_links_safe() {
+    __try {
+        watch_links();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 }  // namespace
@@ -251,6 +392,11 @@ void tick() {
     if (!g_on) return;
     InterlockedExchange(&g_map, game::player() ? game::map_id() : -1);
     const ULONGLONG now = GetTickCount64();
+    watch_links_safe();
+    if (game::player() && steam::ready() && now >= g_next_ptc_search) {
+        g_next_ptc_search = now + 60000;
+        search_ptc();
+    }
     if (!g_next_summary) g_next_summary = now + 300000;
     if (now < g_next_summary) return;
     g_next_summary = now + 300000;
@@ -262,34 +408,19 @@ void tick() {
         std::snprintf(b, sizeof(b), "%s%s %ld", s.empty() ? "" : ", ", kTypes[i].what, n);
         s += b;
     }
-    std::string links;
-    {
-        std::lock_guard<std::mutex> lock(g_lobby_lock);
-        links = neighbours_text();
-    }
+    const std::string links = links_text();
+    const int held = vagrants::held();
     if (s.empty()) {
-        LOG_INFO("[net] Last 5 minutes: nothing arrived from other players' games; our node's own links now: %s",
-                 links.c_str());
+        LOG_INFO("[net] Last 5 minutes: nothing arrived from other players' games; linked now with %s; vagrants held: %d",
+                 links.c_str(), held);
     } else {
-        LOG_INFO("[net] Last 5 minutes from other players' games: %s; our node's own links now: %s", s.c_str(),
-                 links.c_str());
+        LOG_INFO("[net] Last 5 minutes from other players' games: %s; linked now with %s; vagrants held: %d", s.c_str(),
+                 links.c_str(), held);
     }
 }
 
-void lobby_data(uint64_t, const char* key, const char* value) {
-    if (!g_on || !key || std::strncmp(key, "200000", 6) != 0) return;
-    const std::string k(key);
-    if (k < "20000015" || k > "2000001b") return;
-    std::lock_guard<std::mutex> lock(g_lobby_lock);
-    std::string& slot = g_neighbour_keys[k];
-    const std::string v = value ? value : "";
-    if (slot == v) return;
-    slot = v;
-    const std::string now = neighbours_text();
-    if (now == g_neighbours_logged || g_neighbour_lines >= 200) return;
-    g_neighbours_logged = now;
-    ++g_neighbour_lines;
-    LOG_INFO("[net] The game's links to other players (its node's neighbours): %s", now.c_str());
+void lobby_data(uint64_t, const char*, const char*) {
+    // The three neighbours the game advertises are no longer logged (watch_links reads all of its links).
 }
 
 void search_distance(int value) {

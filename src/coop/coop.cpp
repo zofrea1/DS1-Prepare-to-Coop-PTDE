@@ -31,6 +31,7 @@
 #include "farenemies.h"
 #include "world.h"
 #include "netlog.h"
+#include "vagrants.h"
 #include "bells.h"
 
 #include "footik.h"
@@ -360,6 +361,7 @@ void tick_body() {
     coop::players::tick();
     coop::stress::tick();
     coop::netlog::tick();
+    coop::vagrants::tick();
     coop::bells::tick();
     coop::updates::tick();
     if (g_items) {
@@ -555,6 +557,8 @@ void coop_install(const CoopConfig& config) {
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
     coop::vanillamp::install();
     coop::netlog::install(g_cfg.network_event_log);
+    coop::vagrants::install({g_cfg.vagrant_wanders, g_cfg.vagrant_stay, g_cfg.vagrant_pass_on_at_quit,
+                             g_cfg.network_event_log});
     coop::handout::install();
     coop::netrate::set_smoothing(g_cfg.net_smoothing);
     coop::netrate::set_dynamic(g_cfg.dynamic_smoothing);

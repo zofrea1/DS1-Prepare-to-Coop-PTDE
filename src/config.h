@@ -100,6 +100,12 @@ struct CoopConfig {
     // The online extras other players' games send (bells, vagrants, miracle resonance, curse statues, Gravelord,
     // bonfire kindling, arena, rankings; messages, bloodstains and ghosts summed up), as they arrive (coop/netlog.cpp).
     bool network_event_log = true;
+    // Vagrants (coop/vagrants.cpp; the user's choice, 2026-11-25): how many players' games a lost item passes through
+    // before it can come as a vagrant enemy (2..10, the game's own 10), how long each game keeps one (10..300 s, the
+    // game's 300), and whether a game passes on what it holds before Quit Game or a close (the game ends them).
+    int vagrant_wanders = 2;
+    int vagrant_stay = 120;
+    bool vagrant_pass_on_at_quit = true;
     // Hidden test keys (not in the shipped INI): TestProtocol / TestVersion make this game speak another co-op
     // protocol and report another version. TestProtocol shows the version mismatch notices between two copies of
     // one build; versions alone are not compared for now (session.cpp, kRequireSameVersion). The update check

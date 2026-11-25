@@ -11,6 +11,7 @@
 // file. Diagnostics only: a release build's remote control is a stub, so neither command ever comes.
 #include "stress.h"
 #include "bells.h"
+#include "vagrants.h"
 
 #include "game.h"
 #include "handout.h"
@@ -590,6 +591,15 @@ bool remote(const char* line, char* reply, size_t size) {
         sscanf_s(line, "%*s %d", &id);
         if (cmd[4] == 'r') bells::received(id); else bells::send_event(id);
         std::snprintf(reply, size, "%s %d: in the log", cmd, id);
+        return true;
+    }
+    if (std::strcmp(cmd, "vagrant") == 0) {
+        // vagrant [map index (-1: the last checked)] [wander count] [h: humanity]: one at our feet, as if passed on.
+        int index = -1, wanders = 2;
+        char kind[8] = "";
+        sscanf_s(line, "%*s %d %d %7s", &index, &wanders, kind, static_cast<unsigned>(sizeof(kind)));
+        vagrants::add_test(index, wanders, kind[0] == 'h');
+        std::snprintf(reply, size, "vagrant %d %d %s: in the log", index, wanders, kind[0] == 'h' ? "humanity" : "item");
         return true;
     }
     if (std::strcmp(cmd, "perf") == 0) {

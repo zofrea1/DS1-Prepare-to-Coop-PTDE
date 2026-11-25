@@ -9,7 +9,8 @@
 // rings, basilisk curse statues, Gravelord Servants' invitations, bonfire kindling, the Oolacile arena's entrants and
 // the covenant rankings each have a line as they come; messages, bloodstains, ghosts, signs and the node lists are
 // counted and summed up every five minutes. The bell being rung here (the event that sends 10010) has a line too, and
-// so do the players the game picks to link with (its lobby's neighbour keys) and the distance it searches.
+// so do the games it is linked with (its node's table: who joins and leaves, and whether each is a Prepare to Co-op
+// player's) and the distance it searches.
 
 #include <cstdint>
 
@@ -19,7 +20,7 @@ namespace coop::netlog {
 void install(bool on);
 // Every frame (the game thread): the map for the lines, and the five-minute summary.
 void tick();
-// The game's own lobby data as it sets it (steam.cpp): the neighbours it picked, logged when they change.
+// The game's own lobby data as it sets it (steam.cpp); its neighbour keys are no longer logged.
 void lobby_data(uint64_t lobby, const char* key, const char* value);
 // The distance the game's node search asks Steam for (0 close, 1 default, 2 far, 3 worldwide), logged on change.
 void search_distance(int value);

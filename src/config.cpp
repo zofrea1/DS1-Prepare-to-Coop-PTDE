@@ -101,6 +101,12 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.game_net_log = settings_parse_bool(val);
         } else if (key == "networkeventlog") {
             c.network_event_log = settings_parse_bool(val);
+        } else if (key == "vagrantwanders") {
+            c.vagrant_wanders = std::atoi(val.c_str());
+        } else if (key == "vagrantstay") {
+            c.vagrant_stay = std::atoi(val.c_str());
+        } else if (key == "vagrantpassonatquit") {
+            c.vagrant_pass_on_at_quit = settings_parse_bool(val);
         } else if (key == "testprotocol") {
             c.test_protocol = std::atoi(val.c_str());
         } else if (key == "testversion") {

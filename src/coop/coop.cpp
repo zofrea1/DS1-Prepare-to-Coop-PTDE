@@ -31,6 +31,7 @@
 #include "farenemies.h"
 #include "world.h"
 #include "netlog.h"
+#include "bells.h"
 
 #include "footik.h"
 #include "settingsmenu.h"
@@ -359,6 +360,7 @@ void tick_body() {
     coop::players::tick();
     coop::stress::tick();
     coop::netlog::tick();
+    coop::bells::tick();
     coop::updates::tick();
     if (g_items) {
         coop::items::tick();

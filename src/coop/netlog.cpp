@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "netlog.h"
 
+#include "bells.h"
 #include "game.h"
 #include "hook.h"
 #include "log.h"
@@ -50,11 +51,13 @@ constexpr DbType kTypes[] = {
 };
 constexpr int kTypeCount = sizeof(kTypes) / sizeof(kTypes[0]);
 
-// The multiplayer events the maps use (every 2003[16] Trigger Multiplayer Event of PTDE's map scripts).
+// The multiplayer events the maps use (every 2003[16] Trigger Multiplayer Event of PTDE's map scripts), and ours.
 const char* event_name(int id) {
     switch (id) {
         case 10010:
             return "the Undead Parish's Bell of Awakening (heard in the Undead Burg and Parish: m10_01 event 11015170)";
+        case 10020:
+            return "the Bell of Awakening in Quelaag's Domain (Prepare to Co-op's: heard in Blighttown, bells.cpp)";
         default:
             return "an event no map listens for";
     }
@@ -82,11 +85,6 @@ void map_text(char* out, size_t n) {
 }
 
 void note(int n, uint32_t from, uint32_t packet) {
-    InterlockedIncrement(&g_since[n]);
-    const LONG total = InterlockedIncrement(&g_total[n]);
-    const DbType& t = kTypes[n];
-    if (!t.each && total > 3) return;
-    if (!line_ok()) return;
     uint8_t kind = 0xFF;
     uint32_t data = 0, w[4] = {};
     if (packet) {
@@ -96,6 +94,13 @@ void note(int n, uint32_t from, uint32_t packet) {
             for (int i = 0; i < 4; ++i) read32(data + 4 * i, &w[i]);
         }
     }
+    if (n == 0 && kind == 0) bells::received(static_cast<int>(w[0]));  // the Blighttown bell (bells.cpp)
+    if (!g_on) return;
+    InterlockedIncrement(&g_since[n]);
+    const LONG total = InterlockedIncrement(&g_total[n]);
+    const DbType& t = kTypes[n];
+    if (!t.each && total > 3) return;
+    if (!line_ok()) return;
     char where[24];
     map_text(where, sizeof(where));
     if (n == 0 && kind == 0) {
@@ -135,7 +140,7 @@ constexpr uint32_t kTrigger = 0x00FA0D50;
 uint32_t g_trigger = kTrigger;
 
 void __cdecl note_trigger(int id) {
-    if (!line_ok()) return;
+    if (!g_on || !line_ok()) return;
     char where[24];
     map_text(where, sizeof(where));
     LOG_INFO("[net] This game sent shared event %d to its linked players: %s; we are %s", id, event_name(id), where);
@@ -191,10 +196,7 @@ std::string neighbours_text() {
 
 void install(bool on) {
     g_on = on;
-    if (!on) {
-        LOG_INFO("[net] NetworkEventLog: off");
-        return;
-    }
+    // The hooks go in either way: the event meddle database's brings the Blighttown bell (bells.cpp).
     int hooked = 0;
     for (int i = 0; i < kTypeCount; ++i) {
         uint32_t old = 0;
@@ -207,6 +209,11 @@ void install(bool on) {
         }
     }
     const bool trigger = redirect_call(kTriggerCall, kTrigger, reinterpret_cast<void*>(&hk_trigger));
+    if (!on) {
+        LOG_INFO("[net] NetworkEventLog: off (%d of %d network databases hooked for the Blighttown bell)", hooked,
+                 kTypeCount);
+        return;
+    }
     LOG_INFO("[net] NetworkEventLog: the online extras other Prepare to Co-op players' games send are logged as they "
              "arrive (%d of %d kinds; bells, vagrants, miracle resonance, curse statues, Gravelord, bonfire kindling, "
              "arena, rankings each, the rest summed up every 5 minutes)%s",

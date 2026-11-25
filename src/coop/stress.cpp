@@ -10,6 +10,7 @@
 // thread's frames for S seconds (frames, mean and worst frame time, the 99th percentile) into the log and the reply
 // file. Diagnostics only: a release build's remote control is a stub, so neither command ever comes.
 #include "stress.h"
+#include "bells.h"
 
 #include "game.h"
 #include "handout.h"
@@ -575,6 +576,20 @@ bool remote(const char* line, char* reply, size_t size) {
         sscanf_s(line, "%*s %d", &n);
         InterlockedExchange(&g_handout_req, (std::max)(1, n));
         std::snprintf(reply, size, "handouttest %d: in the log", (std::max)(1, n));
+        return true;
+    }
+    if (std::strcmp(cmd, "bellsound") == 0) {
+        int entity = 1401110, sound = 130300002;
+        sscanf_s(line, "%*s %d %d", &entity, &sound);
+        bells::play_sound(entity, sound);
+        std::snprintf(reply, size, "bellsound %d %d: in the log", entity, sound);
+        return true;
+    }
+    if (std::strcmp(cmd, "bellrecv") == 0 || std::strcmp(cmd, "bellsend") == 0) {
+        int id = 10020;
+        sscanf_s(line, "%*s %d", &id);
+        if (cmd[4] == 'r') bells::received(id); else bells::send_event(id);
+        std::snprintf(reply, size, "%s %d: in the log", cmd, id);
         return true;
     }
     if (std::strcmp(cmd, "perf") == 0) {

@@ -35,6 +35,8 @@ bool boss_defeat_flag(int id);
 // name for the log (null for any other flag).
 bool world_event_flag(int id);
 const char* world_event_name(int id);
+// The flags a world event needs in a world that takes it home (they come with it there); their count.
+int world_event_needs(int id, const int** needs);
 // Our game's scripts handle the defeat of the boss whose entity is `entity` (Handle Boss Defeat, 2003[12]): the souls
 // our game pays next are that boss's (own_boss_souls).
 void boss_defeat_handled(int entity);

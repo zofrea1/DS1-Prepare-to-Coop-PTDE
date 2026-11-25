@@ -15,6 +15,7 @@
 #include "summons.h"
 #include "text.h"
 #include "world.h"
+#include "bells.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -971,6 +972,7 @@ void call_set_flag(uint32_t efm, int id, uint32_t value) {
 }
 
 bool host_disaster_flag(int id);  // a flag of the host's world's disaster (see kDisasterFlags)
+void set_home_needs(uint32_t efm, int id);  // a world event taken home: what it needs there (below)
 uint8_t g_hold_runs = 0;          // a co-op guest's copy of the host's world is not the host's yet (hold_event_runs)
 
 // Shared progress: flags changed in the host's world travel to the other players (guest -> host -> guests).
@@ -1216,6 +1218,7 @@ void __stdcall before_set_flag(int id) {
 
 void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     if (g_flag_quiet) return;
+    if (!g_applying_remote && GetCurrentThreadId() == g_main_thread) bells::flag_set_here(id, (value & 0xFF) != 0);
     if (g_drop_old >= 0) {
         const bool on = (value & 0xFF) != 0;
         const bool was = g_drop_old == 1;
@@ -1255,11 +1258,29 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     if (!read32(efm + 0x10C, &active) || active != efm + 0x90) return;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
     call_set_flag(efm, id, value & 0xFF);
+    if (value & 0xFF) set_home_needs(efm, id);
     *ptr<uint32_t>(efm + 0x10C) = active;
     if (g_cur_event && g_mirroring_events.size() < 4096) g_mirroring_events.insert(g_cur_event);
     if (const char* name = world::world_event_name(id)) {
         LOG_INFO("[coop] World event in the host's world (flag %d %s%s): %s in our own world too", id,
                  (value & 0xFF) ? "on" : "off", g_applying_remote ? ", from another player's game" : "", name);
+    }
+}
+
+// A world event taken home brings what it stands on there (world::world_event_needs): a flag of the guest's own world
+// it needs that is still off there is set too, and only that (the bosses on the way stay as they are). Called with our
+// own world's store active (efm+0x10C = efm+0x14).
+void set_home_needs(uint32_t efm, int id) {
+    const int* needs = nullptr;
+    const int n = world::world_event_needs(id, &needs);
+    for (int i = 0; i < n; ++i) {
+        if (game::flag(needs[i])) continue;
+        ++g_flag_quiet;
+        call_set_flag(efm, needs[i], 1);
+        --g_flag_quiet;
+        LOG_INFO("[coop] World event %d (%s) taken home needs %d (%s) there: set in our own world too", id,
+                 world::world_event_name(id), needs[i],
+                 world::world_event_name(needs[i]) ? world::world_event_name(needs[i]) : "?");
     }
 }
 
@@ -2209,6 +2230,7 @@ void mirror_event_done(uint32_t ev, bool was_on) {
     ++g_flag_quiet;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
     call_set_flag(efm, flag, 1);
+    set_home_needs(efm, flag);
     *ptr<uint32_t>(efm + 0x10C) = active;
     --g_flag_quiet;
     if (++g_done_lines <= 40) {

@@ -1085,6 +1085,29 @@ constexpr WorldEvent kWorldEvents[] = {
 
 bool world_event_flag(int id) { return world_event_name(id) != nullptr; }
 
+// What a world event stands on in a world that takes it home (the user's rule, 2026-11-25: only what is witnessed in
+// the session comes home, but nothing that leaves that world inconsistent): Sen's Fortress's gate opens on both bells
+// rung, so a guest who saw the second bell rung (the gate opening) gets the first one at home too, even though it was
+// rung before they came. Not the Bell Gargoyles or Quelaag: their fights stay theirs.
+struct WorldEventNeeds {
+    int flag;
+    int needs[4];
+    int count;
+};
+constexpr WorldEventNeeds kWorldEventNeeds[] = {
+    {11500200, {11010700, 11400200}, 2},
+};
+
+int world_event_needs(int id, const int** needs) {
+    for (const auto& e : kWorldEventNeeds) {
+        if (e.flag == id) {
+            *needs = e.needs;
+            return e.count;
+        }
+    }
+    return 0;
+}
+
 const char* world_event_name(int id) {
     for (const auto& e : kWorldEvents) {
         if (e.flag == id) return e.name;

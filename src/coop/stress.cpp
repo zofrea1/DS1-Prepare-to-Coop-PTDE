@@ -12,6 +12,8 @@
 #include "stress.h"
 
 #include "game.h"
+#include "handout.h"
+#include "handout_pair.h"
 #include "hook.h"
 #include "log.h"
 #include "partylist.h"
@@ -345,6 +347,199 @@ void perf_report() {
              p99, f.back());
 }
 
+
+// ---------------------------------------------------------------- the hand-out, in the game (handouttest N)
+// The game's own pair step (0x46FF00 for every pair in order, as its loop at 0xE559DD) against handout::settle_pass,
+// on random bid lists made in the game's network heap (vt+0x28 allocates, vt+0x34 frees: the heap the hand-out's
+// lists come from), on the game thread: every list and count compared. Then both timed on lists of players in one
+// place and in many. Records and sentinels are ours (the pair step reads only +0x04, +0x10, +0x14 of a record).
+constexpr uint32_t kNetHeapVar = 0x013787F8;
+constexpr uint32_t kGamePairStep = 0x0046FF00;
+volatile LONG g_handout_req = 0;  // handouttest N
+
+using NetAllocFn = void*(__thiscall*)(uint32_t heap, uint32_t size, uint32_t align);
+using NetFreeFn = void(__thiscall*)(uint32_t heap, void* block);
+using PairStepFn = void(__stdcall*)(handout::Member*, handout::Member*);
+
+struct HoWorld {
+    std::vector<handout::Member> recs;
+    std::vector<handout::Node> heads;
+    std::vector<handout::MemberNode> mnodes;
+    handout::MemberNode mhead{};
+    std::vector<handout::Node*> made;
+    HoWorld() = default;
+    HoWorld(const HoWorld&) = delete;
+    // lists[i] = record i's values; order = the member list (record per member)
+    bool build(uint32_t heap, const std::vector<std::vector<uint32_t>>& lists) {
+        const uint32_t vt = *ptr<uint32_t>(heap);
+        const NetAllocFn alloc = *ptr<NetAllocFn>(vt + 0x28);
+        const size_t m = lists.size();
+        recs.assign(m, handout::Member{});
+        heads.assign(m, handout::Node{});
+        mnodes.assign(m, handout::MemberNode{});
+        mhead.next = mhead.prev = &mhead;
+        for (size_t i = 0; i < m; ++i) {
+            handout::Node* h = &heads[i];
+            h->next = h->prev = h;
+            recs[i].id = static_cast<uint32_t>(i);
+            recs[i].heap = heap;
+            recs[i].head = h;
+            recs[i].count = static_cast<int32_t>(lists[i].size());
+            handout::MemberNode* mn = &mnodes[i];
+            mn->rec = &recs[i];
+            mn->next = &mhead;
+            mn->prev = mhead.prev;
+            mhead.prev->next = mn;
+            mhead.prev = mn;
+        }
+        size_t most = 0;
+        for (const auto& l : lists) most = (std::max)(most, l.size());
+        for (size_t k = 0; k < most; ++k) {  // made interleaved, as reports arrive
+            for (size_t i = 0; i < m; ++i) {
+                if (k >= lists[i].size()) continue;
+                auto* n = static_cast<handout::Node*>(alloc(heap, sizeof(handout::Node), 4));
+                if (!n) return false;
+                made.push_back(n);
+                n->value = lists[i][k];
+                handout::Node* h = &heads[i];
+                n->next = h;
+                n->prev = h->prev;
+                h->prev->next = n;
+                h->prev = n;
+            }
+        }
+        return true;
+    }
+    // record i's list as places in `made` (the same in both worlds when the same entries are left)
+    std::vector<int> list_of(size_t i) const {
+        std::vector<int> out;
+        for (const handout::Node* n = heads[i].next; n != &heads[i]; n = n->next) {
+            out.push_back(static_cast<int>(std::find(made.begin(), made.end(), n) - made.begin()));
+        }
+        return out;
+    }
+    void release(uint32_t heap) {  // what the pass left
+        const NetFreeFn fr = *ptr<NetFreeFn>(*ptr<uint32_t>(heap) + 0x34);
+        for (size_t i = 0; i < recs.size(); ++i) {
+            handout::Node* n = heads[i].next;
+            while (n != &heads[i]) {
+                handout::Node* next = n->next;
+                fr(heap, n);
+                n = next;
+            }
+            heads[i].next = heads[i].prev = &heads[i];
+        }
+    }
+};
+
+double ho_ms(const LARGE_INTEGER& a, const LARGE_INTEGER& b) {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return static_cast<double>(b.QuadPart - a.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart);
+}
+
+void game_pass(HoWorld& w) {
+    const PairStepFn step = reinterpret_cast<PairStepFn>(static_cast<uintptr_t>(kGamePairStep));
+    for (handout::MemberNode* a = w.mhead.next; a != &w.mhead; a = a->next)
+        for (handout::MemberNode* b = a->next; b != &w.mhead; b = b->next) step(a->rec, b->rec);
+}
+
+// Places: each member's enemies are its place's (places = 1: everyone together; = members: everyone apart).
+std::vector<std::vector<uint32_t>> ho_lists(uint32_t& seed, int members, int enemies, int places, bool random_bids) {
+    auto rnd = [&seed]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 8;
+    };
+    std::vector<std::vector<uint32_t>> lists(members);
+    for (int i = 0; i < members; ++i) {
+        const int place = i % places;
+        std::vector<uint32_t>& v = lists[i];
+        for (int k = 0; k < enemies; ++k) v.push_back(static_cast<uint32_t>(((place % 32) << 11) | ((k * 3 + place / 32 * 700) & 0x7FF)));
+        for (size_t k = v.size(); k > 1; --k) std::swap(v[k - 1], v[rnd() % k]);
+        for (uint32_t& e : v) {
+            const uint32_t bid = random_bids ? (rnd() % 8 == 0 ? 0 : rnd() % 4) : 256 + rnd() % 256;
+            e |= bid << 16;
+        }
+    }
+    return lists;
+}
+
+void handout_test(int cases) {
+    const uint32_t heap = *ptr<uint32_t>(kNetHeapVar);
+    if (!heap) {
+        LOG_INFO("[stress] handouttest: no network heap");
+        return;
+    }
+    uint32_t seed = 20261125;
+    int same = 0, differ = 0;
+    long long pairs = 0, pairs_run = 0;
+    for (int c = 0; c < cases; ++c) {
+        uint32_t s2 = seed;
+        const int members = 2 + static_cast<int>((seed = seed * 1664525u + 1013904223u) >> 8) % 63;
+        const int enemies = static_cast<int>((seed = seed * 1664525u + 1013904223u) >> 8) % 120;
+        const int places = 1 + static_cast<int>((seed = seed * 1664525u + 1013904223u) >> 8) % members;
+        s2 = seed;
+        const auto lists = ho_lists(seed, members, enemies, places, true);
+        // a few enemies twice in a list
+        auto lists2 = lists;
+        if (c % 4 == 0) {
+            for (auto& l : lists2) {
+                if (l.size() > 2) l.push_back(l[(s2 >> 8) % l.size()]);
+            }
+        }
+        HoWorld w1, w2;
+        if (!w1.build(heap, lists2) || !w2.build(heap, lists2)) {
+            LOG_INFO("[stress] handouttest: the network heap is full");
+            w1.release(heap);
+            w2.release(heap);
+            return;
+        }
+        game_pass(w1);
+        const handout::PassStats st = handout::settle_pass(&w2.mhead);
+        bool ok = true;
+        for (int i = 0; ok && i < members; ++i) {
+            ok = w1.recs[i].count == w2.recs[i].count && w1.list_of(i) == w2.list_of(i);
+        }
+        ok ? ++same : ++differ;
+        if (!ok && differ <= 3) {
+            LOG_INFO("[stress] handouttest: case %d DIFFERS (%d members, %d enemies, %d places)", c, members, enemies,
+                     places);
+        }
+        pairs += st.pairs;
+        pairs_run += st.pairs_run;
+        w1.release(heap);
+        w2.release(heap);
+    }
+    LOG_INFO("[stress] handouttest: %d random hand-outs in the network heap, %d identical, %d different (%lld pairs, "
+             "%lld shared an enemy)", cases, same, differ, pairs, pairs_run);
+    struct Shape {
+        int members, enemies, places;
+    };
+    for (const Shape sh : {Shape{8, 160, 1}, Shape{8, 160, 8}, Shape{32, 160, 1}, Shape{32, 160, 32},
+                           Shape{64, 160, 1}, Shape{64, 160, 8}, Shape{64, 160, 64}}) {
+        const auto lists = ho_lists(seed, sh.members, sh.enemies, sh.places, false);
+        HoWorld w1, w2;
+        if (!w1.build(heap, lists) || !w2.build(heap, lists)) {
+            LOG_INFO("[stress] handouttest: the network heap is full");
+            w1.release(heap);
+            w2.release(heap);
+            return;
+        }
+        LARGE_INTEGER t0, t1, t2;
+        QueryPerformanceCounter(&t0);
+        game_pass(w1);
+        QueryPerformanceCounter(&t1);
+        handout::settle_pass(&w2.mhead);
+        QueryPerformanceCounter(&t2);
+        bool ok = true;
+        for (int i = 0; ok && i < sh.members; ++i) ok = w1.recs[i].count == w2.recs[i].count;
+        LOG_INFO("[stress] handouttest: %2d players, %d enemies each, %2d place(s): game %.3f ms, ours %.3f ms (%s)",
+                 sh.members, sh.enemies, sh.places, ho_ms(t0, t1), ho_ms(t1, t2), ok ? "same counts" : "COUNTS DIFFER");
+        w1.release(heap);
+        w2.release(heap);
+    }
+}
+
 }  // namespace
 
 bool remote(const char* line, char* reply, size_t size) {
@@ -371,6 +566,17 @@ bool remote(const char* line, char* reply, size_t size) {
         std::snprintf(reply, size, "bars %d", on != 0);
         return true;
     }
+    if (std::strcmp(cmd, "handout") == 0) {
+        handout::describe(reply, size);
+        return true;
+    }
+    if (std::strcmp(cmd, "handouttest") == 0) {
+        int n = 200;
+        sscanf_s(line, "%*s %d", &n);
+        InterlockedExchange(&g_handout_req, (std::max)(1, n));
+        std::snprintf(reply, size, "handouttest %d: in the log", (std::max)(1, n));
+        return true;
+    }
     if (std::strcmp(cmd, "perf") == 0) {
         int s = 10;
         sscanf_s(line, "%*s %d", &s);
@@ -392,6 +598,7 @@ void tick() {
     QueryPerformanceCounter(&t);
     const double dt_ms = static_cast<double>(t.QuadPart - g_last.QuadPart) * 1000.0 / g_freq;
     g_last = t;
+    if (const LONG n = InterlockedExchange(&g_handout_req, 0)) handout_test(n);
     if (const LONG s = InterlockedExchange(&g_perf_req, 0)) {
         g_frames.clear();
         g_perf_until = now_s() + s;

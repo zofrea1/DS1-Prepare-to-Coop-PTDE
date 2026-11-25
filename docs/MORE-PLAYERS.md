@@ -146,6 +146,23 @@ What changed for more than eight:
   list, the nameplates, the settings page (`MaxPlayers` choices up to 64), the session limit.
 - **Kept at eight**: the group invasion messages hold eight Steam ids (their layout is the protocol's; an older game
   reads the fields after them at the same place), so a group of more than eight invaders is held for eight.
+- **The host's hand-out of enemies** (handout.cpp, handout_pair.h): every second the host's game settles each pair of
+  members' bid lists (every enemy of a member's loaded map blocks, with its bid) so that each enemy goes to the highest
+  bid. The game's loop walks the later member's list for every entry of the earlier one's, for every pair: players^2 x
+  enemies^2, and most when players are in different places (their lists share nothing, so no walk stops early). The
+  loop is replaced with one that gives the same results in the same order (the same entries leave the same lists, the
+  ties read the same counts) in time linear in the entries: each list indexed once a hand-out (a member's list is a
+  "later" list in all its pairs before it is ever the earlier one, and changes meanwhile only by the removals, which keep
+  the index), and a pair whose lists share no enemy is skipped (lists only lose entries during the loop, so such a pair
+  changes nothing). Checked against the game's own machine code of the pair step on a million random hand-outs (every
+  list, count and freed entry identical) and in the game on 300 more made in its network heap. Measured in the game,
+  160 enemies a player:
+
+  | Players | Game's loop | Ours |
+  |---|---|---|
+  | 8 in one place / 8 in eight places | 0.17 / 0.67 ms | 0.03 / 0.008 ms |
+  | 32 in one place / 32 apart | 0.79 / 12.2 ms | 0.14 / 0.04 ms |
+  | 64 in one place / in 8 places / all apart | 1.7 / 7.6 / 49.9 ms | 0.43 / 0.31 / 0.19 ms |
 
 **Stress test** (2026-11-24, diagnostics builds only: remote commands `npcs N`, `perf S`, `bars 0|1`, stress.cpp).
 With no 64 games to join, the Undead Burg's own characters stand in: `npcs N` brings the N nearest to the player, makes
@@ -172,8 +189,8 @@ floating bars are 0.1 to 0.17 ms for 60 (bars on 6.79 / 6.91 ms, off 6.68 / 6.75
 nobody uses them: with no phantoms, `MaxPlayers = 64` (66 bars) ran at 3.509 ms and `MaxPlayers = 8` (10 bars) at
 3.512 ms (`MaxPlayers = 4`, the game's seven, 3.474 ms).
 
-Not tested: more than eight real players (the network library, the host's hand-out of enemies to every game, every
-game's upload). Nothing found in the game's session or network code holds a count of members in a bit mask or a
+Not tested: more than eight real players (the network library, the host's hand-out of enemies to every game with
+real lists, every game's upload). Nothing found in the game's session or network code holds a count of members in a bit mask or a
 fixed array; the eight-player test is the evidence so far.
 
 ## The five-player test (2026-10-31)

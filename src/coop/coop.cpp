@@ -6,6 +6,7 @@
 #include "deathtext.h"
 #include "drops.h"
 #include "game.h"
+#include "handout.h"
 #include "hook.h"
 #include "items.h"
 #include "jolly.h"
@@ -544,6 +545,7 @@ void coop_install(const CoopConfig& config) {
     g_miracle = coop::world::set_homeward_state_handler(&homeward_state);
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
     coop::vanillamp::install();
+    coop::handout::install();
     coop::netrate::set_smoothing(g_cfg.net_smoothing);
     coop::netrate::set_dynamic(g_cfg.dynamic_smoothing);
     coop::world::set_blossom_counter(&blossom_count);

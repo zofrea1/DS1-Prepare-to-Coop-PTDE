@@ -97,6 +97,9 @@ struct CoopConfig {
     // 1.9.0: the game's own network messages (lobbies, connections to other players for ghosts, messages and
     // bloodstains) and its lobby calls in the log (coop/steam.cpp), for finding out why players do not meet.
     bool game_net_log = false;
+    // The online extras other players' games send (bells, vagrants, miracle resonance, curse statues, Gravelord,
+    // bonfire kindling, arena, rankings; messages, bloodstains and ghosts summed up), as they arrive (coop/netlog.cpp).
+    bool network_event_log = true;
     // Hidden test keys (not in the shipped INI): TestProtocol / TestVersion make this game speak another co-op
     // protocol and report another version. TestProtocol shows the version mismatch notices between two copies of
     // one build; versions alone are not compared for now (session.cpp, kRequireSameVersion). The update check

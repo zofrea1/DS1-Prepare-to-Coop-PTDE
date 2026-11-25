@@ -31,6 +31,7 @@ src\coop\crterror.cpp
 src\coop\knell.cpp
 src\coop\logupload.cpp
 src\coop\vanillamp.cpp
+src\coop\netlog.cpp
 src\coop\jolly.cpp
 src\coop\netsafe.cpp
 src\coop\visible.cpp

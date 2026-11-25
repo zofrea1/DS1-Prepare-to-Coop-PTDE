@@ -30,6 +30,7 @@
 #include "visible.h"
 #include "farenemies.h"
 #include "world.h"
+#include "netlog.h"
 
 #include "footik.h"
 #include "settingsmenu.h"
@@ -357,6 +358,7 @@ void tick_body() {
     coop::netrate::tick(coop::session::net_rate());
     coop::players::tick();
     coop::stress::tick();
+    coop::netlog::tick();
     coop::updates::tick();
     if (g_items) {
         coop::items::tick();
@@ -550,6 +552,7 @@ void coop_install(const CoopConfig& config) {
     g_miracle = coop::world::set_homeward_state_handler(&homeward_state);
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
     coop::vanillamp::install();
+    coop::netlog::install(g_cfg.network_event_log);
     coop::handout::install();
     coop::netrate::set_smoothing(g_cfg.net_smoothing);
     coop::netrate::set_dynamic(g_cfg.dynamic_smoothing);

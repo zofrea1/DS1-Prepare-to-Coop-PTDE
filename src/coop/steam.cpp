@@ -3,6 +3,7 @@
 #include "steam.h"
 
 #include "log.h"
+#include "netlog.h"
 #include "steamguard.h"  // the FPS Unlock's SteamPauseGuard
 #include "steam_abi.h"
 
@@ -341,6 +342,11 @@ void __fastcall hk_count_filter(void* self, void*, int n) {
     if (g_net_diag && !g_bypass) g_search += " max " + std::to_string(n);
     g_count_filter_orig(self, nullptr, n);
 }
+IntArgFn g_distance_next = nullptr;
+void __fastcall hk_distance_filter_log(void* self, void*, int value) {
+    if (!g_bypass) netlog::search_distance(value);
+    g_distance_next(self, nullptr, value);
+}
 SteamAPICall_t __fastcall hk_create_lobby(void* self, void*, int type, int max_members) {
     if (g_net_diag && !g_bypass && lobby_log_once("create")) {
         LOG_INFO("[coop] Game lobby: CreateLobby(type %d, max %d)", type, max_members);
@@ -379,6 +385,7 @@ bool __fastcall hk_set_lobby_data(void* self, void*, uint64_t lobby, const char*
                  key ? key : "?", value ? value : "");
     }
     const bool ok = g_set_data_orig(self, nullptr, lobby, key, value);
+    if (!g_bypass) netlog::lobby_data(lobby, key, value);
     if (!g_bypass && !g_game_tag.empty() && !g_tagged.count(lobby)) {
         g_tagged.insert(lobby);
         g_set_data_orig(self, nullptr, lobby, "ptdesc_game", g_game_tag.c_str());
@@ -417,6 +424,9 @@ void hook_matchmaking_instance(void* mm) {
     g_mm_vtable_copy[14] = reinterpret_cast<void*>(&hk_join_lobby);
     g_mm_vtable_copy[15] = reinterpret_cast<void*>(&hk_leave_lobby);
     steamguard_take_distance_filter(g_mm_vtable_copy);
+    // NetworkEventLog: the distance the game's node search asks for (it sets it every frame; logged on change).
+    g_distance_next = reinterpret_cast<IntArgFn>(g_mm_vtable_copy[9]);
+    g_mm_vtable_copy[9] = reinterpret_cast<void*>(&hk_distance_filter_log);
     *static_cast<void***>(mm) = g_mm_vtable_copy;
     if (!g_game_tag.empty()) {
         LOG_INFO("[coop] The game's own lobbies (ghosts, messages, bloodstains) are shared by every Prepare to Co-op "

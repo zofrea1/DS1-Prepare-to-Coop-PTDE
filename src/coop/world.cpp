@@ -1069,6 +1069,29 @@ bool boss_defeat_flag(int id) {
     return std::find(std::begin(kBossDefeatFlags), std::end(kBossDefeatFlags), id) != std::end(kBossDefeatFlags);
 }
 
+// World events that go home like a boss's defeat (2026-11-25, the user's call: "they should be like bosses"): rung in
+// the host's world while a co-op guest is there, by anyone, a Bell of Awakening is rung in the guest's own world too,
+// and with both rung there Sen's Fortress's gate is open. (Vanilla and up to 2.6.0: only the player who pulled the
+// bell's lever took it home, since a change only another player's game made stays in the host's world.)
+struct WorldEvent {
+    int flag;
+    const char* name;
+};
+constexpr WorldEvent kWorldEvents[] = {
+    {11010700, "the Undead Parish's Bell of Awakening rung"},  // its lever's ObjAct flag and its event's end
+    {11400200, "the Bell of Awakening in Quelaag's Domain rung"},  // its event sets it at its end
+    {11500200, "both bells rung: Sen's Fortress's gate open"},  // the second bell's event sets it
+};
+
+bool world_event_flag(int id) { return world_event_name(id) != nullptr; }
+
+const char* world_event_name(int id) {
+    for (const auto& e : kWorldEvents) {
+        if (e.flag == id) return e.name;
+    }
+    return nullptr;
+}
+
 namespace {
 
 void defeat_tick() {

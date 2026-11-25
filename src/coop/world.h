@@ -31,6 +31,10 @@ void set_host_scaling(const int* scaling);
 void tick();
 // A boss's defeat flag (every common event 970's first parameter).
 bool boss_defeat_flag(int id);
+// A world event's flag that goes home like a boss's defeat (the Bells of Awakening, Sen's Fortress's gate), and its
+// name for the log (null for any other flag).
+bool world_event_flag(int id);
+const char* world_event_name(int id);
 // Our game's scripts handle the defeat of the boss whose entity is `entity` (Handle Boss Defeat, 2003[12]): the souls
 // our game pays next are that boss's (own_boss_souls).
 void boss_defeat_handled(int entity);

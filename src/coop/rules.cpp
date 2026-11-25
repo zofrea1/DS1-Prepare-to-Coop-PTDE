@@ -1236,7 +1236,8 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     // in the world is dead for us too, wherever we stood (its souls and items come as well: world.cpp, drops.cpp).
     // Until 1.4.0 every change of the session went home, and with it what our game merely heard of: angeline's own
     // world took Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
-    if (g_applying_remote && !world::boss_defeat_flag(id)) return;
+    // The world events that count like a boss (world::world_event_flag: the Bells of Awakening) go home as well.
+    if (g_applying_remote && !world::boss_defeat_flag(id) && !world::world_event_flag(id)) return;
     // An NPC's step that does not line up with their state at home (npc_alignment).
     if (g_npc_aligned == 0) {
         static int lines = 0;
@@ -1256,6 +1257,10 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     call_set_flag(efm, id, value & 0xFF);
     *ptr<uint32_t>(efm + 0x10C) = active;
     if (g_cur_event && g_mirroring_events.size() < 4096) g_mirroring_events.insert(g_cur_event);
+    if (const char* name = world::world_event_name(id)) {
+        LOG_INFO("[coop] World event in the host's world (flag %d %s%s): %s in our own world too", id,
+                 (value & 0xFF) ? "on" : "off", g_applying_remote ? ", from another player's game" : "", name);
+    }
 }
 
 __declspec(naked) void hk_set_flag() {
@@ -2189,7 +2194,7 @@ void mirror_event_done(uint32_t ev, bool was_on) {
     const int flag = event_done_flag(ev);
     if (flag < 0) return;
     const bool mirrored = g_mirroring_events.erase(ev) != 0;
-    const bool boss = !was_on && world::boss_defeat_flag(flag);
+    const bool boss = !was_on && (world::boss_defeat_flag(flag) || world::world_event_flag(flag));
     // A step of an NPC's that did not line up was not taken home: the event stays undone there, so its step can
     // still come at home.
     if (g_unaligned_events.erase(ev) != 0 && !boss) return;
@@ -2222,10 +2227,11 @@ void mirror_event_done(uint32_t ev, bool was_on) {
 void share_event_end(int flag, bool was_on) {
     if (flag < 0 || was_on || !seamless_rules() || !g_flag_listener) return;
     const bool boss = world::boss_defeat_flag(flag);
-    if (!boss && !drops::watched(flag)) return;
+    const bool world_event = world::world_event_flag(flag);
+    if (!boss && !world_event && !drops::watched(flag)) return;
     if (!game::flag(flag) || g_contested.count(flag) || !shared_flag(flag)) return;
     LOG_INFO("[coop] %s flag %d came on as its event ended: shared with the others",
-             boss ? "Boss defeat" : "One-time enemy's death", flag);
+             boss ? "Boss defeat" : world_event ? "World event" : "One-time enemy's death", flag);
     g_flag_listener(flag, true);
 }
 

@@ -31,12 +31,28 @@ void set_host_scaling(const int* scaling);
 void tick();
 // A boss's defeat flag (every common event 970's first parameter).
 bool boss_defeat_flag(int id);
-// A world event's flag that goes home like a boss's defeat (the Bells of Awakening, Sen's Fortress's gate), and its
-// name for the log (null for any other flag).
+// What goes home with a co-op guest who was in the session when it happened (world.cpp: bosses, the named world
+// events, a map's world flags; not the Firelink Altar and the Kiln, the NPCs' questlines or event state).
+bool goes_home_witnessed(int id);
+// A map's own world flag that goes home when witnessed (doors, gates, lifts, shortcuts, one-time enemies).
+bool world_progress_flag(int id);
+// A named world event (the bells, Sen's gate, New Londo's drain, Anor Londo's darkness, the Firekeepers' deaths), and
+// its name for the log (null for any other flag).
 bool world_event_flag(int id);
 const char* world_event_name(int id);
-// The flags a world event needs in a world that takes it home (they come with it there); their count.
-int world_event_needs(int id, const int** needs);
+// An NPC's death among them: the state range [lo, hi] cleared at home before the dead flag is set.
+bool world_event_clears(int id, int* lo, int* hi);
+// What a world event needs in a world that takes it home (set there too); their count.
+struct WorldEventNeed {
+    int flag;
+    int clear_lo, clear_hi;  // an NPC's state flags cleared before `flag` is set (0: none)
+};
+struct WorldEventNeeds {
+    int flag;
+    WorldEventNeed needs[4];
+    int count;
+};
+int world_event_needs(int id, const WorldEventNeed** needs);
 // Our game's scripts handle the defeat of the boss whose entity is `entity` (Handle Boss Defeat, 2003[12]): the souls
 // our game pays next are that boss's (own_boss_souls).
 void boss_defeat_handled(int entity);

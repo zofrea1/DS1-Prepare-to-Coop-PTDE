@@ -1239,10 +1239,16 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     // in the world is dead for us too, wherever we stood (its souls and items come as well: world.cpp, drops.cpp).
     // Until 1.4.0 every change of the session went home, and with it what our game merely heard of: angeline's own
     // world took Lautrec's murder of the Firekeeper from damn_vix's on 2026-11-02, zofrea1's from 6700k's.
-    // The world events that count like a boss (world::world_event_flag: the Bells of Awakening) go home as well.
-    if (g_applying_remote && !world::boss_defeat_flag(id) && !world::world_event_flag(id)) return;
-    // An NPC's step that does not line up with their state at home (npc_alignment).
-    if (g_npc_aligned == 0) {
+    // Since 2026-11-25 (the user's rule) all world progress witnessed in the session goes home: bosses, the named world
+    // events and a map's world flags (world::goes_home_witnessed: not the endgame, the NPCs' questlines or event state).
+    // An invader takes none of the invaded world's progress home but a boss's defeat, as before.
+    if (g_applying_remote) {
+        const bool boss = world::boss_defeat_flag(id);
+        if (!boss && (g_state.invader || !world::goes_home_witnessed(id))) return;
+    }
+    // An NPC's step that does not line up with their state at home (npc_alignment): not a Firekeeper's death or another
+    // named world event, which go home whatever the NPC's state there.
+    if (g_npc_aligned == 0 && !world::world_event_flag(id)) {
         static int lines = 0;
         if (++lines <= 40) {
             LOG_INFO("[coop] Flag %d %s: an NPC's step in the host's world that does not line up with ours at home; "
@@ -1257,6 +1263,14 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     uint32_t active = 0;
     if (!read32(efm + 0x10C, &active) || active != efm + 0x90) return;
     *ptr<uint32_t>(efm + 0x10C) = efm + 0x14;
+    int clear_lo = 0, clear_hi = 0;
+    if ((value & 0xFF) && world::world_event_clears(id, &clear_lo, &clear_hi)) {
+        ++g_flag_quiet;
+        for (int f = clear_lo; f <= clear_hi; ++f) {
+            if (f != id) call_set_flag(efm, f, 0);
+        }
+        --g_flag_quiet;
+    }
     call_set_flag(efm, id, value & 0xFF);
     if (value & 0xFF) set_home_needs(efm, id);
     *ptr<uint32_t>(efm + 0x10C) = active;
@@ -1264,6 +1278,12 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
     if (const char* name = world::world_event_name(id)) {
         LOG_INFO("[coop] World event in the host's world (flag %d %s%s): %s in our own world too", id,
                  (value & 0xFF) ? "on" : "off", g_applying_remote ? ", from another player's game" : "", name);
+    } else if (g_applying_remote && world::world_progress_flag(id)) {
+        static int lines = 0;
+        if (++lines <= 120) {
+            LOG_INFO("[coop] Witnessed in the host's world (flag %d %s, from another player's game): in our own world "
+                     "too", id, (value & 0xFF) ? "on" : "off");
+        }
     }
 }
 
@@ -1271,16 +1291,20 @@ void __stdcall after_set_flag(uint32_t efm, int id, uint32_t value) {
 // it needs that is still off there is set too, and only that (the bosses on the way stay as they are). Called with our
 // own world's store active (efm+0x10C = efm+0x14).
 void set_home_needs(uint32_t efm, int id) {
-    const int* needs = nullptr;
+    const world::WorldEventNeed* needs = nullptr;
     const int n = world::world_event_needs(id, &needs);
     for (int i = 0; i < n; ++i) {
-        if (game::flag(needs[i])) continue;
+        const world::WorldEventNeed& need = needs[i];
+        if (game::flag(need.flag)) continue;
         ++g_flag_quiet;
-        call_set_flag(efm, needs[i], 1);
+        for (int f = need.clear_lo; need.clear_lo && f <= need.clear_hi; ++f) {
+            if (f != need.flag) call_set_flag(efm, f, 0);
+        }
+        call_set_flag(efm, need.flag, 1);
         --g_flag_quiet;
-        LOG_INFO("[coop] World event %d (%s) taken home needs %d (%s) there: set in our own world too", id,
-                 world::world_event_name(id), needs[i],
-                 world::world_event_name(needs[i]) ? world::world_event_name(needs[i]) : "?");
+        const char* what = world::world_event_name(id);
+        LOG_INFO("[coop] Flag %d (%s) taken home needs %d there: set in our own world too%s", id, what ? what : "world",
+                 need.flag, need.clear_lo ? " (that NPC's other states cleared)" : "");
     }
 }
 
@@ -2215,7 +2239,7 @@ void mirror_event_done(uint32_t ev, bool was_on) {
     const int flag = event_done_flag(ev);
     if (flag < 0) return;
     const bool mirrored = g_mirroring_events.erase(ev) != 0;
-    const bool boss = !was_on && (world::boss_defeat_flag(flag) || world::world_event_flag(flag));
+    const bool boss = !was_on && world::goes_home_witnessed(flag);
     // A step of an NPC's that did not line up was not taken home: the event stays undone there, so its step can
     // still come at home.
     if (g_unaligned_events.erase(ev) != 0 && !boss) return;
@@ -2249,7 +2273,9 @@ void mirror_event_done(uint32_t ev, bool was_on) {
 void share_event_end(int flag, bool was_on) {
     if (flag < 0 || was_on || !seamless_rules() || !g_flag_listener) return;
     const bool boss = world::boss_defeat_flag(flag);
-    const bool world_event = world::world_event_flag(flag);
+    // World progress a game made by ending its event (many doors and lifts set no flag of their own): the others learn
+    // of it, so a guest anywhere in the session takes it home (goes_home_witnessed).
+    const bool world_event = !g_state.invader && (world::world_event_flag(flag) || world::world_progress_flag(flag));
     if (!boss && !world_event && !drops::watched(flag)) return;
     if (!game::flag(flag) || g_contested.count(flag) || !shared_flag(flag)) return;
     LOG_INFO("[coop] %s flag %d came on as its event ended: shared with the others",

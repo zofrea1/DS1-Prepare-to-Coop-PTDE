@@ -1069,36 +1069,86 @@ bool boss_defeat_flag(int id) {
     return std::find(std::begin(kBossDefeatFlags), std::end(kBossDefeatFlags), id) != std::end(kBossDefeatFlags);
 }
 
-// World events that go home like a boss's defeat (2026-11-25, the user's call: "they should be like bosses"): rung in
-// the host's world while a co-op guest is there, by anyone, a Bell of Awakening is rung in the guest's own world too,
-// and with both rung there Sen's Fortress's gate is open. (Vanilla and up to 2.6.0: only the player who pulled the
-// bell's lever took it home, since a change only another player's game made stays in the host's world.)
+// What goes home with a co-op guest who was in the session when it happened (the user's rule, 2026-11-25, in place of
+// 1.4.0's "only what our own game did": being in the session counts as witnessing it, wherever in the host's world one
+// stands). A change another player's game made and sent us (apply_remote_flag) is written into our own world too when
+// it is world progress (goes_home_witnessed): a boss's defeat, the named world events below, and a map's own world flag
+// (doors, gates, levers, lifts, ladders, shortcuts, one-time enemies, the cutscene events that open a way, a key door
+// opened without our having the key). The host's world as it was before we came never comes home (it reaches us as a
+// copy at the join, not through the flag setter). Left out, by the user's choice:
+//  * the Firelink Altar and the Kiln of the First Flame (m18_00, 1180xxxx): the Lordvessel placed, the Lord Souls, the
+//    Kiln's opening; they gate the endgame, and each player places their own (quick when they were there for it, a trek
+//    through what they missed when they were not)
+//  * the NPCs' questlines (flags 1000-1999 and the maps' NPC events, xxxx05xx): today's rules (npc_alignment), still
+//    to be decided, but for the Firekeepers' deaths and Gwynevere's (below)
+//  * the maps' event-state flags (xxxx5xxx: a fight's phase, an event's own working flags): no progress.
+// A world event can bring what it stands on in that world (kWorldEventNeeds): only that, never the bosses on the way.
 struct WorldEvent {
     int flag;
     const char* name;
+    int clear_lo, clear_hi;  // an NPC's state flags, all cleared at home before `flag` is set (0: none)
 };
 constexpr WorldEvent kWorldEvents[] = {
-    {11010700, "the Undead Parish's Bell of Awakening rung"},  // its lever's ObjAct flag and its event's end
-    {11400200, "the Bell of Awakening in Quelaag's Domain rung"},  // its event sets it at its end
-    {11500200, "both bells rung: Sen's Fortress's gate open"},  // the second bell's event sets it
+    {11010700, "the Undead Parish's Bell of Awakening rung", 0, 0},  // its lever's ObjAct flag and its event's end
+    {11400200, "the Bell of Awakening in Quelaag's Domain rung", 0, 0},  // its event sets it at its end
+    {11500200, "both bells rung: Sen's Fortress's gate open", 0, 0},  // the second bell's event sets it
+    {11600100, "New Londo's water drained", 0, 0},
+    {11510400, "Anor Londo darkened: Gwynevere is gone", 0, 0},
+    {590, "the door between the Depths and Blighttown opened", 0, 0},  // a global flag (m10_00 event 11000110)
+    // The Firekeepers' deaths (each NPC's death event, xxxx0520 or Firelink's 11020530: her state range cleared, her
+    // dead flag set): her bonfire is unkindled at home too.
+    {1177, "Anastacia of Astora, Firelink Shrine's Firekeeper, is dead", 1170, 1180},
+    {1034, "the Darkmoon Knightess, Anor Londo's Firekeeper, is dead", 1030, 1036},
+    {1272, "the Daughter of Chaos, Quelaag's Domain's Firekeeper, is dead", 1270, 1279},
 };
 
-bool world_event_flag(int id) { return world_event_name(id) != nullptr; }
+const WorldEvent* world_event(int id) {
+    for (const auto& e : kWorldEvents) {
+        if (e.flag == id) return &e;
+    }
+    return nullptr;
+}
 
-// What a world event stands on in a world that takes it home (the user's rule, 2026-11-25: only what is witnessed in
-// the session comes home, but nothing that leaves that world inconsistent): Sen's Fortress's gate opens on both bells
-// rung, so a guest who saw the second bell rung (the gate opening) gets the first one at home too, even though it was
-// rung before they came. Not the Bell Gargoyles or Quelaag: their fights stay theirs.
-struct WorldEventNeeds {
-    int flag;
-    int needs[4];
-    int count;
-};
+bool world_event_flag(int id) { return world_event(id) != nullptr; }
+
+const char* world_event_name(int id) {
+    const WorldEvent* e = world_event(id);
+    return e ? e->name : nullptr;
+}
+
+bool world_event_clears(int id, int* lo, int* hi) {
+    const WorldEvent* e = world_event(id);
+    if (!e || !e->clear_lo) return false;
+    *lo = e->clear_lo;
+    *hi = e->clear_hi;
+    return true;
+}
+
+bool world_progress_flag(int id) {
+    if (id < 10000000 || id >= 20000000) return false;
+    if (id >= 11800000 && id <= 11809999) return false;  // the Firelink Altar and the Kiln: the endgame stays
+    const int local = id % 10000;
+    if (local >= 500 && local <= 599) return false;  // the maps' NPC events
+    if (local >= 5000 && local <= 5999) return false;  // event state, no progress
+    return true;
+}
+
+bool goes_home_witnessed(int id) { return boss_defeat_flag(id) || world_event_flag(id) || world_progress_flag(id); }
+
+// What a world event stands on in a world that takes it home: set there too when still off, and only that (the user's
+// rule: nothing that leaves that world inconsistent, nothing taken in bulk). Sen's Fortress's gate opens on both bells,
+// so a guest who saw the second bell gets the first at home, even rung before they came, but not the Bell Gargoyles or
+// Quelaag. The drain stands on its seal, the lifts below the water line on the drain, Anor Londo's darkness on
+// Gwynevere's death (her states 1230-1239 cleared, 1232 set: m15_01 event 11510520 slot 2).
 constexpr WorldEventNeeds kWorldEventNeeds[] = {
-    {11500200, {11010700, 11400200}, 2},
+    {11500200, {{11010700, 0, 0}, {11400200, 0, 0}}, 2},
+    {11600100, {{11600101, 0, 0}}, 1},
+    {11600211, {{11600100, 0, 0}}, 1},
+    {11600221, {{11600100, 0, 0}}, 1},
+    {11510400, {{1232, 1230, 1239}}, 1},
 };
 
-int world_event_needs(int id, const int** needs) {
+int world_event_needs(int id, const WorldEventNeed** needs) {
     for (const auto& e : kWorldEventNeeds) {
         if (e.flag == id) {
             *needs = e.needs;
@@ -1106,13 +1156,6 @@ int world_event_needs(int id, const int** needs) {
         }
     }
     return 0;
-}
-
-const char* world_event_name(int id) {
-    for (const auto& e : kWorldEvents) {
-        if (e.flag == id) return e.name;
-    }
-    return nullptr;
 }
 
 namespace {

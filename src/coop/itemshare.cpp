@@ -38,11 +38,18 @@ namespace {
 // Pickup (0xDC9460, stdcall(manager, handle), from the action 0xD535A0): an item with 0x80 goes through 0xDC8EB0 (a
 // client asks the host, kind 5; else 0xDC8E50: removed with 0xDC78A0, which tells clients, and given), one without is
 // removed with 0xDC76F0 and given with 0xDC8CD0 (the items that do not fit are dropped again).
-// A drop we share loses its 0x80 at once (hk_net_create, before 0xDC7E00 reads it at 0xDC7E1B), and our copies of the
-// others' never have it: the game's own channel stays out of it. With 0x80 a host's drop also went out as packet 0x2A
-// kind 4; co-op guests drop those, but an invader's game made it, could pick it up (kind 5, which the host's game
-// answers at 0xDC906A with 0xDC78A0 and kind 6, past our pickup) and keep it while every co-op copy stayed on the
-// floor (Grok review be211f6c). Without 0x80 the game removes it with 0xDC76F0 and gives it with 0xDC8CD0.
+// Invaders (the user's choice, 2026-11-25, rolling back the rule of the Grok review be211f6c that kept them out): an
+// invader's game keeps the game's own client rules (it loots nothing of the host's world), so the host's game joins
+// the two channels. On the host every shared drop keeps or gets 0x80, the game's own "the clients see it too": the
+// host's drop (0xDC7E00 sends it to the clients as packet 0x2A kind 4 when 0x80 is set at 0xDC7E1B), an invader's
+// (its game asks the host with kind 3; the host makes it with 0xDC7E00 and hk_net_create shares it with the co-op
+// players) and the host's copy of a co-op guest's (made with 0xDC7E00 too, so it is sent to the invaders). Co-op
+// guests drop the host's item packets (rules.cpp) and see the shared copies only. Every way a shared drop leaves the
+// host's floor tells both sides: the host's pickup of a 0x80 item goes through 0xDC8E50 -> 0xDC78A0 (which tells the
+// clients, kind 2), a guest's through remote_claim -> drop_copy (0xDC78A0 for a 0x80 item), and an invader's pickup
+// request (kind 5, answered at 0xDC906A: 0xDC78A0 at 0xDC908E, then the items to the invader) is seen by
+// hk_client_pickup, which tells the co-op players it is gone. Off the host (a co-op guest), a drop we share loses its
+// 0x80 at once (before 0xDC7E00 reads it), and our copies of the others' never have it.
 // Kind 1 holds 30 at most: 0xDC7B30 removes the oldest (0xDC76F0, from 0xDC7BAA) while [manager+0x14] >= 30 before it
 // links a new one, past our pickup too. A copy is made only while there is room, and one the cap took from our floor
 // (gone outside a load) is made again once there is (tick).
@@ -52,6 +59,10 @@ constexpr uint32_t kCreate = 0x00DC7C80;     // ecx = entry, edx = manager -> th
 constexpr uint32_t kPickup = 0x00DC9460;     // stdcall(manager, handle)
 constexpr uint32_t kFind = 0x00DC4AE0;       // thiscall(manager, handle) -> the object, 0 none
 constexpr uint32_t kRemove = 0x00DC76F0;     // stdcall(manager, handle, 1)
+constexpr uint32_t kHostMake = 0x00DC7E00;   // ecx = entry, edx = manager: made, and sent to the clients when 0x80 is set
+constexpr uint32_t kTellRemove = 0x00DC78A0; // eax = manager, stdcall(handle): removed, and the clients told (host)
+constexpr uint32_t kClientPickupCall = 0x00DC908E;  // the host's answer to a client's pickup request: call 0xDC78A0
+constexpr uint64_t kInvaderTaker = 1;        // "taken by an invader" in our taken messages (no player's id)
 constexpr uint32_t kPlayerDrop = 1;
 constexpr uint32_t kCanPickUp = 0x40;
 constexpr uint32_t kShared = 0x80;
@@ -88,6 +99,9 @@ bool g_host = false;
 uint64_t g_self = 0;
 uint32_t g_seq = 0;
 bool g_granting = false;  // our own pickup of a drop the host gave us: not a request
+bool g_bridge = true;     // the host joins the invaders' channel to ours (install: the sites match)
+bool g_making = false;    // the host making a copy with kHostMake: not a drop of ours
+uint32_t g_made_obj = 0;  // what that making made
 void (*g_out_drop)(const Drop&) = nullptr;
 void (*g_out_claim)(uint64_t, uint32_t) = nullptr;
 void (*g_out_taken)(uint64_t, uint32_t, uint64_t) = nullptr;
@@ -138,6 +152,36 @@ void remove_object(uint32_t man, uint32_t handle) {
         reinterpret_cast<void(__stdcall*)(uint32_t, uint32_t, int)>(kRemove)(man, handle, 1);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+// The host's removal that tells the clients (the invaders' games) too.
+void tell_remove(uint32_t man, uint32_t handle) {
+    __try {
+        __asm {
+            push handle
+            mov eax, man
+            mov ecx, kTellRemove
+            call ecx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// The host's making that sends the item to the clients when the entry has 0x80. The object, 0 if not made.
+uint32_t host_make(uint8_t* entry, uint32_t man) {
+    g_making = true;
+    g_made_obj = 0;
+    __try {
+        __asm {
+            mov ecx, entry
+            mov edx, man
+            mov eax, kHostMake
+            call eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    g_making = false;
+    return g_made_obj;
 }
 
 uint32_t entry_u32(const uint8_t* e, int at) {
@@ -246,11 +290,13 @@ bool note_created(uint32_t obj) {
     if (!read_entry(obj, e)) return false;
     const uint32_t handle = entry_u32(e, 0), flags = entry_u32(e, 0x28);
     if ((handle & 0xF) != kPlayerDrop || !(flags & kShared) || !(flags & kCanPickUp)) return false;
-    // Only our player's own drop: one at our feet (a host's game also makes the drops its clients ask for, kind 3).
+    // Our player's own drop: one at our feet. A host's game also makes the drops its clients ask for (kind 3): an
+    // invader's (a co-op guest's game makes its own), shared with the co-op players as well.
     game::Vec3 me{};
     if (!game::position(&me, nullptr)) return false;
     const float dx = entry_f(e, 0x10) - me.x, dz = entry_f(e, 0x18) - me.z;
-    if (std::sqrt(dx * dx + dz * dz) > kAtOurFeet || !sane(e)) return false;
+    const bool ours = std::sqrt(dx * dx + dz * dz) <= kAtOurFeet;
+    if ((!ours && !(g_host && g_bridge)) || !sane(e)) return false;
     // A count of our own, from the time we started: a game started again does not repeat a drop the others still know.
     if (!g_seq) g_seq = static_cast<uint32_t>(std::time(nullptr)) << 4;
     Drop d;
@@ -266,8 +312,8 @@ bool note_created(uint32_t obj) {
     s.handle = handle;
     s.made = true;
     if (++g_lines <= 200) {
-        LOG_INFO("[coop] Our drop (%s) lies on the other co-op players' floors too (map %08X)", items_text(e).c_str(),
-                 d.map);
+        LOG_INFO("[coop] %s drop (%s) lies on the other co-op players' floors too (map %08X)",
+                 ours ? "Our" : "An invader's", items_text(e).c_str(), d.map);
     }
     if (g_out_drop) g_out_drop(d);
     return true;
@@ -275,7 +321,12 @@ bool note_created(uint32_t obj) {
 
 uint32_t __fastcall hk_net_create(void* entry, uint32_t man) {
     const uint32_t obj = g_net_create_orig(entry, man);
-    if (obj && note_created(obj)) {
+    if (g_making) {
+        g_made_obj = obj;  // the host's copy of another's drop (host_make)
+        return obj;
+    }
+    if (obj && note_created(obj) && !(g_host && g_bridge)) {
+        // A guest's drop: the game's own channel stays out of it (the host's keeps 0x80 for the invaders).
         uint32_t flags = 0;
         if (read32(obj + 0x38, &flags)) *ptr<uint32_t>(obj + 0x38) = flags & ~kShared;
     }
@@ -288,15 +339,17 @@ bool room(uint32_t man) {
     return read32(man + kDropCount, &n) && n < kDropCap;
 }
 
-// Our copy of a drop, made by our item manager as one of its own (a handle of its own, no 0x80). The handle, 0 if not.
+// Our copy of a drop, made by our item manager as one of its own (a handle of its own). A guest's has no 0x80; the
+// host's has it and is sent to the clients, so the invaders see it too. The handle, 0 if not.
 uint32_t make_copy(Shared& s, uint32_t man) {
     uint8_t e[kEntryBytes];
     std::memcpy(e, s.d.entry, sizeof(e));
     e[0] = static_cast<uint8_t>(kPlayerDrop);
     e[1] = e[2] = e[3] = 0;
-    const uint32_t flags = (entry_u32(e, 0x28) | kCanPickUp) & ~kShared;
+    const bool bridge = g_host && g_bridge;
+    const uint32_t flags = bridge ? (entry_u32(e, 0x28) | kCanPickUp | kShared) : (entry_u32(e, 0x28) | kCanPickUp) & ~kShared;
     std::memcpy(e + 0x28, &flags, 4);
-    const uint32_t obj = create(e, man);
+    const uint32_t obj = bridge ? host_make(e, man) : create(e, man);
     uint32_t handle = 0;
     if (!obj || !read32(obj + 0x10, &handle)) return 0;
     s.handle = handle;
@@ -348,8 +401,41 @@ void __stdcall hk_pickup(uint32_t man, uint32_t handle) {
 // Our copy of a drop someone else took: off our floor.
 void drop_copy(Shared& s) {
     const uint32_t man = manager();
-    if (man && !game::loading() && copy_here(s, man)) remove_object(man, s.handle);
+    if (man && !game::loading() && copy_here(s, man)) {
+        // The host's copies carry 0x80: the invaders' games have them too and are told.
+        uint32_t obj = find_object(man, s.handle), flags = 0;
+        if (g_host && obj && read32(obj + 0x38, &flags) && (flags & kShared)) {
+            tell_remove(man, s.handle);
+        } else {
+            remove_object(man, s.handle);
+        }
+    }
     s.handle = 0;
+}
+
+// An invader's game asked the host to pick up an item (kind 5): the host's answer removes it with 0xDC78A0 (eax =
+// manager, the handle pushed) and gives it to them. One of the shared drops: taken, and the co-op players are told.
+void __stdcall note_client_pickup(uint32_t man, uint32_t handle) {
+    if (!g_coop || !g_host || !g_enabled) return;
+    Shared* s = by_handle(man, handle);
+    if (!s || s->taken) return;
+    s->taken = true;
+    s->taker = kInvaderTaker;
+    s->handle = 0;
+    if (++g_lines <= 200) LOG_INFO("[coop] An invader picked up a shared drop (%s)", items_text(s->d.entry).c_str());
+    if (g_out_taken) g_out_taken(s->d.origin, s->d.seq, kInvaderTaker);
+}
+
+__declspec(naked) void hk_client_pickup() {
+    __asm {
+        pushad
+        push dword ptr [esp + 0x24]  // the handle (above pushad's 32 bytes and the return address)
+        push eax                     // the manager
+        call note_client_pickup
+        popad
+        mov ecx, kTellRemove
+        jmp ecx
+    }
 }
 
 }  // namespace
@@ -381,6 +467,12 @@ bool install() {
         LOG_ERROR("[coop] Shared drops: the pickup does not match this build; drops stay with their player");
         g_enabled = false;  // the maker is hooked but does nothing then
         return false;
+    }
+    if (!bytes_match(kHostMake, "\xA1\x2C\xD8\x37\x01", 5) || !bytes_match(kTellRemove, "\x8B\x0D\x2C\xD8\x37\x01", 6) ||
+        !redirect_call(kClientPickupCall, kTellRemove, reinterpret_cast<void*>(&hk_client_pickup))) {
+        LOG_ERROR("[coop] Shared drops: the host's item maker or the invaders' pickups do not match this build; "
+                  "invaders' and co-op players' drops stay apart");
+        g_bridge = false;
     }
     return true;
 }

@@ -1049,8 +1049,11 @@ constexpr double kGroupLeaveFor = 120.0;
 // The group's host waits this long for a world's lobby and its answer before asking the next.
 // An answer takes a fraction of a second, but a first packet Steam did not let through at once comes 3.4 s later
 // (a session request that came before the asked host accepted us; joins show it too, 2026-11-07): 2 s missed every
-// ask that came that way, and the asker's leave then closed the link before it came. Was 8 s, then 2 s.
-constexpr double kGroupAskWait = 4.0;
+// ask that came that way, and the asker's leave then closed the link before it came. Was 8 s, then 2 s, then 4 s, which
+// a host whose Steam told it of the join late still missed (DarKevin, 2026-11-25: 8 of 9 asks unanswered within 4 s, one
+// answered in 1.6 s; a lone knock there, sent again, always got in). Hosts of this version accept such a request the
+// moment the join is told (steam.cpp); older ones still wait for Steam's second request.
+constexpr double kGroupAskWait = 6.0;
 // Home and standing this long before a group's player knocks or comes back (a quarter of what they were, 1.6.0).
 constexpr double kGroupLeadKnockAfter = 0.15;
 constexpr double kGroupKnockAfter = 0.4;

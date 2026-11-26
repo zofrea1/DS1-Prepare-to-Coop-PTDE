@@ -171,6 +171,10 @@ std::function<void(uint64_t, uint64_t, bool)> g_member_fn;
 std::function<void(uint64_t, int)> g_fail_fn;
 std::set<uint64_t> g_accepted;
 std::function<bool(uint64_t)> g_accept_check;
+// Session requests that came before Steam's word that their player entered our lobby: accepted the moment that word
+// comes (LobbyChatUpdate), not when Steam asks again 3.4 s later. A group's ask came that way to a host (DarKevin,
+// 2026-11-25: 8 of 9 asks unanswered within the asker's 4 s while a lone invader's knocks, sent again, got in).
+std::map<uint64_t, ULONGLONG> g_waiting_requests;
 
 // ------------------------------------------------------------------ callbacks
 template <typename T>
@@ -238,6 +242,21 @@ void register_callbacks() {
         // k_EChatMemberStateChangeEntered = 1; left/disconnected/kicked/banned = 2/4/8/16
         const bool entered = (u.m_rgfChatMemberStateChange & 1) != 0;
         if (g_member_fn) g_member_fn(u.m_ulSteamIDLobby, u.m_ulSteamIDUserChanged, entered);
+        const uint64_t who = u.m_ulSteamIDUserChanged;
+        const auto waiting = g_waiting_requests.find(who);
+        if (entered && waiting != g_waiting_requests.end()) {
+            const ULONGLONG waited = GetTickCount64() - waiting->second;
+            g_waiting_requests.erase(waiting);
+            if (waited < 30000 && !g_accepted.count(who) && g_accept_check && g_accept_check(who)) {
+                g_accepted.insert(who);
+                queue_accept(who);
+                static int told = 0;
+                if (++told <= 40) {
+                    LOG_INFO("[coop] Steam: %s's session accepted as they entered our lobby (their request came %.1f s "
+                             "before)", persona(who).c_str(), waited / 1000.0);
+                }
+            }
+        }
     });
     g_cb_p2p_request = new Callback<P2PSessionRequest_t>([](const P2PSessionRequest_t& r) {
         const uint64_t peer = r.m_steamIDRemote.ConvertToUint64();
@@ -251,8 +270,13 @@ void register_callbacks() {
         }
         if (g_accepted.count(peer)) {
             queue_accept(peer);  // in order with our closes (the network thread)
-        } else if (++lines <= 40) {
-            LOG_INFO("[coop] Steam: a session request from %s not accepted yet (not in our lobby)", persona(peer).c_str());
+        } else {
+            if (g_waiting_requests.size() > 64) g_waiting_requests.clear();
+            g_waiting_requests[peer] = GetTickCount64();
+            if (++lines <= 40) {
+                LOG_INFO("[coop] Steam: a session request from %s not accepted yet (not in our lobby)",
+                         persona(peer).c_str());
+            }
         }
     });
     g_cb_p2p_fail = new Callback<P2PSessionConnectFail_t>([](const P2PSessionConnectFail_t& f) {

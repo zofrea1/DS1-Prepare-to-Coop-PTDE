@@ -753,6 +753,7 @@ volatile LONG g_test_pending = 0;
 volatile LONG g_check_pending = -1;
 int g_test_index = -1, g_test_wanders = 2;
 bool g_test_humanity = false;
+uint32_t g_test_item = 0;
 
 uint32_t call_add(uint32_t d, uint32_t* data) {
     __try {
@@ -772,7 +773,7 @@ void run_test() {
                  game::player() ? "yes" : "no");
         return;
     }
-    const uint32_t item = g_test_humanity ? kHumanityItem : kTestItem;
+    const uint32_t item = g_test_humanity ? kHumanityItem : g_test_item ? g_test_item : kTestItem;
     uint32_t data[8];
     std::memcpy(&data[0], &pos.x, 4);
     std::memcpy(&data[1], &pos.y, 4);
@@ -787,7 +788,8 @@ void run_test() {
     if (added) read32(added + 0x20, &bits);
     LOG_INFO("[net] Vagrant test: %s (%s, map index %d, wander count %d) at (%.1f, %.1f, %.1f): item %08X, flags %08X; "
              "%d held",
-             added ? "added" : "NOT added", g_test_humanity ? "humanity" : "Prism Stone", index, g_test_wanders, pos.x,
+             added ? "added" : "NOT added", g_test_humanity ? "humanity" : g_test_item ? "the item asked" : "Prism Stone",
+             index, g_test_wanders, pos.x,
              pos.y, pos.z, added, bits, held());
 }
 
@@ -873,7 +875,8 @@ void tick() {
 
 void check_test(int map_index) { InterlockedExchange(&g_check_pending, map_index); }
 
-void add_test(int map_index, int wanders, bool humanity) {
+void add_test(int map_index, int wanders, bool humanity, uint32_t item) {
+    g_test_item = item;
     g_test_index = map_index;
     g_test_wanders = (std::max)(1, (std::min)(wanders, 999));
     g_test_humanity = humanity;

@@ -10,6 +10,7 @@
 // before it leaves). With NetworkEventLog the map loads' vagrant checks have their lines too.
 
 #include <cstddef>
+#include <cstdint>
 
 namespace coop::vagrants {
 
@@ -29,8 +30,9 @@ int held();
 int targets();
 // Test (RemoteControl "vagrant"): on the next frame, a vagrant at our feet as if another game had passed it on, for
 // map index `map_index` (the number the map load's check is given; -1: the last one checked), with wander count
-// `wanders`; `humanity`: the game's humanity vagrant (goods 350) instead of an item (Prism Stone).
-void add_test(int map_index, int wanders, bool humanity);
+// `wanders`; `humanity`: the game's humanity vagrant (goods 350) instead of an item (Prism Stone, or `item` when not 0:
+// the game's item id, category in the top nibble).
+void add_test(int map_index, int wanders, bool humanity, uint32_t item = 0);
 // Test (RemoteControl "vagrantcheck N"): on the next frame, the map check for map index N, as a load runs it.
 void check_test(int map_index);
 

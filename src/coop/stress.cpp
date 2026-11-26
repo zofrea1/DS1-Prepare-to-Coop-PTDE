@@ -619,7 +619,8 @@ bool remote(const char* line, char* reply, size_t size) {
         int index = -1, wanders = 2;
         char kind[8] = "";
         sscanf_s(line, "%*s %d %d %7s", &index, &wanders, kind, static_cast<unsigned>(sizeof(kind)));
-        vagrants::add_test(index, wanders, kind[0] == 'h');
+        // r: Rubbish (goods 380), an item with a vagrant item lot (the Prism Stone has none).
+        vagrants::add_test(index, wanders, kind[0] == 'h', kind[0] == 'r' ? 0x4000017Cu : 0u);
         std::snprintf(reply, size, "vagrant %d %d %s: in the log", index, wanders, kind[0] == 'h' ? "humanity" : "item");
         return true;
     }

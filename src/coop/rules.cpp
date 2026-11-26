@@ -4,6 +4,7 @@
 
 #include "drops.h"
 #include "farenemies.h"
+#include "spectate.h"
 #include "game.h"
 #include "hook.h"
 #include "log.h"
@@ -1671,6 +1672,19 @@ uint32_t g_kill_reward_skip = kKillRewardSkip;
 float g_kill_souls_floor = 0.0f;
 
 bool __cdecl kill_reward_here(uint32_t chr) {
+    // An enemy updated here only for the Death Knell's view of a teammate (spectate::view_pinned: its rate fixed by the
+    // view, not ours): their kill, as below for one shown for another player (Grok review, 2026-11-26). The body pins
+    // around our own standing character are not these and pay as before.
+    if (chr && spectate::view_pinned(chr)) {
+        static int lines = 0;
+        if (++lines <= 30) {
+            uint32_t entity = 0;
+            read32(chr + 0x208, &entity);
+            LOG_INFO("[coop] Enemy %d died where our Death Knell view shows a teammate: no souls for it here",
+                     static_cast<int>(entity));
+        }
+        return false;
+    }
     // An enemy shown here only for another player near it (EnemiesNearOtherPlayers): their kill, far from us, as before
     // it was shown (it was not active here then, and paid nothing).
     if (chr && farenemies::shown_only(chr)) {
@@ -5522,8 +5536,12 @@ uint32_t change_hold(uint32_t chr, const game::Vec3& at, const game::Vec3& me) {
 uint32_t net_priority(uint32_t chr) {
     using Fn = uint32_t(__stdcall*)(uint32_t);
     const uint32_t bid = reinterpret_cast<Fn>(kNetPriority)(chr);
-    // An enemy shown here only for another player near it (EnemiesNearOtherPlayers): never ours to run, far from us.
-    if (bid && farenemies::shown_only(chr)) return 0;
+    // An enemy shown here only for another player near it (EnemiesNearOtherPlayers), or updated here only for the Death
+    // Knell's view of a teammate (spectate::view_pinned): never ours to run. The view's fixed rate bids 6 x 256 against
+    // a normal step's 4 x 256, and kept it when we stood within reach or the teammate was in another area, so the
+    // hand-out could give the kneeling game the enemies around the teammate it watches (Grok review, 2026-11-26). The
+    // body pins around our own standing character keep their bid.
+    if (bid && (farenemies::shown_only(chr) || spectate::view_pinned(chr))) return 0;
     if (bid && g_state.active && g_state.invader && !g_state.leaving) {
         static bool told = false;
         if (!told) {

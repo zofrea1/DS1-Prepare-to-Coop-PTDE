@@ -303,14 +303,15 @@ Look look(int map_index) {
 // 0xDD6830/6870/68B0 the spot's entity) when that spot is in the list of the vagrant enemies made (db+0x3C), and the
 // enemy goes to where the vagrant was lost. Every map has spots but Firelink Shrine (m10_02): no c3490/c3491 there and
 // every collision's three entities -1, so a vagrant lost there never came. Its map (the MSB, read by 0xD24460 from a
-// copy of the file: ecx = its size, the second argument the file's bytes) now gets three spots of the Undead Burg's
-// kind (vagrant_spots.inc) at the places the user chose, on the collisions under them, and every collision names one
-// (the shrine's by default). The parts of each kind lie together in an MSB (the loader keeps each kind's first index
-// and count, 0xD24BBB), so the two models go after its enemy models and the nine parts after its enemies, and every
-// index past them is moved on: each event's part (base +0), a treasure's and an object action's (+4 in their data),
-// an object's and an enemy's collision (+4 / +0x1C, their dummies too) and a connecting collision's (+0). At each
-// Firelink check, a vagrant lost there from another game is moved to the free point of the place nearest to where it
-// was lost (a point with a character on it is passed over: Petrus's ruin has NPCs) and its floor names that place.
+// copy of the file: ecx = its size, the second argument the file's bytes) now gets spots of the Undead Burg's kind
+// (vagrant_spots.inc, three enemies a place) at the places the user chose, on the collisions under them, and every
+// collision names one (Petrus's ruin by default). The parts of each kind lie together in an MSB (the loader keeps each
+// kind's first index and count, 0xD24BBB), so the two models go after its enemy models and the parts after its
+// enemies, and every index past them is moved on: each event's part (base +0), a treasure's and an object action's
+// (+4 in their data), an object's and an enemy's collision (+4 / +0x1C, their dummies too) and a connecting
+// collision's (+0). At each Firelink check, a vagrant lost there from another game is moved to the free point of the
+// place nearest to where it was lost (a point with a character on it is passed over: Petrus's ruin has NPCs) and its
+// floor names that place.
 #include "vagrant_spots.inc"
 
 constexpr uint32_t kMsbLoad = 0x00D24460;  // ecx = size, stack (map's MSB object, file bytes)
@@ -324,13 +325,17 @@ struct Place {
     game::Vec3 at[3];
     int n;
 };
+// 2.7.0's third place, between the Firekeeper and Lautrec above the New Londo lift, is gone (2.7.1, the user): it lay
+// on h0001B2, one of the floors that name the shrine's bonfire (MSB1 Collision DisableBonfireEntityID 1021960), and a
+// bonfire is off while a character hostile to players stands on one of its floors (0xE3DF90, the bonfire's update;
+// waiting enemies count too). Its three waiting enemies kept Firelink's bonfire off for every player. The game's own
+// spots never stand on a bonfire's floor, and neither do these two.
 const Place kPlaces[] = {
     {"the bridge by the Ring of Sacrifice", "h0028B2_0000", {{-32.1f, -50.0f, 3.1f}, {-29.6f, -50.0f, 4.6f}, {-34.6f, -50.0f, 1.6f}}, 3},
     {"Petrus's ruin", "h0007B2_0000", {{-25.0f, -53.27f, 83.5f}, {-26.1f, -53.27f, 83.1f}, {-24.0f, -53.27f, 84.0f}}, 3},
-    {"between the Firekeeper and Lautrec", "h0001B2_0000", {{-55.6f, -64.57f, 47.6f}, {-56.7f, -64.74f, 45.8f}, {}}, 2},
 };
-constexpr int kPlaceCount = 3;
-constexpr int kDefaultPlace = 2;
+constexpr int kPlaceCount = sizeof(kPlaces) / sizeof(kPlaces[0]);
+constexpr int kDefaultPlace = 1;  // the place every other collision names (Petrus's ruin, by the bonfire)
 bool g_spots = true;          // VagrantSpotsFirelink
 volatile LONG g_spots_in = 0;  // Firelink's map got them (this load)
 void* g_msb_load_orig = nullptr;
@@ -629,9 +634,10 @@ bool someone_near(const game::Vec3& at) {
 
 // The free point of the place nearest to `lost`, or -1. `used`: points taken in this check.
 int firelink_point(const game::Vec3& lost, std::vector<game::Vec3>& used, game::Vec3* out) {
-    int order[kPlaceCount] = {0, 1, 2};
+    int order[kPlaceCount];
     float dist[kPlaceCount];
     for (int i = 0; i < kPlaceCount; ++i) {
+        order[i] = i;
         const game::Vec3& a = kPlaces[i].at[0];
         dist[i] = (a.x - lost.x) * (a.x - lost.x) + (a.y - lost.y) * (a.y - lost.y) + (a.z - lost.z) * (a.z - lost.z);
     }

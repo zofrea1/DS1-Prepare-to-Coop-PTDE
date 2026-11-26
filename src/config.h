@@ -108,7 +108,7 @@ struct CoopConfig {
     int vagrant_wanders = 2;
     int vagrant_stay = 150;
     bool vagrant_pass_on_at_quit = true;
-    // Firelink Shrine's map gets vagrant spots at three places (vagrants.cpp).
+    // Firelink Shrine's map gets vagrant spots at two places (vagrants.cpp).
     bool vagrant_spots_firelink = true;
     // More vagrants (the user, 2026-11-26): the world's rest after one came, the humanity a lost bloodstain needs, and
     // a check at once for one that arrives while its map is loaded (vagrants.cpp).

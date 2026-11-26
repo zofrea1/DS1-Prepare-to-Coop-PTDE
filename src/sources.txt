@@ -34,6 +34,7 @@ src\coop\vanillamp.cpp
 src\coop\netlog.cpp
 src\coop\bells.cpp
 src\coop\vagrants.cpp
+src\coop\achievements.cpp
 src\coop\jolly.cpp
 src\coop\netsafe.cpp
 src\coop\visible.cpp

@@ -2,6 +2,8 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "coop.h"
 
+#include "achievements.h"
+
 #if __has_include("ptc_build.h")
 #include "ptc_build.h"  // build.bat: the commit this build is made from
 #endif
@@ -369,6 +371,7 @@ void tick_body() {
     coop::stress::tick();
     coop::netlog::tick();
     coop::vagrants::tick();
+    coop::achievements::tick(g_cfg.steam_achievements);
     coop::bells::tick();
     coop::updates::tick();
     if (g_items) {

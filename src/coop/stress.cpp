@@ -10,6 +10,7 @@
 // thread's frames for S seconds (frames, mean and worst frame time, the 99th percentile) into the log and the reply
 // file. Diagnostics only: a release build's remote control is a stub, so neither command ever comes.
 #include "stress.h"
+#include "achievements.h"
 #include "bells.h"
 #include "vagrants.h"
 
@@ -591,6 +592,10 @@ bool remote(const char* line, char* reply, size_t size) {
         sscanf_s(line, "%*s %d", &id);
         if (cmd[4] == 'r') bells::received(id); else bells::send_event(id);
         std::snprintf(reply, size, "%s %d: in the log", cmd, id);
+        return true;
+    }
+    if (std::strcmp(cmd, "ach") == 0) {
+        achievements::test(line, reply, size);
         return true;
     }
     if (std::strcmp(cmd, "notice") == 0) {

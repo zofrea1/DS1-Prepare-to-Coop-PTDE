@@ -19,6 +19,7 @@
 #include "handout_pair.h"
 #include "hook.h"
 #include "log.h"
+#include "netlog.h"
 #include "partylist.h"
 #include "players.h"
 #include "session.h"
@@ -598,6 +599,14 @@ bool remote(const char* line, char* reply, size_t size) {
     }
     if (std::strcmp(cmd, "ach") == 0) {
         achievements::test(line, reply, size);
+        return true;
+    }
+    if (std::strcmp(cmd, "msgtrace") == 0) {
+        // msgtrace N: the next N new messages and bloodstains from linked games, raw, with their sender (netlog.cpp).
+        int n = 40;
+        sscanf_s(line, "%*s %d", &n);
+        netlog::trace_messages(n);
+        std::snprintf(reply, size, "msgtrace: the next %d in the log", n);
         return true;
     }
     if (std::strcmp(cmd, "lobbydump") == 0) {

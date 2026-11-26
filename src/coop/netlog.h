@@ -26,5 +26,8 @@ void lobby_data(uint64_t lobby, const char* key, const char* value);
 void search_distance(int value);
 // How many other games the game is linked with now (its node table).
 int link_count();
+// Diagnostics (RemoteControl "msgtrace N"): the next N new messages and bloodstains from linked games in the log, each
+// with its first 64 bytes and the game that sent it (do games pass on what others wrote?).
+void trace_messages(int lines);
 
 }  // namespace coop::netlog

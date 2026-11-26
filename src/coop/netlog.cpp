@@ -107,6 +107,56 @@ void map_text(char* out, size_t n) {
     }
 }
 
+bool read_wide(uint32_t addr, wchar_t* out, int n);
+
+volatile LONG g_trace_left = 0;
+std::mutex g_trace_lock;
+std::set<std::string> g_traced;
+
+// The sender of a packet: the handler's `from` read as a node's player (+0x30 the name, +0xC -> +0x30 the Steam id as
+// UTF-16 hex), and as the player's +0xC; whichever reads.
+std::string sender_text(uint32_t from) {
+    std::string out;
+    for (int hop = 0; hop < 2 && from; ++hop) {
+        uint32_t p = from, online = 0;
+        if (hop == 1 && !read32(from + 0xC, &p)) break;
+        wchar_t id[24] = {}, name[33] = {};
+        read_wide(p + 0x30, name, 33);
+        if (read32(p + 0xC, &online) && online) read_wide(online + 0x30, id, 24);
+        char nm[100] = "", idn[40] = "";
+        WideCharToMultiByte(CP_UTF8, 0, name, -1, nm, sizeof(nm), nullptr, nullptr);
+        WideCharToMultiByte(CP_UTF8, 0, id, -1, idn, sizeof(idn), nullptr, nullptr);
+        char b[200];
+        std::snprintf(b, sizeof(b), "%s[%s %s]", hop ? " " : "", nm, idn);
+        out += b;
+    }
+    return out;
+}
+
+void trace_packet(int n, uint32_t from, uint8_t kind, uint32_t data) {
+    if (g_trace_left <= 0 || !data) return;
+    uint8_t raw[64] = {};
+    for (int i = 0; i < 64; i += 4) {
+        uint32_t v = 0;
+        read32(data + i, &v);
+        std::memcpy(raw + i, &v, 4);
+    }
+    char hex[200] = "", text[70] = "";
+    for (int i = 0; i < 64; ++i) {
+        std::snprintf(hex + 2 * i + i / 4, sizeof(hex) - 2 * i - i / 4, "%02x%s", raw[i], i % 4 == 3 ? " " : "");
+        text[i] = raw[i] >= 0x20 && raw[i] < 0x7F ? static_cast<char>(raw[i]) : '.';
+    }
+    const std::string sender = sender_text(from);
+    {
+        std::lock_guard<std::mutex> lock(g_trace_lock);
+        if (!g_traced.insert(std::string(reinterpret_cast<char*>(raw), 64) + sender).second || g_traced.size() > 4096) {
+            return;
+        }
+    }
+    if (InterlockedDecrement(&g_trace_left) < 0) return;
+    LOG_INFO("[diag] msgtrace %s kind %u from %08X %s: %s |%s|", kTypes[n].name, kind, from, sender.c_str(), hex, text);
+}
+
 void note(int n, uint32_t from, uint32_t packet) {
     uint8_t kind = 0xFF;
     uint32_t data = 0, w[8] = {};
@@ -118,6 +168,10 @@ void note(int n, uint32_t from, uint32_t packet) {
         }
     }
     if (n == 0 && kind == 0) bells::received(static_cast<int>(w[0]));  // the Blighttown bell (bells.cpp)
+    if (g_trace_left > 0 && (std::strcmp(kTypes[n].name, "BloodMessage") == 0 ||
+                             std::strcmp(kTypes[n].name, "BloodStain") == 0)) {
+        trace_packet(n, from, kind, data);
+    }
     if (!g_on) return;
     InterlockedIncrement(&g_since[n]);
     const LONG total = InterlockedIncrement(&g_total[n]);
@@ -489,6 +543,8 @@ void install(bool on) {
              "arena each, the rest summed up every 5 minutes)%s",
              hooked, kTypeCount, trigger ? "" : "; the bell's sending is not logged (its site does not match)");
 }
+
+void trace_messages(int lines) { InterlockedExchange(&g_trace_left, lines); }
 
 int link_count() {
     uint32_t n = 0;

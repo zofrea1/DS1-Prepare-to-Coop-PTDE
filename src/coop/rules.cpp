@@ -15,7 +15,6 @@
 #include "steam.h"
 #include "summons.h"
 #include "text.h"
-#include "vagrants.h"
 #include "world.h"
 #include "bells.h"
 
@@ -2896,8 +2895,6 @@ __declspec(naked) void hk_lock_on() {
 // button is unavailable (talk function 37, the button's state), the game's own way out when an enemy comes near. A
 // player who sat down before the fight began keeps the bonfire instead: the rest that resets the world is behind
 // them, and what the menu does after it is their own (the warp rows close for the fight, see travel_closed).
-// The test counts characters on the floors that name the bonfire, and the enemies of our Firelink vagrant spots that
-// wait for a vagrant stay out of it (vagrants::bonfire_test; one of the places is on the shrine bonfire's floor).
 constexpr uint32_t kBonfireFoes = 0x00E3DF90;
 constexpr uint32_t kBonfireFoesSite = 0x00D58B49;
 
@@ -2925,31 +2922,16 @@ bool __cdecl teammate_boss_fight() {
     return seamless_rules() && !g_state.invader && g_state.teammate_boss_fight && !at_bonfire();
 }
 
-void __cdecl bonfire_foes_before(int bonfire) {
-    teams_neutral();
-    vagrants::bonfire_test(bonfire, true);
-}
-
-void __cdecl bonfire_foes_after(int bonfire) {
-    vagrants::bonfire_test(bonfire, false);
-    teams_restore();
-}
-
-// thiscall (WorldChrMan, bonfire), ret 4: after pushad the bonfire is at [esp + 0x24].
 __declspec(naked) void hk_bonfire_foes() {
     __asm {
         pushad
-        push dword ptr [esp + 0x24]
-        call bonfire_foes_before
-        add esp, 4
+        call teams_neutral
         popad
         push dword ptr [esp + 4]
         mov eax, kBonfireFoes
         call eax
         pushad
-        push dword ptr [esp + 0x24]
-        call bonfire_foes_after
-        add esp, 4
+        call teams_restore
         popad
         test al, al
         jnz done

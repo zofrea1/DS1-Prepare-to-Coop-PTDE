@@ -931,72 +931,7 @@ void run_test() {
              pos.y, pos.z, added, bits, held());
 }
 
-// ---------------------------------------------------------------- the spots' enemies and Firelink's bonfire
-// A bonfire is off (no flame, no rest, no light) while a character hostile to players stands on one of the floors
-// that name it (MSB1 Collision DisableBonfireEntityID; the test 0xE3DF90 runs each frame from the bonfire's update and
-// counts enabled and disabled characters alike, only the dead are passed over). The game's own spots all stand on
-// floors that name no bonfire, so a vagrant enemy waiting for its vagrant never switched one off. Lower Firelink is
-// the shrine bonfire's floor (h0000B2..h0003B2, h0050B2, h0100B2), and the place between the Firekeeper and Lautrec
-// is on h0001B2: in 2.7.0 its three waiting enemies kept Firelink's bonfire off for every player (2026-11-26). While
-// they wait (disabled, [chr+0xC]+0x14 bit 0, which the wake 0xBD3EE5 clears) they are left out of the test as the
-// game's own spots are; a vagrant out and about is a hostile character like any other, and counts.
-constexpr uint32_t kChrByEntity = 0x00D6C360;  // eax = entity id -> character, or 0
-constexpr uint32_t kChrTeam = 0x74;
-constexpr int kTeamNone = 0;  // hostile to no one (the relation table's row and column 0)
-constexpr int kSpotEntities = kPlaceCount * 3;
-struct SetAside {
-    uint32_t chr;
-    int32_t team;
-};
-SetAside g_aside[kSpotEntities];
-int g_aside_count = 0;
-
-uint32_t chr_by_entity(int entity) {
-    uint32_t chr = 0;
-    __try {
-        __asm {
-            mov eax, entity
-            mov edx, kChrByEntity
-            call edx
-            mov chr, eax
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        chr = 0;
-    }
-    return chr;
-}
-
-bool waiting(uint32_t chr) {
-    uint32_t ins = 0;
-    uint8_t state = 0;
-    return read32(chr + 0xC, &ins) && ins && read8(ins + 0x14, &state) && (state & 1) != 0;
-}
-
 }  // namespace
-
-void bonfire_test(int bonfire, bool before) {
-    if (!before) {
-        for (int i = 0; i < g_aside_count; ++i) {
-            uint32_t team = 0;
-            if (read32(g_aside[i].chr + kChrTeam, &team) && static_cast<int>(team) == kTeamNone) {
-                put32(g_aside[i].chr + kChrTeam, static_cast<uint32_t>(g_aside[i].team));
-            }
-        }
-        g_aside_count = 0;
-        return;
-    }
-    g_aside_count = 0;
-    if (!g_spots_in || bonfire / 10000 != kSpotBase / 10000) return;
-    for (int p = 0; p < kPlaceCount; ++p) {
-        for (int k = 0; k < 3; ++k) {
-            const uint32_t chr = chr_by_entity(kSpotBase + 10 * p + k);
-            uint32_t team = 0;
-            if (!chr || !waiting(chr) || !read32(chr + kChrTeam, &team) || static_cast<int>(team) == kTeamNone) continue;
-            if (!put32(chr + kChrTeam, static_cast<uint32_t>(kTeamNone))) continue;
-            g_aside[g_aside_count++] = SetAside{chr, static_cast<int32_t>(team)};
-        }
-    }
-}
 
 int held() {
     const uint32_t d = db();

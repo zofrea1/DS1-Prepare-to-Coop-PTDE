@@ -1265,6 +1265,10 @@ struct Mismatch {
     PeerVersion host;
 };
 Mismatch g_mismatch;
+// The other-version worlds an invader's search knocked on in this run (the user's request, 2026-11-25: players of 1.2.0,
+// which has no update check, could be invaded by nobody and never heard why). Each is knocked on once, so its host gets
+// its own notice ("An evil spirit with ... can't invade ... Please update to play with them"), as a joiner's knock gives.
+std::set<uint64_t> g_version_knocked;
 
 void show_join_mismatch(const PeerVersion& host) {
     LOG_INFO("[coop] The host speaks protocol %u (Prepare to Co-op %s), we speak %u (%s)", host.protocol,
@@ -1289,6 +1293,24 @@ void show_invade_mismatch(const std::vector<uint64_t>& lobbies) {
     const std::wstring you = L"You have " + our_version();
     flash(L"Can't invade: these worlds have " + version_words(newest),
           is_newer(newest) ? you + L". Please update to invade them" : you + L". Their hosts need to update");
+}
+
+// After the knock on an other-version world (g_mismatch): the invader's own notice for that host's version.
+void show_invade_mismatch_host(const PeerVersion& host) {
+    LOG_INFO("[coop] The world's host speaks protocol %u (Prepare to Co-op %s), we speak %u (%s): told by our knock",
+             host.protocol, version_text(host).c_str(), g_protocol, g_version.c_str());
+    const std::wstring you = L"You have " + our_version();
+    flash(L"Can't invade: this world has " + version_words(host),
+          is_newer(host) ? you + L". Please update to invade them" : you + L". Its host needs to update");
+}
+
+// `invading`: read before finish(), which ends the search (and its g_invade).
+void show_mismatch(const PeerVersion& host, bool invading) {
+    if (invading) {
+        show_invade_mismatch_host(host);
+    } else {
+        show_join_mismatch(host);
+    }
 }
 
 // Host: someone of another version knocked. Told once a minute per player (a 1.0.0 player retries).
@@ -3449,8 +3471,9 @@ void join_world(uint64_t pick) {
         }
         if (!ok) {
             if (g_mismatch.active) {
+                const bool invading = g_invade;
                 finish(L"");
-                show_join_mismatch(g_mismatch.host);
+                show_mismatch(g_mismatch.host, invading);
                 return;
             }
             if (!try_next_world("could not enter its lobby")) finish_search(kMsgConnectTimeout);
@@ -3527,15 +3550,30 @@ void issue_search() {
                                    [](uint64_t l) { return !same_version(lobby_version(l)); }),
                     found.end());
         if (found.empty()) {
+            // Knock anyway: the host refuses us for the version and learns why we cannot come in. An invader knocks
+            // on a world it has not knocked on in this run (g_version_knocked), else only says why.
+            uint64_t knock = other.front();
             if (g_invade) {
-                finish(L"");
-                show_invade_mismatch(other);
-                return;
+                knock = 0;
+                for (uint64_t l : other) {
+                    if (!g_version_knocked.count(l)) {
+                        knock = l;
+                        break;
+                    }
+                }
+                if (!knock) {
+                    finish(L"");
+                    show_invade_mismatch(other);
+                    return;
+                }
+                g_version_knocked.insert(knock);
+                LOG_INFO("[coop] Knocking on a world of another version (protocol %u, Prepare to Co-op %s) so its host "
+                         "learns why invaders cannot come in", lobby_version(knock).protocol,
+                         version_text(lobby_version(knock)).c_str());
             }
-            // Knock anyway: the host refuses us for the version and learns why we cannot come in.
             g_mismatch.active = true;
-            g_mismatch.host = lobby_version(other.front());
-            found.push_back(other.front());
+            g_mismatch.host = lobby_version(knock);
+            found.push_back(knock);
         }
         // A 1.3.0 host's world in a boss fight (ptdesc_boss) or invaded lately (ptdesc_cooldown: until when, in Steam's
         // clock) is passed over without a knock and counted for the line the invader sees when no world can take them,
@@ -3644,8 +3682,9 @@ void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
     if (w.status == kVersion || (w.status != kOk && g_mismatch.active)) {
         LOG_INFO("[coop] The host refused us (status %u: another Prepare to Co-op version)", w.status);
         const PeerVersion host = g_mismatch.active ? g_mismatch.host : lobby_version(g_lobby);
+        const bool invading = g_invade;
         finish(L"");
-        show_join_mismatch(host);
+        show_mismatch(host, invading);
         return;
     }
     if (w.status != kOk) {
@@ -4110,8 +4149,9 @@ void guest_tick() {
             break;
         case Step::Hello:
             if (in_step > kHelloWait && g_mismatch.active) {
+                const bool invading = g_invade;
                 finish(L"");
-                show_join_mismatch(g_mismatch.host);
+                show_mismatch(g_mismatch.host, invading);
             } else if (in_step > kHelloWait) {
                 if (g_hello_tries < knock_limit(g_last_busy)) {
                     guest_send_hello();

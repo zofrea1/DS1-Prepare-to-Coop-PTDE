@@ -8,6 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 2.7.1 | DS1 PTDE FPS Unlock 3.1.0 |
 | Prepare to Co-op Edition 2.7.0 | DS1 PTDE FPS Unlock 3.1.0 |
 | Prepare to Co-op Edition 2.6.0 | DS1 PTDE FPS Unlock 3.0.0 |
 | Prepare to Co-op Edition 2.5.0 | DS1 PTDE FPS Unlock 2.9.0 |
@@ -27,6 +28,13 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.2.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
+
+## What's new in 2.7.1
+
+- **Fixed: Firelink Shrine's bonfire was out in 2.7.0** (no flame and no rest, for every player, in a session or not). One of the vagrant spots 2.7.0 added to Firelink, between the Firekeeper and Lautrec, was on the ground around the shrine's bonfire, and the game puts a bonfire out while an enemy stands there, even one waiting unseen for a vagrant. That spot is gone; a vagrant lost in Firelink now comes on the bridge by the Ring of Sacrifice or by Petrus's ruin, whichever is nearer. On 2.7.0, `VagrantSpotsFirelink = false` brings the bonfire back.
+- **Plays with 1.5.0 to 2.7.0** (the same co-op protocol). The fix works in each player's own game, so everyone should update.
+
+The details are in the [2.7.1 release notes](release-notes/v2.7.1.md).
 
 ## What's new in 2.7.0
 

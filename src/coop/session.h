@@ -95,6 +95,8 @@ void reconfigure(const Config& cfg);
 // The tag that keeps the game's own lobbies (ghosts, messages, bloodstains) among Prepare to Co-op players.
 std::string game_tag();
 void tick();
+// Test (stress "notice"): shows a line in the message box as the co-op's own notices are shown, on the next tick.
+void test_say(const std::string& utf8);
 
 // Requests (items, hotkeys). Each does nothing (and says why in the log) when it does not apply.
 void host();         // Blessed Eye Orb

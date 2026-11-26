@@ -39,6 +39,7 @@
 #include <map>
 #include <set>
 #include <random>
+#include <vector>
 
 namespace coop::session {
 
@@ -727,6 +728,7 @@ bool g_last_busy = false;  // the host's last answer was "busy"
 struct Refusals {
     int cooldown = 0, boss = 0, full = 0, busy = 0, refused = 0;
     int quiet = 0;  // a group's ask that had no answer in kGroupAskWait (not "loading or fallen": they never said)
+    int older = 0, newer = 0;  // worlds of another version in the search's list (an older or a newer protocol)
     double open_at = 0;  // the soonest a world on cooldown takes invaders again (now())
 };
 Refusals g_refusals;
@@ -1142,8 +1144,34 @@ std::string password_key(const std::string& password) {
     return hex64(h);
 }
 
+// The action box shows one line, and the longest of our own notices (kMsgHostLost) is 59 characters. A notice with a
+// player's name that would be longer is shown in its short form.
+constexpr size_t kNoticeMax = 59;
+
+// A longer line is cut at the box's edge (2026-11-25: "No world can take an invader right now: 1 invaded recently,
+// 1 on an older version" lost its end), so it is shown in pieces that fit, one after another: after its colon, then
+// after the last comma or space that fits.
+std::vector<std::wstring> box_pieces(std::wstring line) {
+    std::vector<std::wstring> pieces;
+    while (line.size() > kNoticeMax) {
+        size_t cut = line.find(L": ");
+        if (cut == std::wstring::npos || cut + 1 > kNoticeMax) cut = line.rfind(L", ", kNoticeMax - 1);
+        if (cut == std::wstring::npos || cut == 0) cut = line.rfind(L' ', kNoticeMax);
+        if (cut == std::wstring::npos || cut == 0) {
+            pieces.push_back(line.substr(0, kNoticeMax));
+            line.erase(0, kNoticeMax);
+            continue;
+        }
+        const bool mark = line[cut] == L':' || line[cut] == L',';
+        pieces.push_back(line.substr(0, cut + (mark ? 1 : 0)));
+        line.erase(0, cut + (mark ? 2 : 1));
+    }
+    if (!line.empty()) pieces.push_back(line);
+    return pieces;
+}
+
 void say(const std::wstring& w) {
-    text::show(w);
+    for (const std::wstring& piece : box_pieces(w)) text::show(piece);
     char narrow[512];
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, narrow, sizeof(narrow), nullptr, nullptr);
     LOG_INFO("[coop] %s", narrow);
@@ -1192,10 +1220,6 @@ void flash_tick() {
 }
 
 std::wstring our_version() { return text::widen(g_version); }
-
-// The action box shows one line, and the longest of our own notices (kMsgHostLost) is 59 characters. A notice with a
-// player's name that would be longer is shown in its short form.
-constexpr size_t kNoticeMax = 59;
 
 std::wstring fit_or(const std::wstring& line, const std::wstring& short_form) {
     return line.size() <= kNoticeMax ? line : short_form;
@@ -3433,9 +3457,9 @@ void finish_search(const wchar_t* fallback) {
         LOG_INFO("[coop] No world could take us: %d invaded recently (the next takes invaders in %d s), %d in a boss "
                  "fight, %d full, %d busy, %d refused", r.cooldown, wait, r.boss, r.full, r.busy, r.refused);
     }
-    if (worlds == 0) {
+    if (worlds + r.older + r.newer == 0) {
         finish(fallback);
-    } else if (worlds == 1) {
+    } else if (worlds == 1 && r.older + r.newer == 0) {
         finish(r.cooldown ? fmt(kMsgCooldown, minutes_seconds(wait))
                : r.boss   ? std::wstring(kMsgBossFight)
                : r.full   ? std::wstring(kMsgWorldFull)
@@ -3453,6 +3477,8 @@ void finish_search(const wchar_t* fallback) {
         add(r.busy, L"loading or fallen");
         const bool invade = g_invade;  // finish clears it
         add(r.refused, invade ? L"closed to invaders" : L"refused");
+        add(r.older, L"on an older version");
+        add(r.newer, L"on a newer version");
         finish(fmt(invade ? kMsgNoWorldInvade : kMsgNoWorldJoin, parts));
         if (wait) say(fmt(kMsgNextOpens, minutes_seconds(wait)));
     }
@@ -3565,6 +3591,8 @@ void issue_search() {
         found.erase(std::remove_if(found.begin(), found.end(),
                                    [](uint64_t l) { return !same_version(lobby_version(l)); }),
                     found.end());
+        g_refusals.older = g_refusals.newer = 0;
+        for (uint64_t l : other) ++(lobby_version(l).protocol > g_protocol ? g_refusals.newer : g_refusals.older);
         if (found.empty()) {
             // Knock anyway: the host refuses us for the version and learns why we cannot come in. An invader knocks
             // on a world it has not knocked on in this run (g_version_knocked), else only says why.
@@ -7795,7 +7823,25 @@ void configure(const Config& cfg) {
     }
 }
 
+namespace {
+std::mutex g_test_say_lock;
+std::vector<std::wstring> g_test_say;
+}  // namespace
+
+void test_say(const std::string& utf8) {
+    std::lock_guard<std::mutex> lock(g_test_say_lock);
+    g_test_say.push_back(text::widen(utf8));
+}
+
 void tick() {
+    {
+        std::vector<std::wstring> lines;
+        {
+            std::lock_guard<std::mutex> lock(g_test_say_lock);
+            lines.swap(g_test_say);
+        }
+        for (const auto& l : lines) say(l);
+    }
     reconfigure_tick();
     flash_tick();
     reward_tick();

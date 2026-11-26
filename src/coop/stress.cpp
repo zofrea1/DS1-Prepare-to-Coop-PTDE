@@ -593,6 +593,15 @@ bool remote(const char* line, char* reply, size_t size) {
         std::snprintf(reply, size, "%s %d: in the log", cmd, id);
         return true;
     }
+    if (std::strcmp(cmd, "notice") == 0) {
+        // notice <text>: shown in the message box as the co-op's notices are (long lines in pieces).
+        const char* t = std::strstr(line, "notice");
+        t = t ? t + 6 : line;
+        while (*t == ' ') ++t;
+        session::test_say(t);
+        std::snprintf(reply, size, "notice: shown");
+        return true;
+    }
     if (std::strcmp(cmd, "vagrant") == 0) {
         // vagrant [map index (-1: the last checked)] [wander count] [h: humanity]: one at our feet, as if passed on.
         int index = -1, wanders = 2;

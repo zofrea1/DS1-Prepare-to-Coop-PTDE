@@ -104,7 +104,7 @@ struct CoopConfig {
     // before it can come as a vagrant enemy (2..10, the game's own 10), how long each game keeps one (10..300 s, the
     // game's 300), and whether a game passes on what it holds before Quit Game or a close (the game ends them).
     int vagrant_wanders = 2;
-    int vagrant_stay = 120;
+    int vagrant_stay = 150;
     bool vagrant_pass_on_at_quit = true;
     // Firelink Shrine's map gets vagrant spots at three places (vagrants.cpp).
     bool vagrant_spots_firelink = true;

@@ -16,7 +16,7 @@ namespace coop::vagrants {
 
 struct Settings {
     int wanders = 2;               // VagrantWanders, 2..10 (the game's own 10)
-    int stay_seconds = 120;        // VagrantStay, 10..300 (the game's own 300)
+    int stay_seconds = 150;        // VagrantStay, 10..300 (the game's own 300)
     bool pass_on_at_quit = true;   // VagrantPassOnAtQuit
     bool log = true;               // NetworkEventLog
     bool firelink_spots = true;    // VagrantSpotsFirelink: Firelink Shrine's map gets vagrant spots

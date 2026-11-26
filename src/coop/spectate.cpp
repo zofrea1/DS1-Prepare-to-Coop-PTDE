@@ -262,6 +262,26 @@ int living_teammates() {
 
 bool g_trip_release = false;  // the host's trip home came while we were down (trip_release): no hold until we live
 
+// Why a death in a session goes ahead (2026-11-25: a co-op player died while an invader was in his world with his host
+// standing, and came back at a bonfire instead of watching; his game decided it, and its log is the place to see why).
+void tell_not_held() {
+    const auto& st = rules::state();
+    if (!st.active) return;
+    std::string why;
+    auto add = [&why](const char* w) { why += (why.empty() ? "" : ", ") + std::string(w); };
+    if (st.leaving) add("leaving the session");
+    if (g_trip_release) add("the host's trip home came while we were down");
+    if (!world::local_dead()) add("our character is not dead to the game");
+    if (living_teammates() == 0) add("no teammate standing as far as we know");
+    if (st.invader && !st.team_invasion) add("we invade alone");
+    if (!st.invader && !fight_on()) add("no fight: no boss and no invader in the world as the host says");
+    if (why.empty()) why = "?";
+    int known = static_cast<int>(g_team.size());
+    LOG_INFO("[coop] Our death is not held (%s): teammates %d known, %d standing; invader in the world %s, boss fight "
+             "%s / a teammate's %s", why.c_str(), known, living_teammates(), st.invader_present ? "yes" : "no",
+             world::boss_fight() ? "yes" : "no", st.teammate_boss_fight ? "yes" : "no");
+}
+
 bool hold_wanted() {
     const auto& st = rules::state();
     if (!st.active || st.leaving || g_trip_release || !world::local_dead() || living_teammates() == 0) return false;
@@ -1442,6 +1462,7 @@ bool __stdcall death_event_passes(int kind, int entity) {
     }
     if (!hold_wanted()) {
         g_passed = true;
+        tell_not_held();
         return true;
     }
     start_hold();

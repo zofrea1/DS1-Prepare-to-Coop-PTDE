@@ -19,6 +19,14 @@ constexpr int kChannel = 9;  // the game reads channels 0 and 1
 // (right after the game's SteamAPI_RunCallbacks). A non-empty `game_tag` limits the game's own lobbies
 // (sessions, signs, invasions, messages) to players with the same tag.
 bool install_early(uint32_t app_id, void (*tick)(), const std::string& game_tag, bool game_net_log);
+// LinkUnmoddedGames: some of the game's own searches for the players it links with go out without our tag, so our game
+// links with unmodded PTDE games on Spacewar too (they could already link with us). `links` gives how many games the
+// game is linked with now (the untagged searches stop at 15 of the 20, keeping room for Prepare to Co-op players).
+void set_link_unmodded(bool on, int (*links)());
+bool link_unmodded();
+// The low halves (lobby key 2000000f) of games holding many lobbies, left out of the untagged searches (netlog.cpp's
+// count finds them).
+void set_flooding_games(const std::vector<std::string>& low_halves);
 // After SteamAPI_Init: interfaces and callbacks. Safe to call every frame; true once ready.
 bool ready();
 uint32_t app_id();
@@ -30,7 +38,8 @@ uint32_t server_time();
 // Lobbies. Results arrive on the game thread from inside SteamAPI_RunCallbacks.
 using LobbyResult = std::function<void(bool ok, uint64_t lobby)>;
 void create_lobby(int max_members, LobbyResult done);
-// `not_equal`: keys whose value must differ (a lobby without the key passes). Steam returns at most 50.
+// `not_equal`: keys whose value must differ; a lobby without the key does not pass (Steam, 2026-11-26). Steam returns
+// at most 50.
 void find_lobbies_except(const std::vector<std::pair<std::string, std::string>>& equal,
                          const std::vector<std::pair<std::string, std::string>>& not_equal, int max_results,
                          std::function<void(std::vector<uint64_t>)> done);

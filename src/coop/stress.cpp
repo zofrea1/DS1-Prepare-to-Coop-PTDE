@@ -608,7 +608,10 @@ bool remote(const char* line, char* reply, size_t size) {
         char what[8] = "";
         sscanf_s(line, "%*s %d %7s", &n, what, static_cast<unsigned>(sizeof(what)));
         const bool all = std::strcmp(what, "all") == 0;
-        steam::find_lobbies({{"1000000c", "I46"}, {"1000000d", "I7"}}, n, [n, all](std::vector<uint64_t> lobbies) {
+        // "untag": our tag not equal (a lobby without the key does not pass: 0 found, 2026-11-26).
+        std::vector<std::pair<std::string, std::string>> except;
+        if (std::strcmp(what, "untag") == 0) except.emplace_back("ptdesc_game", session::game_tag());
+        steam::find_lobbies_except({{"1000000c", "I46"}, {"1000000d", "I7"}}, except, n, [n, all](std::vector<uint64_t> lobbies) {
             LOG_INFO("[diag] lobbydump: %zu lobbies (asked for up to %d)", lobbies.size(), n);
             std::map<std::string, std::pair<int, std::string>> owners;  // 2000000e+f text -> lobbies, tag
             for (uint64_t lobby : lobbies) {

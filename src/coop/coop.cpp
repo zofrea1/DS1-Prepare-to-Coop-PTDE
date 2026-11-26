@@ -568,6 +568,7 @@ void coop_install(const CoopConfig& config) {
     if (!coop::netrate::install()) LOG_ERROR("[coop] Network rate: some of NetworkTickRate's parts are not available");
     coop::vanillamp::install();
     coop::netlog::install(g_cfg.network_event_log);
+    coop::steam::set_link_unmodded(g_cfg.link_unmodded_games, &coop::netlog::link_count);
     coop::vagrants::install({g_cfg.vagrant_wanders, g_cfg.vagrant_stay, g_cfg.vagrant_pass_on_at_quit,
                              g_cfg.network_event_log, g_cfg.vagrant_spots_firelink, g_cfg.vagrant_cooldown,
                              g_cfg.vagrant_humanity, g_cfg.vagrant_check_on_arrival});

@@ -24,5 +24,7 @@ void tick();
 void lobby_data(uint64_t lobby, const char* key, const char* value);
 // The distance the game's node search asks Steam for (0 close, 1 default, 2 far, 3 worldwide), logged on change.
 void search_distance(int value);
+// How many other games the game is linked with now (its node table).
+int link_count();
 
 }  // namespace coop::netlog

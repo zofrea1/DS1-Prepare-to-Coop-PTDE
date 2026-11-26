@@ -284,6 +284,7 @@ std::mutex g_ptc_lock;
 std::map<uint64_t, ULONGLONG> g_ptc;  // Steam id -> when last found
 ULONGLONG g_ptc_searched = 0;
 ULONGLONG g_next_ptc_search = 0;
+ULONGLONG g_next_census = 0;
 
 uint64_t lobby_owner_key(uint64_t lobby) {
     const std::string id = id_half(steam::lobby_data(lobby, "2000000e")) + id_half(steam::lobby_data(lobby, "2000000f"));
@@ -314,6 +315,7 @@ struct Census {
     int searches = 0;
     std::set<uint64_t> ours, other_tag, unmodded;  // their owners
     std::map<uint64_t, int> heavy;                 // owners with three or more lobbies: how many
+    std::vector<std::string> heavy_low;            // their 2000000f
 };
 std::mutex g_census_lock;
 Census g_census;
@@ -344,10 +346,12 @@ void census_search(std::shared_ptr<Census> c, std::vector<std::pair<std::string,
             for (const auto& [owner, o] : per) {
                 if (o.first < 3 || o.second.empty()) continue;
                 c->heavy[owner] += o.first;
+                c->heavy_low.push_back(o.second);
                 except.emplace_back("2000000f", o.second);
                 more = true;
             }
             if (lobbies.size() >= 50 && more && c->searches < 4) return census_search(c, except);
+            steam::set_flooding_games(c->heavy_low);
             std::lock_guard<std::mutex> lock(g_census_lock);
             g_census = *c;
             g_census_new = true;
@@ -486,16 +490,37 @@ void install(bool on) {
              hooked, kTypeCount, trigger ? "" : "; the bell's sending is not logged (its site does not match)");
 }
 
+int link_count() {
+    uint32_t n = 0;
+    __try {
+        return read32(kNodeCount, &n) && n >= 1 && n < 1000 ? static_cast<int>(n) - 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
 void tick() {
-    if (!g_on) return;
-    InterlockedExchange(&g_map, game::player() ? game::map_id() : -1);
     const ULONGLONG now = GetTickCount64();
-    watch_links_safe();
-    if (game::player() && steam::ready() && now >= g_next_ptc_search) {
+    // The count runs for LinkUnmoddedGames too (its flooding games), its line only with the log. Steam keeps one lobby
+    // search at a time (a second one cancels the first: the tagged search never ended, 2026-11-26), so the count
+    // comes 30 s after the tagged search.
+    const bool searching = (g_on || steam::link_unmodded()) && game::player() && steam::ready();
+    if (searching && now >= g_next_ptc_search) {
         g_next_ptc_search = now + 60000;
-        search_ptc();
+        g_next_census = now + 30000;
+        if (g_on) search_ptc();
+    }
+    if (searching && g_next_census && now >= g_next_census) {
+        g_next_census = 0;
         search_all();
     }
+    if (!g_on) {
+        std::lock_guard<std::mutex> lock(g_census_lock);
+        g_census_new = false;
+        return;
+    }
+    InterlockedExchange(&g_map, game::player() ? game::map_id() : -1);
+    watch_links_safe();
     report_census();
     if (!g_next_summary) g_next_summary = now + 300000;
     if (now < g_next_summary) return;

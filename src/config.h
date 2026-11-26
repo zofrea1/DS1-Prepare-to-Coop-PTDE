@@ -100,6 +100,8 @@ struct CoopConfig {
     // The online extras other players' games send (bells, vagrants, miracle resonance, curse statues, Gravelord,
     // bonfire kindling, arena, rankings; messages, bloodstains and ghosts summed up), as they arrive (coop/netlog.cpp).
     bool network_event_log = true;
+    // Our game also looks for unmodded PTDE games on Spacewar to link with (steam.cpp; the user, 2026-11-26).
+    bool link_unmodded_games = true;
     // Vagrants (coop/vagrants.cpp; the user's choice, 2026-11-25): how many players' games a lost item passes through
     // before it can come as a vagrant enemy (2..10, the game's own 10), how long each game keeps one (10..300 s, the
     // game's 300), and whether a game passes on what it holds before Quit Game or a close (the game ends them).

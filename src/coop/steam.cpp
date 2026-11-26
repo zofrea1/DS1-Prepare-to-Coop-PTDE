@@ -334,7 +334,38 @@ std::map<std::string, int> g_lobby_log_counts;
 
 bool lobby_log_once(const std::string& kind) { return g_lobby_log_counts.size() < 200 && ++g_lobby_log_counts[kind] <= 3; }
 
+// LinkUnmoddedGames (the user, 2026-11-26). The game builds three kinds of search for the players it links with, all
+// on its own lobby keys 1000000c = I46 and 1000000d = I7 (2026-11-26 logs): an open one (max 50), one for the lobbies
+// that list a player among their three neighbours (20000015/17, 18/19, 1a/1b), and one player's own lobby (its owner,
+// 2000000e/f, max 1). Since 1.9.0 our tag went on every one, so our game only ever found Prepare to Co-op games and
+// unmodded PTDE players on Spacewar linked with us only from their side. Now: a player's own lobby is found whatever it
+// carries, and every third open search goes without our tag (ours come too), leaving out games holding many lobbies
+// (one held 46 of Steam's 50 results on 2026-11-26), while the game is linked with fewer than 15.
+// The neighbour searches keep the tag. Co-op and invasions do not use these links (they have their own lobbies).
+bool g_link_unmodded = false;
+int (*g_link_count)() = nullptr;
+std::vector<std::string> g_flooding;  // 2000000f values
+int g_open_searches = 0;
+int g_untagged_searches = 0;
+struct SearchShape {
+    bool game_keys = false;  // 1000000c
+    bool owner = false;      // 2000000e: one player's lobby
+    bool neighbour = false;  // 20000015..1b
+} g_shape;
+
+void note_search_key(const char* key) {
+    if (!key) return;
+    if (std::strcmp(key, "1000000c") == 0) {
+        g_shape.game_keys = true;
+    } else if (std::strcmp(key, "2000000e") == 0) {
+        g_shape.owner = true;
+    } else if (std::strncmp(key, "2000001", 7) == 0) {
+        g_shape.neighbour = true;
+    }
+}
+
 void __fastcall hk_str_filter(void* self, void*, const char* key, const char* value, int cmp) {
+    if (!g_bypass) note_search_key(key);
     if (g_net_diag && !g_bypass) {
         char b[160];
         std::snprintf(b, sizeof(b), " %s%s\"%.40s\"", key ? key : "?", cmp == 0 ? "==" : cmp == 3 ? "!=" : "~", value ? value : "");
@@ -392,9 +423,30 @@ void __fastcall hk_leave_lobby(void* self, void*, uint64_t lobby) {
 
 SteamAPICall_t __fastcall hk_request_lobby_list(void* self, void*) {
     steamguard_before_lobby_request(self);  // the distance filter the game set (SteamPauseGuard keeps it until now)
+    const SearchShape shape = g_shape;
+    g_shape = SearchShape{};
     if (!g_bypass && !g_game_tag.empty()) {
-        static_cast<ISteamMatchmaking009*>(self)->AddRequestLobbyListStringFilter("ptdesc_game", g_game_tag.c_str(),
-                                                                                  k_ELobbyComparisonEqual);
+        auto* mm = static_cast<ISteamMatchmaking009*>(self);
+        bool tag = true;
+        if (g_link_unmodded && shape.game_keys && !shape.neighbour) {
+            if (shape.owner) {
+                tag = false;  // one player's lobby, by its owner: found whatever it carries
+            } else if (++g_open_searches % 3 == 0 && (!g_link_count || g_link_count() < 15)) {
+                tag = false;
+                ++g_untagged_searches;
+                // No "tag not equal": Steam drops a lobby without the key from a not-equal filter (0 found,
+                // 2026-11-26), so our own come too.
+                for (size_t i = 0; i < g_flooding.size() && i < 4; ++i) {
+                    mm->AddRequestLobbyListStringFilter("2000000f", g_flooding[i].c_str(), k_ELobbyComparisonNotEqual);
+                }
+                if (g_untagged_searches == 1) {
+                    LOG_INFO("[coop] LinkUnmoddedGames: the game's first search for unmodded PTDE games on Spacewar "
+                             "(every third of its open searches; %zu game(s) holding many lobbies left out)",
+                             g_flooding.size());
+                }
+            }
+        }
+        if (tag) mm->AddRequestLobbyListStringFilter("ptdesc_game", g_game_tag.c_str(), k_ELobbyComparisonEqual);
     }
     if (g_net_diag && !g_bypass) {
         if (lobby_log_once("search:" + g_search)) LOG_INFO("[coop] Game lobby search:%s", g_search.c_str());
@@ -640,6 +692,15 @@ void create_lobby(int max_members, LobbyResult done) {
                               done(ok, ok ? r->m_ulSteamIDLobby : 0);
                           });
 }
+
+void set_link_unmodded(bool on, int (*links)()) {
+    g_link_unmodded = on;
+    g_link_count = links;
+}
+
+bool link_unmodded() { return g_link_unmodded; }
+
+void set_flooding_games(const std::vector<std::string>& low_halves) { g_flooding = low_halves; }
 
 void find_lobbies(const std::vector<std::pair<std::string, std::string>>& equal, int max_results,
                   std::function<void(std::vector<uint64_t>)> done) {

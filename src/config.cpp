@@ -101,6 +101,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.game_net_log = settings_parse_bool(val);
         } else if (key == "networkeventlog") {
             c.network_event_log = settings_parse_bool(val);
+        } else if (key == "linkunmoddedgames") {
+            c.link_unmodded_games = settings_parse_bool(val);
         } else if (key == "vagrantwanders") {
             c.vagrant_wanders = std::atoi(val.c_str());
         } else if (key == "vagrantstay") {

@@ -20,6 +20,10 @@ struct Settings {
     bool pass_on_at_quit = true;   // VagrantPassOnAtQuit
     bool log = true;               // NetworkEventLog
     bool firelink_spots = true;    // VagrantSpotsFirelink: Firelink Shrine's map gets vagrant spots
+    int cooldown_seconds = 300;    // VagrantCooldown, 0..1800: no other vagrant in a world this long after one came
+                                   // (the game's 1800 to 2400 s, longer with each one)
+    int humanity_min = 1;          // VagrantHumanity, 1..5: humanity a lost bloodstain needs to make one (the game's 5)
+    bool check_on_arrival = true;  // VagrantCheckOnArrival: one that arrives for a map loaded here is checked at once
 };
 
 void install(const Settings& s);

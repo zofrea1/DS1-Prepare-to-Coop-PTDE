@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -38,8 +39,19 @@ namespace {
 //    count is 10 ("item enemy A", 0x12DE228) or 20 ("B", 0x12DE22C); humanity (bit 31) from [0x1378708] (0) or 20
 //    (0x12DE230). An item below its count is put on the ground in that world instead (up to 8 a load: 0xDC9140 ->
 //    0xBD2660 -> 0xDC7F70), for the player to pick up.
+//  * A vagrant coming raises the world's rest level (db+0x48, 0..4; 0xBD3AC0) and starts that level's rest: no
+//    vagrant at all for "ban" seconds (db+0x4C; the check spawns nothing while it runs), then "grace" seconds (db+0x50)
+//    in which another raises the level again; when both run out the level drops by one and the lower level's rest
+//    starts over. Table 0x12DE240, 8 bytes a level (ban, grace): 0/0, 1800/3000, 2100/2700, 2400/2400, 2400/1800.
+//    So one vagrant meant 80 minutes of rest before the level was back at 0, and at least 30 with none.
+//  * Only in the player's own world ([0x13784A0]+0xB4F), and only when a map loads (or streams in): one that arrives
+//    while its map is loaded waits for the next load there, and its stay usually ends before.
+//  * Humanity: a lost bloodstain makes one only with five or more humanity (0xD78B81 cmp eax,5).
 // VagrantWanders sets the item's first count (its second, and humanity's, at twice it: the game's 10 and 20), and
-// VagrantStay the 300 s. VagrantPassOnAtQuit runs the hand-off before the game leaves its links: every vagrant's
+// VagrantStay the 300 s. VagrantCooldown makes every level's rest one ban of that many seconds and no grace (so the
+// level is back at 0 when it ends), VagrantHumanity the bloodstain's five, and VagrantCheckOnArrival runs the map's
+// check for one that arrives while its map is loaded and none of its spots is taken (the check gives a taken spot's
+// vagrant back to the list as a new one: hence only then). VagrantPassOnAtQuit runs the hand-off before the game leaves its links: every vagrant's
 // countdown to 0 and every linked game's budget up, at Quit Game (or a network error's return to the title), and
 // for a close of the window (held back up to 3 s).
 constexpr uint32_t kItemA = 0x012DE228;
@@ -60,12 +72,15 @@ constexpr uint32_t kSendCall = 0x00BD4136;     // the hand-off: stdcall 0xBD29A0
 constexpr uint32_t kSend = 0x00BD29A0;
 constexpr uint32_t kHumanityItem = 0x4000015E; // goods 350: what the game's humanity vagrant carries
 constexpr uint32_t kTestItem = 0x40000172;     // goods 370, the Prism Stone
+constexpr uint32_t kRestTable = 0x012DE248;   // levels 1..4: ban, grace (floats, seconds)
+constexpr uint32_t kHumanityCmp = 0x00D78B81;  // cmp eax,5: a lost bloodstain's humanity for a humanity vagrant
 constexpr double kPassWait = 4.0;              // a hand-off at most this long
 constexpr UINT_PTR kCloseTimer = 0x56A9;
 constexpr UINT kCloseWaitMs = 3000;
 
 Settings g_s;
 bool g_installed = false;
+bool g_arrival_on = false;
 uint32_t g_check = kCheck;
 
 double now() { return GetTickCount64() / 1000.0; }
@@ -711,6 +726,13 @@ std::string spot_slots() {
 volatile LONG g_last_index = -1;
 std::mutex g_indices_lock;
 std::set<int> g_load_indices;  // the indices one load checked (told on the next frame with a character)
+std::set<int> g_loaded_maps;   // every index checked since the last load began: the maps loaded now
+// Maps whose vagrant is done since the game last checked them (VagrantCheckOnArrival): their spot enemy is dead until
+// the map's characters are made again, and a check now would put the next vagrant on it (it "dies" at once, wasted,
+// and starts the rest).
+std::set<int> g_spent_maps;
+std::set<int> g_live_maps;     // maps with a spot taken at the last look
+bool g_arrival_running = false;
 int g_lines = 0;
 
 void safe_look(int map_index, Look* out) {
@@ -736,6 +758,11 @@ ULONGLONG g_firelink_ready_at = 0;
 bool g_firelink_now = false;  // the check that waited, run now
 
 void __cdecl hk_check(int map_index) {
+    {
+        std::lock_guard<std::mutex> lock(g_indices_lock);
+        if (g_loaded_maps.size() < 64) g_loaded_maps.insert(map_index);
+        if (!g_arrival_running) g_spent_maps.erase(map_index);  // the game's own check: its spot enemies are new
+    }
     if (map_index == kFirelinkIndex && g_spots_in && !g_firelink_now) {
         InterlockedExchange(&g_firelink_waiting, 1);
         g_firelink_ready_at = 0;
@@ -762,6 +789,101 @@ void __cdecl hk_check(int map_index) {
              "%d..%d; %d far enough to come as vagrants, the rest as items on the ground): %d left the list",
              map_index, before.here, before.held, before.minc, before.maxc, before.ready,
              after >= 0 ? (std::max)(before.held - after, 0) : 0);
+}
+
+// ---------------------------------------------------------------- a vagrant that arrives while its map is loaded
+// VagrantCheckOnArrival (the user, 2026-11-26: more vagrants). Every 2 s, in our own world with no rest running: a
+// vagrant from another game in our list, lost in a map loaded now (its check ran since the last load began: the spot
+// records themselves are freed when a vagrant there dies, and the check makes them again) with none of its spots
+// taken (a spot whose vagrant died is free again: the check only clears it), gets that map's check now, once per
+// vagrant: one tried is known by its address and its data (item+4..+0x24: where it was lost, its items, its count),
+// as the game reuses a freed one's memory.
+std::map<uint32_t, uint64_t> g_arrival_tried;
+
+uint64_t item_sig(uint32_t item) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t o = 4; o < 0x24; o += 4) {
+        uint32_t v = 0;
+        if (!read32(item + o, &v)) return 0;
+        h = (h ^ v) * 1099511628211ull;
+    }
+    return h;
+}
+double g_arrival_next = 0;
+int g_arrival_lines = 0;
+
+void check_arrivals() {
+    const double t = now();
+    if (t < g_arrival_next) return;
+    g_arrival_next = t + 2.0;
+    const uint32_t d = db();
+    if (!d || game::loading() || !game::player()) return;
+    // Each map's spot records taken: in use (1) and not done (4: its vagrant died). The check would take one back from
+    // where it waits or walks; a map whose taken spot is gone since the last look had its vagrant end there.
+    int taken[256] = {};
+    std::set<int> live;
+    each(d, 0x3C, [&](uint32_t slot) {
+        uint32_t w = 0;
+        if (!read32(slot + 4, &w)) return;
+        const int m = static_cast<int16_t>(w & 0xFFFF);
+        if (m < 0 || m > 255) return;
+        if (((w >> 16) & 5) == 1) {
+            ++taken[m];
+            live.insert(m);
+        }
+    });
+    std::set<int> loaded, spent;
+    {
+        std::lock_guard<std::mutex> lock(g_indices_lock);
+        for (int m : g_live_maps) {
+            if (!live.count(m)) g_spent_maps.insert(m);
+        }
+        loaded = g_loaded_maps;
+        spent = g_spent_maps;
+    }
+    g_live_maps = live;
+    uint8_t off = 1;
+    uint32_t rest_bits = 0;
+    float rest = 0;
+    if (!game::own_world() || !read8(d + 0x44, &off) || off || !read32(d + 0x4C, &rest_bits)) return;
+    std::memcpy(&rest, &rest_bits, 4);
+    if (rest > 0) return;
+    int map = -1;
+    uint32_t pick = 0, count = 0;
+    uint64_t pick_sig = 0;
+    each(d, 0x24, [&](uint32_t item) {
+        uint32_t where = 0, bits = 0;
+        if (map >= 0 || !read32(item + 0x14, &where) || !read32(item + 0x20, &bits)) return;
+        const uint64_t sig = item_sig(item);
+        const auto tried = g_arrival_tried.find(item);
+        if (tried != g_arrival_tried.end() && tried->second == sig) return;
+        if (!((bits >> 30) & 1)) return;  // our own: it leaves, it does not come here
+        const int m = static_cast<int>((where >> 20) & 0xFF);
+        if (!loaded.count(m) || spent.count(m) || taken[m] != 0) return;
+        map = m;
+        pick = item;
+        pick_sig = sig;
+        count = (bits >> 20) & 0x3FF;
+    });
+    if (map < 0) return;
+    g_arrival_tried[pick] = pick_sig;
+    const int before = held();
+    g_arrival_running = true;
+    if (map == kFirelinkIndex && g_spots_in) {
+        g_firelink_now = true;
+        hk_check(map);
+        g_firelink_now = false;
+    } else {
+        hk_check(map);
+    }
+    g_arrival_running = false;
+    if (g_s.log && g_arrival_lines < 100) {
+        ++g_arrival_lines;
+        const int after = held();
+        LOG_INFO("[net] Vagrants: one lost in map index %d (through %u games) arrived while that map is loaded: its "
+                 "check run now (VagrantCheckOnArrival), %s", map, count,
+                 after >= 0 && after < before ? "it comes" : "it stays in the list");
+    }
 }
 
 // ---------------------------------------------------------------- test
@@ -823,6 +945,8 @@ void install(const Settings& s) {
     g_s = s;
     g_s.wanders = (std::max)(2, (std::min)(s.wanders, 10));
     g_s.stay_seconds = (std::max)(10, (std::min)(s.stay_seconds, 300));
+    g_s.cooldown_seconds = (std::max)(0, (std::min)(s.cooldown_seconds, 1800));
+    g_s.humanity_min = (std::max)(1, (std::min)(s.humanity_min, 5));
     // The game's own values first (another build would have others: then nothing is changed).
     uint32_t a = 0, b = 0, hb = 0, stay = 0;
     const bool ours = read32(kItemA, &a) && read32(kItemB, &b) && read32(kHumanityB, &hb) && read32(kStay, &stay) &&
@@ -837,6 +961,34 @@ void install(const Settings& s) {
         put32(kItemB, static_cast<uint32_t>(2 * g_s.wanders));
         put32(kHumanityB, static_cast<uint32_t>(2 * g_s.wanders));
         put32(kStay, stay_bits);
+    }
+    // The rest after a vagrant came: each level one ban of VagrantCooldown seconds, no grace (the game's table checked
+    // first).
+    static const float kGameRest[8] = {1800, 3000, 2100, 2700, 2400, 2400, 2400, 1800};
+    bool rest_ok = true;
+    for (int i = 0; i < 8 && rest_ok; ++i) {
+        uint32_t v = 0, want = 0;
+        std::memcpy(&want, &kGameRest[i], 4);
+        rest_ok = read32(kRestTable + 4 * i, &v) && v == want;
+    }
+    if (rest_ok) {
+        const float ban = static_cast<float>(g_s.cooldown_seconds), none = 0;
+        uint32_t ban_bits = 0, none_bits = 0;
+        std::memcpy(&ban_bits, &ban, 4);
+        std::memcpy(&none_bits, &none, 4);
+        for (int level = 0; level < 4; ++level) {
+            put32(kRestTable + 8 * level, ban_bits);
+            put32(kRestTable + 8 * level + 4, none_bits);
+        }
+    } else {
+        LOG_ERROR("[net] Vagrants: the game's rest table is not the one known; VagrantCooldown left alone");
+    }
+    // cmp eax,5 -> cmp eax,N
+    static const uint8_t kCmp5[3] = {0x83, 0xF8, 0x05};
+    const uint8_t cmp_n[3] = {0x83, 0xF8, static_cast<uint8_t>(g_s.humanity_min)};
+    const bool humanity_ok = g_s.humanity_min == 5 || patch(kHumanityCmp, kCmp5, cmp_n, 3);
+    if (!humanity_ok) {
+        LOG_ERROR("[net] Vagrants: the humanity test at %08X does not match; VagrantHumanity left alone", kHumanityCmp);
     }
     const bool check = redirect_call(kCheckCall, kCheck, reinterpret_cast<void*>(&hk_check));
     g_spots = s.firelink_spots;
@@ -856,6 +1008,13 @@ void install(const Settings& s) {
              "keeps one %d s (VagrantStay; the game's 300), passed on before leaving: %s%s",
              g_s.wanders, g_s.stay_seconds, g_s.pass_on_at_quit ? "yes" : "no (VagrantPassOnAtQuit)",
              check && send ? "" : "; the map loads' checks or the hand-offs are not logged (their sites do not match)");
+    g_arrival_on = g_s.check_on_arrival && check;
+    LOG_INFO("[net] Vagrants: a world rests %d s after one came (VagrantCooldown; the game's 1800 to 2400 s, longer "
+             "with each), a lost bloodstain with %d or more humanity makes one (VagrantHumanity; the game's 5), one "
+             "that arrives while its map is loaded is checked at once: %s",
+             rest_ok ? g_s.cooldown_seconds : 1800, humanity_ok ? g_s.humanity_min : 5,
+             g_arrival_on ? "yes" : g_s.check_on_arrival ? "no (the check's site does not match)"
+                                                         : "no (VagrantCheckOnArrival)");
 }
 
 void tick() {
@@ -884,6 +1043,20 @@ void tick() {
                 g_firelink_now = false;
             }
         }
+    }
+    if (g_arrival_on) {
+        static bool was_loading = false;
+        const bool loading = game::loading();
+        if (loading && !was_loading) {
+            // A load begins: its checks say which maps are loaded after it.
+            std::lock_guard<std::mutex> lock(g_indices_lock);
+            g_loaded_maps.clear();
+            g_spent_maps.clear();
+            g_live_maps.clear();
+            g_arrival_tried.clear();
+        }
+        was_loading = loading;
+        if (!loading) check_arrivals();
     }
     watch_window();
     if (g_s.log && game::player()) {

@@ -109,6 +109,12 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.vagrant_pass_on_at_quit = settings_parse_bool(val);
         } else if (key == "vagrantspotsfirelink") {
             c.vagrant_spots_firelink = settings_parse_bool(val);
+        } else if (key == "vagrantcooldown") {
+            c.vagrant_cooldown = std::atoi(val.c_str());
+        } else if (key == "vagranthumanity") {
+            c.vagrant_humanity = std::atoi(val.c_str());
+        } else if (key == "vagrantcheckonarrival") {
+            c.vagrant_check_on_arrival = settings_parse_bool(val);
         } else if (key == "steamachievements") {
             c.steam_achievements = settings_parse_bool(val);
         } else if (key == "testprotocol") {

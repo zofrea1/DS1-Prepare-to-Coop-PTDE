@@ -108,6 +108,11 @@ struct CoopConfig {
     bool vagrant_pass_on_at_quit = true;
     // Firelink Shrine's map gets vagrant spots at three places (vagrants.cpp).
     bool vagrant_spots_firelink = true;
+    // More vagrants (the user, 2026-11-26): the world's rest after one came, the humanity a lost bloodstain needs, and
+    // a check at once for one that arrives while its map is loaded (vagrants.cpp).
+    int vagrant_cooldown = 300;
+    int vagrant_humanity = 1;
+    bool vagrant_check_on_arrival = true;
     // Dark Souls' Steam achievements unlock while the game runs as Spacewar (achievements.cpp): a helper runs as Dark
     // Souls for them.
     bool steam_achievements = true;

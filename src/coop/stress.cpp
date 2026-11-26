@@ -22,6 +22,7 @@
 #include "partylist.h"
 #include "players.h"
 #include "session.h"
+#include "steam.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <vector>
 
 namespace coop::stress {
@@ -596,6 +598,37 @@ bool remote(const char* line, char* reply, size_t size) {
     }
     if (std::strcmp(cmd, "ach") == 0) {
         achievements::test(line, reply, size);
+        return true;
+    }
+    if (std::strcmp(cmd, "lobbydump") == 0) {
+        // lobbydump [N] [all]: the game's own lobby search on Spacewar (keys 1000000c = I46, 1000000d = I7; no tag)
+        // asking for up to N (50) results; the log has each owner's lobby count and tag, or with "all" every lobby's
+        // keys.
+        int n = 50;
+        char what[8] = "";
+        sscanf_s(line, "%*s %d %7s", &n, what, static_cast<unsigned>(sizeof(what)));
+        const bool all = std::strcmp(what, "all") == 0;
+        steam::find_lobbies({{"1000000c", "I46"}, {"1000000d", "I7"}}, n, [n, all](std::vector<uint64_t> lobbies) {
+            LOG_INFO("[diag] lobbydump: %zu lobbies (asked for up to %d)", lobbies.size(), n);
+            std::map<std::string, std::pair<int, std::string>> owners;  // 2000000e+f text -> lobbies, tag
+            for (uint64_t lobby : lobbies) {
+                std::string kv, e, f, tag;
+                for (const auto& [k, v] : steam::lobby_all_data(lobby)) {
+                    kv += " " + k + "=" + v;
+                    if (k == "2000000e") e = v;
+                    if (k == "2000000f") f = v;
+                    if (k == "ptdesc_game") tag = v;
+                }
+                auto& o = owners[e + "/" + f];
+                ++o.first;
+                o.second = tag;
+                if (all) LOG_INFO("[diag] lobby %016llx:%s", static_cast<unsigned long long>(lobby), kv.c_str());
+            }
+            for (const auto& [id, o] : owners) {
+                LOG_INFO("[diag] lobbydump owner %s: %d lobby(ies), tag '%s'", id.c_str(), o.first, o.second.c_str());
+            }
+        });
+        std::snprintf(reply, size, "lobbydump: searching up to %d (see the log)", n);
         return true;
     }
     if (std::strcmp(cmd, "notice") == 0) {

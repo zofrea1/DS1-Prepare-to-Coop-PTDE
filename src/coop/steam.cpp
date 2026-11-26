@@ -643,10 +643,19 @@ void create_lobby(int max_members, LobbyResult done) {
 
 void find_lobbies(const std::vector<std::pair<std::string, std::string>>& equal, int max_results,
                   std::function<void(std::vector<uint64_t>)> done) {
+    find_lobbies_except(equal, {}, max_results, std::move(done));
+}
+
+void find_lobbies_except(const std::vector<std::pair<std::string, std::string>>& equal,
+                         const std::vector<std::pair<std::string, std::string>>& not_equal, int max_results,
+                         std::function<void(std::vector<uint64_t>)> done) {
     Bypass bypass;
     if (!g_mm) return done({});
     for (const auto& kv : equal) {
         g_mm->AddRequestLobbyListStringFilter(kv.first.c_str(), kv.second.c_str(), k_ELobbyComparisonEqual);
+    }
+    for (const auto& kv : not_equal) {
+        g_mm->AddRequestLobbyListStringFilter(kv.first.c_str(), kv.second.c_str(), k_ELobbyComparisonNotEqual);
     }
     g_mm->AddRequestLobbyListDistanceFilter(k_ELobbyDistanceFilterWorldwide);
     g_mm->AddRequestLobbyListResultCountFilter(max_results);
@@ -687,6 +696,17 @@ std::string lobby_data(uint64_t lobby, const char* key) {
     if (!g_mm || !lobby) return {};
     const char* v = g_mm->GetLobbyData(CSteamID(lobby), key);
     return v ? v : "";
+}
+
+std::vector<std::pair<std::string, std::string>> lobby_all_data(uint64_t lobby) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (!g_mm || !lobby) return out;
+    const int n = g_mm->GetLobbyDataCount(CSteamID(lobby));
+    for (int i = 0; i < n && i < 64; ++i) {
+        char k[256] = "", v[256] = "";
+        if (g_mm->GetLobbyDataByIndex(CSteamID(lobby), i, k, sizeof(k), v, sizeof(v))) out.emplace_back(k, v);
+    }
+    return out;
 }
 
 void set_lobby_joinable(uint64_t lobby, bool joinable) {

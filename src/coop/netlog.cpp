@@ -18,6 +18,7 @@
 #include <cstring>
 #include <cwchar>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <tuple>
@@ -301,6 +302,101 @@ void search_ptc() {
     });
 }
 
+// Every PTDE game on Spacewar, not only ours (the user, 2026-11-26: would more links bring anything, as DSCM's did?):
+// a search with the game's own filter only (its lobbies' keys 1000000c = "I46", 1000000d = "I7"; no tag, so unmodded
+// games and other Prepare to Co-op tags come too), next to our tagged one every minute. Its line, when the numbers
+// change: how many games there are of each kind and how many of each the game is linked with.
+// Steam returns at most 50 lobbies, and on 2026-11-26 one unmodded game held 46 of them (it makes lobbies and never
+// leaves them): an owner with three or more is left out of the next search (its 2000000f, the low half of its Steam
+// id, not equal), up to four searches, so the games behind it are counted too.
+struct Census {
+    std::set<uint64_t> lobbies;  // ours left out
+    int searches = 0;
+    std::set<uint64_t> ours, other_tag, unmodded;  // their owners
+    std::map<uint64_t, int> heavy;                 // owners with three or more lobbies: how many
+};
+std::mutex g_census_lock;
+Census g_census;
+bool g_census_new = false;
+std::string g_census_last;
+int g_census_lines = 0;
+
+void census_search(std::shared_ptr<Census> c, std::vector<std::pair<std::string, std::string>> except) {
+    steam::find_lobbies_except(
+        {{"1000000c", "I46"}, {"1000000d", "I7"}}, except, 50,
+        [c, except](std::vector<uint64_t> lobbies) mutable {
+            ++c->searches;
+            const std::string tag = session::game_tag();
+            const uint64_t me = steam::self();
+            std::map<uint64_t, std::pair<int, std::string>> per;  // owner -> lobbies here, its 2000000f
+            for (uint64_t lobby : lobbies) {
+                const uint64_t owner = lobby_owner_key(lobby);
+                if (owner == me) continue;
+                c->lobbies.insert(lobby);
+                if (!owner) continue;
+                auto& o = per[owner];
+                ++o.first;
+                o.second = steam::lobby_data(lobby, "2000000f");
+                const std::string t = steam::lobby_data(lobby, "ptdesc_game");
+                (t.empty() ? c->unmodded : t == tag ? c->ours : c->other_tag).insert(owner);
+            }
+            bool more = false;
+            for (const auto& [owner, o] : per) {
+                if (o.first < 3 || o.second.empty()) continue;
+                c->heavy[owner] += o.first;
+                except.emplace_back("2000000f", o.second);
+                more = true;
+            }
+            if (lobbies.size() >= 50 && more && c->searches < 4) return census_search(c, except);
+            std::lock_guard<std::mutex> lock(g_census_lock);
+            g_census = *c;
+            g_census_new = true;
+        });
+}
+
+void search_all() { census_search(std::make_shared<Census>(), {}); }
+
+void report_census() {
+    Census c;
+    {
+        std::lock_guard<std::mutex> lock(g_census_lock);
+        if (!g_census_new) return;
+        g_census_new = false;
+        c = g_census;
+    }
+    std::set<uint64_t> linked;
+    for (const auto& n : read_nodes()) linked.insert(n.id);
+    auto with = [&](const std::set<uint64_t>& ids) {
+        int n = 0;
+        for (uint64_t id : ids) n += linked.count(id) ? 1 : 0;
+        return n;
+    };
+    std::string heavy;
+    for (const auto& [owner, n] : c.heavy) {
+        char h[80];
+        std::snprintf(h, sizeof(h), "%s%016llx %d", heavy.empty() ? "" : ", ", static_cast<unsigned long long>(owner), n);
+        heavy += h;
+    }
+    char b[600];
+    std::snprintf(b, sizeof(b),
+                  "%zu game(s) in %d lobbies (the game's own search; %d search(es)): %zu Prepare to Co-op with our tag "
+                  "(%d linked with us), %zu Prepare to Co-op with another tag (%d linked), %zu unmodded (%d linked); "
+                  "linked with %zu in all",
+                  c.ours.size() + c.other_tag.size() + c.unmodded.size(), static_cast<int>(c.lobbies.size()), c.searches,
+                  c.ours.size(),
+                  with(c.ours), c.other_tag.size(), with(c.other_tag), c.unmodded.size(), with(c.unmodded),
+                  linked.size());
+    // A line when the games or links change (not each time a flooding game's lobby count moves).
+    const std::string key = std::to_string(c.ours.size()) + "/" + std::to_string(with(c.ours)) + "/" +
+                            std::to_string(c.other_tag.size()) + "/" + std::to_string(c.unmodded.size()) + "/" +
+                            std::to_string(with(c.unmodded)) + "/" + std::to_string(linked.size());
+    if (g_census_last == key || g_census_lines >= 300) return;
+    g_census_last = key;
+    ++g_census_lines;
+    LOG_INFO("[net] Dark Souls games on Spacewar now: %s%s%s", b,
+             heavy.empty() ? "" : "; games holding many lobbies (left out of the next search): ", heavy.c_str());
+}
+
 const char* kind_of(uint64_t id) {
     std::lock_guard<std::mutex> lock(g_ptc_lock);
     const auto it = g_ptc.find(id);
@@ -398,7 +494,9 @@ void tick() {
     if (game::player() && steam::ready() && now >= g_next_ptc_search) {
         g_next_ptc_search = now + 60000;
         search_ptc();
+        search_all();
     }
+    report_census();
     if (!g_next_summary) g_next_summary = now + 300000;
     if (now < g_next_summary) return;
     g_next_summary = now + 300000;

@@ -30,12 +30,18 @@ uint32_t server_time();
 // Lobbies. Results arrive on the game thread from inside SteamAPI_RunCallbacks.
 using LobbyResult = std::function<void(bool ok, uint64_t lobby)>;
 void create_lobby(int max_members, LobbyResult done);
+// `not_equal`: keys whose value must differ (a lobby without the key passes). Steam returns at most 50.
+void find_lobbies_except(const std::vector<std::pair<std::string, std::string>>& equal,
+                         const std::vector<std::pair<std::string, std::string>>& not_equal, int max_results,
+                         std::function<void(std::vector<uint64_t>)> done);
 void find_lobbies(const std::vector<std::pair<std::string, std::string>>& equal, int max_results,
                   std::function<void(std::vector<uint64_t>)> done);
 void join_lobby(uint64_t lobby, LobbyResult done);
 void leave_lobby(uint64_t lobby);
 bool set_lobby_data(uint64_t lobby, const char* key, const char* value);
 std::string lobby_data(uint64_t lobby, const char* key);
+// Every key and value of a lobby (one from a search result, or one we are in).
+std::vector<std::pair<std::string, std::string>> lobby_all_data(uint64_t lobby);
 void set_lobby_joinable(uint64_t lobby, bool joinable);
 uint64_t lobby_owner(uint64_t lobby);
 std::vector<uint64_t> lobby_members(uint64_t lobby);

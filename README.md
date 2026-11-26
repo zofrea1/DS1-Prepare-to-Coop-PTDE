@@ -8,6 +8,7 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 
 | Release | Includes |
 | --- | --- |
+| Prepare to Co-op Edition 2.7.0 | DS1 PTDE FPS Unlock 3.1.0 |
 | Prepare to Co-op Edition 2.6.0 | DS1 PTDE FPS Unlock 3.0.0 |
 | Prepare to Co-op Edition 2.5.0 | DS1 PTDE FPS Unlock 2.9.0 |
 | Prepare to Co-op Edition 2.4.0 | DS1 PTDE FPS Unlock 2.8.0 |
@@ -26,6 +27,20 @@ It is inspired by Yui's **Seamless Co-op** for Dark Souls Remastered. Nothing of
 | Prepare to Co-op Edition 1.2.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.1.0 | DS1 PTDE FPS Unlock 1.8.0 |
 | Prepare to Co-op Edition 1.0.0 | DS1 PTDE FPS Unlock 1.7.0 |
+
+## What's new in 2.7.0
+
+- **What you saw happen goes home**: world progress witnessed in a session (bosses as before, both Bells of Awakening, Sen's gate, New Londo's drain, shortcuts and doors, Anor Londo's darkness) is yours too, with what it needs; the endgame stays your own. Every NPC death goes home, and an NPC's step when that NPC stands on the same step in your world.
+- **Steam achievements** (`SteamAchievements`): Dark Souls' achievements unlock although the game runs as Spacewar, and a bell rung or a boss defeated in a co-op session unlocks for everyone in it.
+- **Vagrants come**: lost items and humanity reach other players after 2 games instead of 10, arrive while you are in their area, rest 5 minutes after one instead of 30 to 40, and Firelink Shrine gets vagrant spots (`Vagrant...` settings).
+- **Invasions**: invaders and co-op players share dropped items; an invader passes over the world it just invaded for 30 s; group invasions reach slow hosts; worlds of an older version are told to update.
+- **More links with other players** (`LinkUnmoddedGames`): your game also links with unmodded Prepare to Die Edition players on Spacewar, for more messages, bloodstains, ghosts and vagrants. Co-op and invasions stay between Prepare to Co-op players.
+- **Other players' feet on stairs and slopes** (`FootIkPlayers`), Blighttown's bell heard nearby, the network's extras in the log (`NetworkEventLog`), and up to 64 players (`MaxPlayers`, experimental).
+- **Fixed**: the Death Knell's view no longer lets the kneeling game take over and be paid for the enemies around the teammate it watches.
+- **Includes the DS1 PTDE FPS Unlock 3.1.0**: anti-aliasing switched by the mod (`AntialiasingSamples`; with the default 2x it is on even when the game's own option is off), NPCs' feet on stairs and slopes (`FootIkNpcs`), swaying trees (contributed, off by default), the settings page from anywhere in the System menu and on the Steam Deck, and Darkroot's popping bushes fixed.
+- **Plays with 1.5.0 to 2.6.0** (the same co-op protocol). Above eight players every game in the session needs 2.7.0.
+
+The details are in the [2.7.0 release notes](release-notes/v2.7.0.md) and the FPS Unlock's [3.1.0 release notes](https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered/releases/tag/v3.1.0-PTDE-DX9).
 
 ## What's new in 2.6.0
 

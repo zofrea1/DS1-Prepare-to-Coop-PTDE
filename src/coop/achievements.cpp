@@ -17,6 +17,7 @@
 // leave the game.
 #include "achievements.h"
 
+#include "hook.h"
 #include "log.h"
 #include "steam.h"
 #include "steam_abi.h"
@@ -256,12 +257,84 @@ bool start_helper() {
     return true;
 }
 
+// ---------------------------------------------------------------- world events witnessed in a co-op session
+// The map scripts award these with EMEVD 2003[28] (handler 0xBC21BF -> 0xF7F790) to the player whose game runs the
+// event: the one who rang a bell (the lever is theirs), and for a boss whoever's game saw it die (a co-op guest's
+// events run as the host's: rules.cpp hk_multiplay_test). A player elsewhere in the session got neither, though the
+// event itself goes home with them (world::goes_home_witnessed). The user's rule (2026-11-26): everyone in a co-op
+// session when it happens gets the achievement, wherever they stand. The flag is the award event's own: it comes on as
+// the event ends, and rules.cpp share_event_end sends it to the others. Invaders keep the vanilla rule (session.cpp).
+// Not here: Reach Anor Londo (33, 11500210), as every player takes the carry themselves; Reach Lordran (28) and the
+// endings (1, 2), each player's own.
+struct Witnessed {
+    int flag;
+    int achievement;
+    const char* what;
+};
+constexpr Witnessed kWitnessed[] = {
+    {11010700, 29, "the Undead Parish's bell rung"},  // m10_01
+    {11400200, 30, "Quelaag's Domain's bell rung"},   // m14_00
+    {11310001, 35, "Gravelord Nito defeated"},        // m13_01
+    {11410001, 36, "the Bed of Chaos defeated"},      // m14_01
+    {11600001, 37, "the Four Kings defeated"},        // m16_00
+    {11700001, 38, "Seath the Scaleless defeated"},   // m17_00
+    {11510900, 39, "Dark Sun Gwyndolin defeated"},    // m15_01
+    {11100000, 40, "Crossbreed Priscilla defeated"},  // m11_00
+};
+constexpr uint32_t kTrophyHolder = 0x0137CE14;  // +4: the trophy manager, as the 2003[28] handler reads it
+constexpr uint32_t kAward = 0x00F7F790;  // fastcall(ecx = number; stack: trophy manager), ret 4: queues the unlock
+using AwardFn = void(__fastcall*)(int, int, uint32_t);
+
+const Witnessed* find_witnessed(int flag) {
+    for (const Witnessed& w : kWitnessed) {
+        if (w.flag == flag) return &w;
+    }
+    return nullptr;
+}
+
+bool call_award(int achievement, uint32_t man) {
+    __try {
+        reinterpret_cast<AwardFn>(kAward)(achievement, 0, man);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 }  // namespace
+
+bool witnessed_award(int flag) { return find_witnessed(flag) != nullptr; }
+
+void witnessed(int flag, const char* from) {
+    const Witnessed* w = find_witnessed(flag);
+    if (!w) return;
+    // push -1 ; push 0x10528E4 (this build's award function)
+    static const uint8_t kStart[7] = {0x6A, 0xFF, 0x68, 0xE4, 0x28, 0x05, 0x01};
+    uint32_t holder = 0, man = 0;
+    if (std::memcmp(reinterpret_cast<const void*>(kAward), kStart, sizeof(kStart)) != 0 ||
+        !read32(kTrophyHolder, &holder) || !holder || !read32(holder + 4, &man) || !man) {
+        LOG_INFO("[coop] Achievements: %s in our session (word from %s), but the game's achievement award was not "
+                 "found; not given", w->what, from);
+        return;
+    }
+    const bool ok = call_award(w->achievement, man);
+    LOG_INFO("[coop] Achievements: %s in our session (word from %s): ACH_%02d for us too%s", w->what, from,
+             w->achievement, ok ? "" : " (the game's award call failed)");
+}
 
 void test(const char* line, char* reply, size_t size) {
     char what[8] = "";
     int i = -1;
     sscanf_s(line, "%*s %7s %d", what, static_cast<unsigned>(sizeof(what)), &i);
+    if (std::strcmp(what, "witness") == 0) {
+        if (!witnessed_award(i)) {
+            std::snprintf(reply, size, "ach witness %d: not an award event's flag", i);
+            return;
+        }
+        witnessed(i, "a test");
+        std::snprintf(reply, size, "ach witness %d: done (see the log)", i);
+        return;
+    }
     HMODULE api = GetModuleHandleA("steam_api.dll");
     auto get_stats = api ? reinterpret_cast<void* (*)()>(GetProcAddress(api, "SteamUserStats")) : nullptr;
     void* stats = get_stats ? get_stats() : nullptr;

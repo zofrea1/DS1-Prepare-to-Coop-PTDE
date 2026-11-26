@@ -2,6 +2,7 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "session.h"
 
+#include "achievements.h"
 #include "deadlist.h"
 #include "drops.h"
 #include "game.h"
@@ -6316,7 +6317,14 @@ void on_message(uint64_t from, const uint8_t* data, uint32_t size) {
                     LOG_INFO("[coop] flag %d %s: from %s", m.f[i].id, m.f[i].on ? "on" : "off",
                              steam::persona(from).c_str());
                 }
+                // A bell rung or a boss defeated in another player's game while we are in the session: its
+                // achievement for us too, wherever we stand (not as an invader: achievements.cpp witnessed).
+                const bool award = m.f[i].on && !g_invade && achievements::witnessed_award(m.f[i].id) &&
+                                   !game::flag(m.f[i].id);
                 rules::apply_remote_flag(m.f[i].id, m.f[i].on != 0);
+                if (award && game::flag(m.f[i].id)) {
+                    achievements::witnessed(m.f[i].id, steam::persona(from).c_str());
+                }
             }
             if (from_guest) broadcast_raw(data, size, true, from);  // pass a guest's progress on
             break;

@@ -649,6 +649,7 @@ constexpr const wchar_t* kMsgGroupTravel = L"Not while the party travels";
 constexpr const wchar_t* kMsgGroupFallen = L"Not while you are fallen";
 constexpr const wchar_t* kMsgGroupOld = L"{} needs Prepare to Co-op 1.6.0 to invade together";
 constexpr const wchar_t* kMsgGroupWait = L"Wait until {} stands in your world";
+constexpr const wchar_t* kMsgGroupTooMany = L"A group invasion takes up to eight players (yours has {})";
 constexpr const wchar_t* kMsgGroupGoLeader = L"Your group invades another world. Your world closes for now";
 constexpr const wchar_t* kMsgGroupGoSolo = L"Invading another world. Your world closes for now";
 constexpr const wchar_t* kMsgGroupGoMember = L"Your group invades another world. Going home first...";
@@ -5398,6 +5399,7 @@ std::wstring group_refusal(std::vector<uint64_t>* guests) {
     if (held_places(0) > 0) return kMsgGroupIncoming;
     if (boss_fight_in_world()) return kMsgGroupBoss;
     if (trip_slot_busy() || g_travel_bonfire >= 0) return kMsgGroupTravel;
+    int size = 1;
     for (uint64_t id : g_admitted) {
         const PeerInfo* p = find_peer(id);
         if (!p || p->invader || now() - p->last_seen > 10.0) continue;
@@ -5406,8 +5408,12 @@ std::wstring group_refusal(std::vector<uint64_t>* guests) {
         if (p->arrived_at == 0 || p->dead || p->event_anim == kReportLoading || p->event_anim == kReportCutscene) {
             return fmt(kMsgGroupWait, shown_name(*p));
         }
+        ++size;
         if (guests) guests->push_back(id);
     }
+    // The group messages hold eight players (kGroupMax, their layout since 1.6.0, which older games read): above eight
+    // (MaxPlayers, 2.7.0) the ninth and on were left out of the ask and the go, and sent home when our world closed.
+    if (size > kGroupMax) return fmt(kMsgGroupTooMany, std::to_wstring(size));
     return L"";
 }
 

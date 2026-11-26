@@ -584,7 +584,8 @@ __declspec(naked) void hk_msb_load() {
     }
 }
 
-// Characters standing near a point (not our spots' own, which wait at their place's first point).
+// Characters standing near a point (not our spots' own, which wait around their place's first point: the three of a
+// place push one another up to a few tenths of a metre apart).
 bool someone_near(const game::Vec3& at) {
     uint32_t wcm = 0, sets_info = 0, nsets = 0;
     if (!read32(game::kWorldChrManVar, &wcm) || !wcm || !read32(wcm + 0x10, &sets_info) || !sets_info ||
@@ -599,14 +600,13 @@ bool someone_near(const game::Vec3& at) {
             if (!read32(entries + i * 0x20, &chr) || !chr || !read32(chr + 0x2D4, &hp) || static_cast<int32_t>(hp) <= 0) {
                 continue;
             }
+            uint32_t entity = 0;
+            read32(chr + 0x208, &entity);
+            if (static_cast<int>(entity) >= kSpotBase && static_cast<int>(entity) < kSpotBase + 10 * kPlaceCount) continue;
             game::Vec3 p{};
             if (!game::chr_position(chr, &p)) continue;
-            bool spot = false;
-            for (const Place& pl : kPlaces) {
-                spot = spot || (std::fabs(p.x - pl.at[0].x) < 0.05f && std::fabs(p.z - pl.at[0].z) < 0.05f);
-            }
             const float dx = p.x - at.x, dz = p.z - at.z;
-            if (!spot && std::fabs(p.y - at.y) < 3.0f && dx * dx + dz * dz < kClear * kClear) return true;
+            if (std::fabs(p.y - at.y) < 3.0f && dx * dx + dz * dz < kClear * kClear) return true;
         }
     }
     return false;
@@ -725,7 +725,23 @@ void note_index(int map_index) {
     if (g_load_indices.size() < 32) g_load_indices.insert(map_index);
 }
 
+// Firelink's check after its load (2026-11-25): a load runs the check before the map's characters are made, and when
+// Firelink was loaded already (a death or a warp there, the hub's usual loads) the spot reserved was the old vagrant
+// enemy's, made again a moment later with its reservation gone: the vagrant was passed on instead of coming. So the
+// check for Firelink waits for the load to end and our character to stand there (kFirelinkCheckDelay), as a check run
+// then did come every time; a load that ends away from Firelink's map leaves it to Firelink's next load.
+constexpr ULONGLONG kFirelinkCheckDelay = 1500;
+volatile LONG g_firelink_waiting = 0;
+ULONGLONG g_firelink_ready_at = 0;
+bool g_firelink_now = false;  // the check that waited, run now
+
 void __cdecl hk_check(int map_index) {
+    if (map_index == kFirelinkIndex && g_spots_in && !g_firelink_now) {
+        InterlockedExchange(&g_firelink_waiting, 1);
+        g_firelink_ready_at = 0;
+        note_index(map_index);
+        return;
+    }
     std::string where;
     int placed = 0;
     if (map_index == kFirelinkIndex && g_spots_in) place_firelink(&where, &placed);
@@ -847,6 +863,28 @@ void tick() {
     if (InterlockedExchange(&g_test_pending, 0)) run_test();
     const LONG check_index = InterlockedExchange(&g_check_pending, -1);
     if (check_index >= 0) hk_check(static_cast<int>(check_index));
+    if (g_firelink_waiting) {
+        if (game::loading() || !game::player()) {
+            g_firelink_ready_at = 0;
+        } else if (!g_firelink_ready_at) {
+            g_firelink_ready_at = GetTickCount64() + kFirelinkCheckDelay;
+        } else if (GetTickCount64() >= g_firelink_ready_at) {
+            InterlockedExchange(&g_firelink_waiting, 0);
+            // Only where Firelink's map is loaded: Firelink, or the Undead Burg it loads with (the check also lays the
+            // vagrants not yet far enough on its ground, which needs its map).
+            const uint32_t here = static_cast<uint32_t>(game::map_id());
+            const bool run = here == 0x0A020000u || here == 0x0A010000u;
+            if (g_s.log) {
+                LOG_INFO("[net] Vagrants: Firelink's check, held until its load ended: %s (we are in map %08X, %d held)",
+                         run ? "run now" : "left to Firelink's next load", here, held());
+            }
+            if (run) {
+                g_firelink_now = true;
+                hk_check(kFirelinkIndex);
+                g_firelink_now = false;
+            }
+        }
+    }
     watch_window();
     if (g_s.log && game::player()) {
         std::string list;

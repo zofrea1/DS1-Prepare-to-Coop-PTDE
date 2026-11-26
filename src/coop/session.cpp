@@ -1263,6 +1263,7 @@ std::string version_text(const PeerVersion& v) {
 struct Mismatch {
     bool active = false;
     PeerVersion host;
+    bool no_one = false;  // an invader's knock while no world of our version could take us: then say why (finish_search)
 };
 Mismatch g_mismatch;
 // The other-version worlds an invader's search knocked on in this run (the user's request, 2026-11-25: players of 1.2.0,
@@ -1305,6 +1306,23 @@ void show_invade_mismatch_host(const PeerVersion& host) {
 }
 
 // `invading`: read before finish(), which ends the search (and its g_invade).
+void finish_search(const wchar_t* fallback);  // below
+void finish(const std::wstring& why);           // below
+void show_mismatch(const PeerVersion& host, bool invading);  // below
+
+// The end of a knock on a world of another version (g_mismatch): what the joiner or invader is told.
+void end_mismatch(const PeerVersion& host) {
+    if (g_mismatch.no_one) {
+        LOG_INFO("[coop] Our knock on a world of another version (Prepare to Co-op %s) is done; no world of ours could "
+                 "take us", version_text(host).c_str());
+        finish_search(kMsgNoOne);
+        return;
+    }
+    const bool invading = g_invade;
+    finish(L"");
+    show_mismatch(host, invading);
+}
+
 void show_mismatch(const PeerVersion& host, bool invading) {
     if (invading) {
         show_invade_mismatch_host(host);
@@ -3471,9 +3489,7 @@ void join_world(uint64_t pick) {
         }
         if (!ok) {
             if (g_mismatch.active) {
-                const bool invading = g_invade;
-                finish(L"");
-                show_mismatch(g_mismatch.host, invading);
+                end_mismatch(g_mismatch.host);
                 return;
             }
             if (!try_next_world("could not enter its lobby")) finish_search(kMsgConnectTimeout);
@@ -3611,8 +3627,28 @@ void issue_search() {
                          "as many invaders as they take", cooling, fighting, full);
             }
             if (open.empty()) {
-                finish_search(kMsgNoOne);
-                return;
+                // None of our version can take us now (2026-11-25: DarKevin's world on cooldown beside Confusion's of
+                // 1.2.0): a knock on a world of another version not knocked on in this run tells its host why, and
+                // then the invader hears why nobody could take them.
+                uint64_t knock = 0;
+                for (uint64_t l : other) {
+                    if (!g_version_knocked.count(l)) {
+                        knock = l;
+                        break;
+                    }
+                }
+                if (!knock) {
+                    finish_search(kMsgNoOne);
+                    return;
+                }
+                g_version_knocked.insert(knock);
+                LOG_INFO("[coop] Knocking on a world of another version (protocol %u, Prepare to Co-op %s) so its host "
+                         "learns why invaders cannot come in (no world of ours can take us now)",
+                         lobby_version(knock).protocol, version_text(lobby_version(knock)).c_str());
+                g_mismatch.active = true;
+                g_mismatch.host = lobby_version(knock);
+                g_mismatch.no_one = true;
+                open.push_back(knock);
             }
             found.swap(open);
         } else {
@@ -3682,9 +3718,7 @@ void guest_on_welcome(const Welcome& w, uint32_t wait_s) {
     if (w.status == kVersion || (w.status != kOk && g_mismatch.active)) {
         LOG_INFO("[coop] The host refused us (status %u: another Prepare to Co-op version)", w.status);
         const PeerVersion host = g_mismatch.active ? g_mismatch.host : lobby_version(g_lobby);
-        const bool invading = g_invade;
-        finish(L"");
-        show_mismatch(host, invading);
+        end_mismatch(host);
         return;
     }
     if (w.status != kOk) {
@@ -4149,9 +4183,7 @@ void guest_tick() {
             break;
         case Step::Hello:
             if (in_step > kHelloWait && g_mismatch.active) {
-                const bool invading = g_invade;
-                finish(L"");
-                show_mismatch(g_mismatch.host, invading);
+                end_mismatch(g_mismatch.host);
             } else if (in_step > kHelloWait) {
                 if (g_hello_tries < knock_limit(g_last_busy)) {
                     guest_send_hello();

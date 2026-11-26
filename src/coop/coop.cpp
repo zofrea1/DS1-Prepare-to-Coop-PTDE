@@ -2,6 +2,13 @@
 // Copyright (C) 2026 zofrea1. Prepare to Co-op Edition; see LICENSE and NOTICE.md.
 #include "coop.h"
 
+#if __has_include("ptc_build.h")
+#include "ptc_build.h"  // build.bat: the commit this build is made from
+#endif
+#ifndef PTC_COMMIT
+#define PTC_COMMIT "unknown"
+#endif
+
 #include "crterror.h"
 #include "deathtext.h"
 #include "drops.h"
@@ -502,6 +509,7 @@ void coop_install(const CoopConfig& config) {
         LOG_INFO("[coop] Prepare to Co-op: off");
         return;
     }
+    LOG_INFO("[coop] Prepare to Co-op: build %s", PTC_COMMIT);
     LOG_INFO("[coop] Prepare to Co-op: on (Steam app %d, password %s, invaders %s, max %d players)", g_cfg.app_id,
              g_cfg.password[0] ? "set" : "EMPTY", g_cfg.allow_invaders ? "allowed" : "off",
              std::min(std::max(2, g_cfg.max_players), coop::players::max_players()));

@@ -18,7 +18,13 @@ set RSP=build\sources.rsp
 > %RSP% (for /f "usebackq eol=# delims=" %%f in ("fps-unlock\src\ptde\sources.txt") do @echo fps-unlock\%%f)
 >> %RSP% (for /f "usebackq eol=# delims=" %%f in ("src\sources.txt") do @echo %%f)
 
-cmd /c "call %VCVARS% x86 && rc /nologo /fo build\obj\coop.res src\coop.rc && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD /Ifps-unlock\src\common /Ifps-unlock\src\ptde /Ifps-unlock\third_party\vulkan\include /Isrc @%RSP% build\obj\coop.res /Fobuild\obj\ /Febuild\xinput1_3.dll /link /DEF:fps-unlock\src\ptde\xinput1_3.def /OPT:REF /MAP:build\xinput1_3.map"
+rem The commit this build is made from ("+" when the tree has changes), for the log's first co-op line.
+set COMMIT=unknown
+for /f %%h in ('git rev-parse --short HEAD 2^>nul') do set COMMIT=%%h
+git diff --quiet HEAD -- 2>nul || set COMMIT=%COMMIT%+
+> build\obj\ptc_build.h echo #define PTC_COMMIT "%COMMIT%"
+
+cmd /c "call %VCVARS% x86 && rc /nologo /fo build\obj\coop.res src\coop.rc && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD /Ifps-unlock\src\common /Ifps-unlock\src\ptde /Ifps-unlock\third_party\vulkan\include /Isrc /Ibuild\obj @%RSP% build\obj\coop.res /Fobuild\obj\ /Febuild\xinput1_3.dll /link /DEF:fps-unlock\src\ptde\xinput1_3.def /OPT:REF /MAP:build\xinput1_3.map"
 if errorlevel 1 exit /b 1
 
 set PSModulePath=

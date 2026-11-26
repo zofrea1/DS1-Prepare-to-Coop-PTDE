@@ -39,5 +39,9 @@ int targets();
 void add_test(int map_index, int wanders, bool humanity, uint32_t item = 0);
 // Test (RemoteControl "vagrantcheck N"): on the next frame, the map check for map index N, as a load runs it.
 void check_test(int map_index);
+// The bonfire's test for hostile characters on its floors (rules.cpp, 0xE3DF90) is about to run for `bonfire`
+// (`before`), or has run: the enemies of our Firelink spots that wait for a vagrant are left out of it, as the game's
+// own spots never stand on a bonfire's floor.
+void bonfire_test(int bonfire, bool before);
 
 }  // namespace coop::vagrants

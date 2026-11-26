@@ -607,6 +607,13 @@ bool remote(const char* line, char* reply, size_t size) {
         std::snprintf(reply, size, "notice: shown");
         return true;
     }
+    if (std::strcmp(cmd, "vagrantcheck") == 0) {
+        int index = 2;
+        sscanf_s(line, "%*s %d", &index);
+        vagrants::check_test(index);
+        std::snprintf(reply, size, "vagrantcheck %d: next frame", index);
+        return true;
+    }
     if (std::strcmp(cmd, "vagrant") == 0) {
         // vagrant [map index (-1: the last checked)] [wander count] [h: humanity]: one at our feet, as if passed on.
         int index = -1, wanders = 2;

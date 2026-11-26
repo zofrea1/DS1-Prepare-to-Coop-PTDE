@@ -107,6 +107,8 @@ CoopConfig coop_config_load(const wchar_t* dll_path) {
             c.vagrant_stay = std::atoi(val.c_str());
         } else if (key == "vagrantpassonatquit") {
             c.vagrant_pass_on_at_quit = settings_parse_bool(val);
+        } else if (key == "vagrantspotsfirelink") {
+            c.vagrant_spots_firelink = settings_parse_bool(val);
         } else if (key == "steamachievements") {
             c.steam_achievements = settings_parse_bool(val);
         } else if (key == "testprotocol") {

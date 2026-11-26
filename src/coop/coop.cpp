@@ -569,7 +569,7 @@ void coop_install(const CoopConfig& config) {
     coop::vanillamp::install();
     coop::netlog::install(g_cfg.network_event_log);
     coop::vagrants::install({g_cfg.vagrant_wanders, g_cfg.vagrant_stay, g_cfg.vagrant_pass_on_at_quit,
-                             g_cfg.network_event_log});
+                             g_cfg.network_event_log, g_cfg.vagrant_spots_firelink});
     coop::handout::install();
     coop::netrate::set_smoothing(g_cfg.net_smoothing);
     coop::netrate::set_dynamic(g_cfg.dynamic_smoothing);
